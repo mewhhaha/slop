@@ -12,13 +12,14 @@ module Seedl
   , defaultConfig
   , WindowM
   , Window(..)
-  , Render
+  , Loop
   , runWindowM
   , runWindow
   , runWindowIO
   , askWindow
   , liftWindow
-  , liftRender
+  , runLoop
+  , liftLoop
   , loop
   , clear
   , setDrawColor
@@ -66,6 +67,7 @@ module Seedl
   , mouseRight
   , mouseX1
   , mouseX2
+  , keySpace
   , keyDown
   , keyPressed
   , keyReleased
@@ -81,11 +83,13 @@ module Seedl
   , rgba
   , Texture(..)
   , Font (..)
+  , Track(..)
   , ShaderAsset(..)
   , SdfFontAsset(..)
   , setFontSDF
   , getFontSDF
   , Text
+  , Audio(..)
   , Shader
   , Drawable(..)
   , DrawItem(..)
@@ -105,6 +109,8 @@ module Seedl
   , TextureAsset(..)
   , FontAsset(..)
   , TextAsset(..)
+  , MusicAsset(..)
+  , ChunkAsset(..)
   , loadAsset
   , loadAssetAsync
   , awaitAsset
@@ -116,6 +122,29 @@ module Seedl
   , removeAllAssets
   , reloadAssetAsync
   , awaitAssetUpdate
+  , playMusic
+  , playMusicLoop
+  , playSound
+  , TrackPool
+  , PoolPolicy(..)
+  , createTrackPool
+  , createTrackPoolFrom
+  , playPool
+  , playPoolLoop
+  , playPoolPriority
+  , playPoolPriorityLoop
+  , stopPool
+  , trackPlaying
+  , BlendPool
+  , createBlendPool
+  , crossfadeTo
+  , crossfadeToLoop
+  , updateBlend
+  , createTrack
+  , destroyTrack
+  , playOn
+  , playOnLoop
+  , stopTrack
   , clearIO
   , presentIO
   , setDrawColorIO
@@ -147,7 +176,7 @@ module Seedl
   ) where
 
 import Control.Exception (SomeException, bracket, bracket_, finally, try)
-import Control.Monad (unless, void)
+import Control.Monad (replicateM, unless, void, when)
 import Control.Concurrent (ThreadId, forkIO)
 import Control.Concurrent.STM
   ( TMVar
@@ -168,14 +197,15 @@ import Control.Concurrent.STM
 import Control.Monad.Reader (MonadReader (..), ReaderT (..))
 import Control.Monad.Writer.Strict (Writer, execWriter, runWriter, tell)
 import Control.Monad.IO.Class (MonadIO (..))
-import Data.Bits ((.&.), shiftL)
+import Data.Bits ((.&.), (.|.), shiftL)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
 import Data.Dynamic (Dynamic, fromDynamic, toDyn)
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
-import Data.IORef (IORef, atomicModifyIORef', newIORef)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
+import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Map.Strict as Map
 import Data.Proxy (Proxy (..))
 import Data.Typeable (TypeRep, Typeable, typeOf, typeRep)
@@ -189,6 +219,9 @@ import Seedl.SDL.Raw
   ( FPoint (..)
   , FRect (..)
   , Font (..)
+  , Mixer(..)
+  , Audio(..)
+  , Track(..)
   , GPUDevice (..)
   , GPUShader (..)
   , GPURenderState (..)
@@ -199,6 +232,22 @@ import Seedl.SDL.Raw
   , TextEngine (..)
   , Texture(..)
   , imgLoadTexture
+  , mixCreateMixerDevice
+  , mixInit
+  , mixQuit
+  , mixDestroyMixer
+  , mixCreateTrack
+  , mixDestroyTrack
+  , mixLoadAudio
+  , mixDestroyAudio
+  , mixSetTrackAudio
+  , mixPlayTrack
+  , mixSetTrackLoops
+  , mixSetTrackGain
+  , mixPlayAudio
+  , mixStopTrack
+  , mixTrackPlaying
+  , sdlAudioDeviceDefaultPlayback
   , sdlCreateTexture
   , sdlCreateGPURenderer
   , sdlCreateGPUShader
@@ -212,10 +261,12 @@ import Seedl.SDL.Raw
   , sdlGetError
   , sdlGetGPURendererDevice
   , sdlGetKeyboardState
+  , sdlGetKeyFromScancode
   , sdlGetTicks
   , sdlGPUShaderFormatSpirv
   , sdlGPUShaderStageFragment
   , sdlInit
+  , sdlInitAudio
   , sdlInitVideo
   , sdlGetWindowSize
   , sdlGetMouseState
@@ -274,6 +325,9 @@ data Window = Window
   , appRenderer :: Renderer
   , appGPUDevice :: GPUDevice
   , appTextEngine :: TextEngine
+  , appMixer :: Mixer
+  , appMusicTrack :: IORef (Maybe Track)
+  , appBlendPools :: IORef [TrackPool]
   , appAssets :: AssetManager
   , appTargets :: IORef (Map.Map (Ptr ()) Texture)
   , appPipelineTargets :: IORef (Map.Map Int (RenderTarget, (Int, Int)))
@@ -283,7 +337,7 @@ data Window = Window
 newtype WindowM a = WindowM (ReaderT Window IO a)
   deriving (Functor, Applicative, Monad, MonadIO, MonadReader Window)
 
-newtype Render a = Render (WindowM a)
+newtype Loop a = Loop (WindowM a)
   deriving (Functor, Applicative, Monad, MonadIO)
 
 data RenderState = RenderState
@@ -319,8 +373,8 @@ runWindowM :: Window -> WindowM a -> IO a
 runWindowM window (WindowM action) =
   runReaderT action window
 
-runRender :: Render a -> WindowM a
-runRender (Render action) = action
+runLoop :: Loop a -> WindowM a
+runLoop (Loop action) = action
 
 runWindow :: Config -> WindowM a -> IO a
 runWindow cfg action = runWindowIO cfg (\window -> runWindowM window action)
@@ -333,11 +387,11 @@ liftWindow f = do
   window <- ask
   liftIO (f window)
 
-liftRender :: WindowM a -> Render a
-liftRender = Render
+liftLoop :: WindowM a -> Loop a
+liftLoop = Loop
 
-withWindowRender :: (Window -> IO a) -> Render a
-withWindowRender f = Render (liftWindow f)
+withWindowLoop :: (Window -> IO a) -> Loop a
+withWindowLoop f = Loop (liftWindow f)
 
 -- Asset manager
 
@@ -368,6 +422,12 @@ data FontAsset = FontAsset FilePath Float
   deriving (Eq, Show)
 
 data TextAsset = TextAsset Font String
+  deriving (Eq, Show)
+
+data MusicAsset = MusicAsset FilePath
+  deriving (Eq, Show)
+
+data ChunkAsset = ChunkAsset FilePath
   deriving (Eq, Show)
 
 data SdfFontAsset = SdfFontAsset FilePath Float
@@ -411,6 +471,26 @@ instance AssetLoader TextAsset where
       Just textObj -> pure (Right textObj)
   unloadAssetIO _ _ = ttfDestroyText
   assetLabel (TextAsset _ str) = str
+
+instance AssetLoader MusicAsset where
+  type AssetType MusicAsset = Audio
+  loadAssetIO app (MusicAsset path) = do
+    result <- mixLoadAudio app.appMixer path False
+    case result of
+      Nothing -> Left <$> sdlGetError
+      Just audio -> pure (Right audio)
+  unloadAssetIO _ _ = mixDestroyAudio
+  assetLabel (MusicAsset path) = path
+
+instance AssetLoader ChunkAsset where
+  type AssetType ChunkAsset = Audio
+  loadAssetIO app (ChunkAsset path) = do
+    result <- mixLoadAudio app.appMixer path True
+    case result of
+      Nothing -> Left <$> sdlGetError
+      Just audio -> pure (Right audio)
+  unloadAssetIO _ _ = mixDestroyAudio
+  assetLabel (ChunkAsset path) = path
 
 instance AssetLoader SdfFontAsset where
   type AssetType SdfFontAsset = Font
@@ -767,7 +847,58 @@ data LoopExit a
   | ExitStopped a
   deriving (Eq, Show)
 
-newtype Key = Key Int
+data Key
+  = KeyA
+  | KeyB
+  | KeyC
+  | KeyD
+  | KeyE
+  | KeyF
+  | KeyG
+  | KeyH
+  | KeyI
+  | KeyJ
+  | KeyK
+  | KeyL
+  | KeyM
+  | KeyN
+  | KeyO
+  | KeyP
+  | KeyQ
+  | KeyR
+  | KeyS
+  | KeyT
+  | KeyU
+  | KeyV
+  | KeyW
+  | KeyX
+  | KeyY
+  | KeyZ
+  | Key0
+  | Key1
+  | Key2
+  | Key3
+  | Key4
+  | Key5
+  | Key6
+  | Key7
+  | Key8
+  | Key9
+  | KeySpace
+  | KeyEnter
+  | KeyEscape
+  | KeyTab
+  | KeyBackspace
+  | KeyLeft
+  | KeyRight
+  | KeyUp
+  | KeyDown
+  | KeyShiftLeft
+  | KeyShiftRight
+  | KeyCtrlLeft
+  | KeyCtrlRight
+  | KeyAltLeft
+  | KeyAltRight
   deriving (Eq, Ord, Show)
 
 newtype MouseButton = MouseButton Word32
@@ -801,12 +932,15 @@ mouseX1 = MouseButton 4
 mouseX2 :: MouseButton
 mouseX2 = MouseButton 5
 
+keySpace :: Key
+keySpace = KeySpace
+
 mouseButtonMask :: MouseButton -> Word32
 mouseButtonMask (MouseButton button) = 1 `shiftL` fromIntegral (button - 1)
 
 keyDown :: Key -> InputState -> Bool
-keyDown (Key scancode) InputState { inputKeysDown = keys } =
-  IntSet.member scancode keys
+keyDown key InputState { inputKeysDown = keys } =
+  IntSet.member (keycodeValue key) keys
 
 keyPressed :: Key -> InputFrame -> Bool
 keyPressed key InputFrame { inputPrev = prevState, inputNow = nowState } =
@@ -815,6 +949,64 @@ keyPressed key InputFrame { inputPrev = prevState, inputNow = nowState } =
 keyReleased :: Key -> InputFrame -> Bool
 keyReleased key InputFrame { inputPrev = prevState, inputNow = nowState } =
   not (keyDown key nowState) && keyDown key prevState
+
+keycodeValue :: Key -> Int
+keycodeValue key =
+  case key of
+    KeyA -> fromEnum 'a'
+    KeyB -> fromEnum 'b'
+    KeyC -> fromEnum 'c'
+    KeyD -> fromEnum 'd'
+    KeyE -> fromEnum 'e'
+    KeyF -> fromEnum 'f'
+    KeyG -> fromEnum 'g'
+    KeyH -> fromEnum 'h'
+    KeyI -> fromEnum 'i'
+    KeyJ -> fromEnum 'j'
+    KeyK -> fromEnum 'k'
+    KeyL -> fromEnum 'l'
+    KeyM -> fromEnum 'm'
+    KeyN -> fromEnum 'n'
+    KeyO -> fromEnum 'o'
+    KeyP -> fromEnum 'p'
+    KeyQ -> fromEnum 'q'
+    KeyR -> fromEnum 'r'
+    KeyS -> fromEnum 's'
+    KeyT -> fromEnum 't'
+    KeyU -> fromEnum 'u'
+    KeyV -> fromEnum 'v'
+    KeyW -> fromEnum 'w'
+    KeyX -> fromEnum 'x'
+    KeyY -> fromEnum 'y'
+    KeyZ -> fromEnum 'z'
+    Key1 -> fromEnum '1'
+    Key2 -> fromEnum '2'
+    Key3 -> fromEnum '3'
+    Key4 -> fromEnum '4'
+    Key5 -> fromEnum '5'
+    Key6 -> fromEnum '6'
+    Key7 -> fromEnum '7'
+    Key8 -> fromEnum '8'
+    Key9 -> fromEnum '9'
+    Key0 -> fromEnum '0'
+    KeyEnter -> fromEnum '\r'
+    KeyEscape -> fromEnum '\ESC'
+    KeyBackspace -> fromEnum '\b'
+    KeyTab -> fromEnum '\t'
+    KeySpace -> fromEnum ' '
+    KeyLeft -> scancodeToKeycode 80
+    KeyRight -> scancodeToKeycode 79
+    KeyUp -> scancodeToKeycode 82
+    KeyDown -> scancodeToKeycode 81
+    KeyCtrlLeft -> scancodeToKeycode 224
+    KeyShiftLeft -> scancodeToKeycode 225
+    KeyAltLeft -> scancodeToKeycode 226
+    KeyCtrlRight -> scancodeToKeycode 228
+    KeyShiftRight -> scancodeToKeycode 229
+    KeyAltRight -> scancodeToKeycode 230
+
+scancodeToKeycode :: Int -> Int
+scancodeToKeycode scancode = scancode .|. 0x40000000
 
 mouseButtonDown :: MouseButton -> InputState -> Bool
 mouseButtonDown button InputState { inputMouseButtonsDown = buttons } =
@@ -883,7 +1075,7 @@ point :: Float -> Float -> FPoint
 point x y = FPoint (realToFrac x) (realToFrac y)
 
 class Drawable a where
-  draw :: a -> Render ()
+  draw :: a -> Loop ()
 
 data DrawItem where
   DrawItem :: Drawable a => a -> DrawItem
@@ -955,7 +1147,7 @@ instance Drawable Label where
 instance Drawable TextDraw where
   draw (TextDraw font str x y) = drawTextCached font str x y
 
-applyShaderUniform :: Shader -> ShaderUniform -> Render ()
+applyShaderUniform :: Shader -> ShaderUniform -> Loop ()
 applyShaderUniform shader uniform =
   case uniform of
     ShaderUniform slot value -> setShaderUniformCached shader slot value
@@ -981,30 +1173,40 @@ runWindowIO cfg action =
         gpu <- require "SDL_GetGPURendererDevice" (sdlGetGPURendererDevice ren)
         textEngine <- require "TTF_CreateRendererTextEngine" (ttfCreateRendererTextEngine ren)
         bracket (pure textEngine) ttfDestroyRendererTextEngine $ \engine -> do
-          targets <- newIORef Map.empty
-          pipelineTargets <- newIORef Map.empty
-          renderState <- newIORef (RenderState Map.empty Map.empty 0)
-          let placeholderAssets = error "AssetManager not initialized"
-          let windowBase = Window
-                { appWindow = win
-                , appRenderer = ren
-                , appGPUDevice = gpu
-                , appTextEngine = engine
-                , appAssets = placeholderAssets
-                , appTargets = targets
-                , appPipelineTargets = pipelineTargets
-                , appRenderState = renderState
-                }
-          bracket (initAssetManager windowBase) (shutdownAssetManager windowBase) $ \assets -> do
-            let windowHandle = windowBase { appAssets = assets }
-            action windowHandle `finally` cleanupRenderTargets windowHandle
+          mixer <- require "MIX_CreateMixerDevice" (mixCreateMixerDevice sdlAudioDeviceDefaultPlayback)
+          bracket (pure mixer) mixDestroyMixer $ \mix -> do
+            musicTrackRef <- newIORef Nothing
+            blendPools <- newIORef []
+            targets <- newIORef Map.empty
+            pipelineTargets <- newIORef Map.empty
+            renderState <- newIORef (RenderState Map.empty Map.empty 0)
+            let placeholderAssets = error "AssetManager not initialized"
+            let windowBase = Window
+                  { appWindow = win
+                  , appRenderer = ren
+                  , appGPUDevice = gpu
+                  , appTextEngine = engine
+                  , appMixer = mix
+                  , appMusicTrack = musicTrackRef
+                  , appBlendPools = blendPools
+                  , appAssets = placeholderAssets
+                  , appTargets = targets
+                  , appPipelineTargets = pipelineTargets
+                  , appRenderState = renderState
+                  }
+            bracket (initAssetManager windowBase) (shutdownAssetManager windowBase) $ \assets -> do
+              let windowHandle = windowBase { appAssets = assets }
+              action windowHandle `finally` cleanupRenderTargets windowHandle
   where
     initSDL = do
-      ok <- sdlInit sdlInitVideo
+      ok <- sdlInit (sdlInitVideo .|. sdlInitAudio)
       unless ok $ die "SDL_Init"
+      okMix <- mixInit
+      unless okMix $ die "MIX_Init"
       okFont <- ttfInit
       unless okFont $ die "TTF_Init"
     shutdownSDL = do
+      mixQuit
       ttfQuit
       sdlQuit
     die label = do
@@ -1060,8 +1262,12 @@ readKeySet ptr count = go 0 IntSet.empty
       | idx >= count = pure acc
       | otherwise = do
           value <- peekByteOff ptr idx :: IO Word8
-          let acc' = if value == 0 then acc else IntSet.insert idx acc
-          go (idx + 1) acc'
+          if value == 0
+            then go (idx + 1) acc
+            else do
+              keycode <- sdlGetKeyFromScancode idx 0 False
+              let acc' = IntSet.insert (fromIntegral keycode) acc
+              go (idx + 1) acc'
 
 readMouseState :: IO (Word32, Vec2)
 readMouseState =
@@ -1175,7 +1381,7 @@ pruneTextCache window = do
 
 -- WindowM wrappers
 
-loop :: a -> (Frame -> a -> Render (LoopControl a)) -> WindowM (LoopExit a)
+loop :: a -> (Frame -> a -> Loop (LoopControl a)) -> WindowM (LoopExit a)
 loop initialState onFrame = do
   window <- ask
   start <- liftIO sdlGetTicks
@@ -1199,7 +1405,8 @@ loop initialState onFrame = do
               , size = (winW, winH)
               , input = InputFrame prevInput currentInput
               }
-        control <- runRender (onFrame frame state)
+        autoUpdateBlendPools dt
+        control <- runLoop (onFrame frame state)
         liftIO (pruneTextCache window)
         liftIO (presentIO window)
         case control of
@@ -1221,23 +1428,29 @@ loop initialState onFrame = do
                 step quitNow
       in step False
 
-clear :: Color -> Render ()
-clear color = withWindowRender (\window -> clearIO window color)
+autoUpdateBlendPools :: Float -> WindowM ()
+autoUpdateBlendPools delta = do
+  window <- ask
+  pools <- liftIO (readIORef window.appBlendPools)
+  mapM_ (\pool -> runLoop (updateBlend pool delta)) pools
 
-setDrawColor :: Color -> Render ()
-setDrawColor color = withWindowRender (\window -> setDrawColorIO window color)
+clear :: Color -> Loop ()
+clear color = withWindowLoop (\window -> clearIO window color)
 
-drawLine :: Color -> FPoint -> FPoint -> Render ()
-drawLine color p1 p2 = withWindowRender (\window -> drawLineIO window color p1 p2)
+setDrawColor :: Color -> Loop ()
+setDrawColor color = withWindowLoop (\window -> setDrawColorIO window color)
 
-drawRect :: Color -> FRect -> Render ()
-drawRect color rectShape = withWindowRender (\window -> drawRectIO window color rectShape)
+drawLine :: Color -> FPoint -> FPoint -> Loop ()
+drawLine color p1 p2 = withWindowLoop (\window -> drawLineIO window color p1 p2)
 
-fillRect :: Color -> FRect -> Render ()
-fillRect color rectShape = withWindowRender (\window -> fillRectIO window color rectShape)
+drawRect :: Color -> FRect -> Loop ()
+drawRect color rectShape = withWindowLoop (\window -> drawRectIO window color rectShape)
 
-drawTexture :: Texture -> Maybe FRect -> FRect -> Render ()
-drawTexture texture src dst = withWindowRender (\window -> drawTextureIO window texture src dst)
+fillRect :: Color -> FRect -> Loop ()
+fillRect color rectShape = withWindowLoop (\window -> fillRectIO window color rectShape)
+
+drawTexture :: Texture -> Maybe FRect -> FRect -> Loop ()
+drawTexture texture src dst = withWindowLoop (\window -> drawTextureIO window texture src dst)
 
 createRenderTarget :: Int -> Int -> WindowM RenderTarget
 createRenderTarget width height = do
@@ -1257,9 +1470,9 @@ destroyTarget (RenderTarget tex) = do
     then liftIO (destroyTextureIO tex)
     else pure ()
 
-render :: RenderTarget -> Render () -> Render ()
-render (RenderTarget tex) (Render action) =
-  Render $ do
+render :: RenderTarget -> Loop () -> Loop ()
+render (RenderTarget tex) (Loop action) =
+  Loop $ do
     window <- ask
     prev <- liftIO (getRenderTargetIO window)
     liftIO $
@@ -1268,14 +1481,14 @@ render (RenderTarget tex) (Render action) =
         (setRenderTargetIO window prev)
         (runWindowM window action)
 
-drawRender :: RenderTarget -> Maybe FRect -> FRect -> Render ()
+drawRender :: RenderTarget -> Maybe FRect -> FRect -> Loop ()
 drawRender (RenderTarget tex) src dst = do
   drawTexture tex src dst
 
-output :: RenderTarget -> Maybe FRect -> FRect -> Render ()
+output :: RenderTarget -> Maybe FRect -> FRect -> Loop ()
 output = drawRender
 
-postProcess :: RenderTarget -> RenderTarget -> Shader -> [ShaderUniform] -> Maybe FRect -> FRect -> Render ()
+postProcess :: RenderTarget -> RenderTarget -> Shader -> [ShaderUniform] -> Maybe FRect -> FRect -> Loop ()
 postProcess (RenderTarget inputTex) (RenderTarget outputTex) shader uniforms src dst = do
   render (RenderTarget outputTex) $ do
     withShader shader $ do
@@ -1312,7 +1525,7 @@ passPostProcess :: RenderTarget -> Shader -> [ShaderUniform] -> Maybe FRect -> F
 passPostProcess input shader uniforms src dst =
   passWithShader shader uniforms (passBlit input src dst)
 
-runPlan :: RenderPlan -> Render ()
+runPlan :: RenderPlan -> Loop ()
 runPlan (RenderPlan passes) = mapM_ runPass passes
   where
     runPass (Pass targetRef opsList) =
@@ -1352,12 +1565,12 @@ createText font str = do
 destroyText :: Text -> WindowM ()
 destroyText textObj = liftIO (destroyTextIO textObj)
 
-drawText :: Text -> Float -> Float -> Render ()
-drawText textObj x y = withWindowRender (\window -> drawTextIO window textObj x y)
+drawText :: Text -> Float -> Float -> Loop ()
+drawText textObj x y = withWindowLoop (\window -> drawTextIO window textObj x y)
 
-drawTextCached :: Font -> String -> Float -> Float -> Render ()
+drawTextCached :: Font -> String -> Float -> Float -> Loop ()
 drawTextCached font str x y =
-  Render $ do
+  Loop $ do
     window <- ask
     frameId <- liftIO $ atomicModifyIORef' (window.appRenderState) (\st -> (st, st.rsFrameId))
     let Font fontPtr = font
@@ -1378,6 +1591,316 @@ drawTextCached font str x y =
           in (st { rsTextCache = cache' }, ())
         pure t
     liftIO (void $ ttfDrawRendererText textObj x y)
+
+playMusic :: Audio -> Int -> WindowM Bool
+playMusic audio loops = do
+  window <- ask
+  mTrack <- liftIO $ do
+    existing <- readIORef window.appMusicTrack
+    case existing of
+      Just track -> pure (Just track)
+      Nothing -> do
+        created <- mixCreateTrack window.appMixer
+        case created of
+          Nothing -> pure Nothing
+          Just track -> do
+            writeIORef window.appMusicTrack (Just track)
+            pure (Just track)
+  case mTrack of
+    Nothing -> pure False
+    Just track -> do
+      okSet <- liftIO (mixSetTrackAudio track audio)
+      okPlay <- liftIO (mixPlayTrack track 0)
+      okLoop <- liftIO (mixSetTrackLoops track loops)
+      pure (okSet && okPlay && okLoop)
+
+playMusicLoop :: Audio -> WindowM Bool
+playMusicLoop audio = playMusic audio (-1)
+
+playSound :: Audio -> Loop Bool
+playSound audio =
+  withWindowLoop (\window -> mixPlayAudio window.appMixer audio)
+
+data PoolPolicy
+  = PoolRoundRobin
+  | PoolOldest
+  | PoolPriority
+  | PoolBlend
+  deriving (Eq, Show)
+
+data TrackPool = TrackPool
+  { poolPolicy :: !PoolPolicy
+  , poolTracks :: ![Track]
+  , poolState :: !(IORef PoolState)
+  }
+
+data PoolState = PoolState
+  { psNext :: !Int
+  , psLastUsed :: !(Map.Map Int Word64)
+  , psPriorities :: !(Map.Map Int Int)
+  , psActive :: !Int
+  , psBlend :: !(Maybe BlendState)
+  }
+
+createTrackPool :: PoolPolicy -> Int -> WindowM TrackPool
+createTrackPool policy count = do
+  let count' = if policy == PoolBlend then max 2 count else count
+  tracks <- fmap catMaybes (replicateM count' createTrack)
+  createTrackPoolFrom policy tracks
+
+createTrackPoolFrom :: PoolPolicy -> [Track] -> WindowM TrackPool
+createTrackPoolFrom policy tracks = do
+  state <- liftIO (newIORef (PoolState 0 Map.empty Map.empty 0 Nothing))
+  pool <- pure TrackPool
+    { poolPolicy = policy
+    , poolTracks = tracks
+    , poolState = state
+    }
+  when (policy == PoolBlend) (registerBlendPool pool)
+  pure pool
+
+registerBlendPool :: TrackPool -> WindowM ()
+registerBlendPool pool = do
+  window <- ask
+  liftIO (modifyIORef' window.appBlendPools (pool :))
+
+trackPlaying :: Track -> Loop Bool
+trackPlaying track = Loop (liftIO (mixTrackPlaying track))
+
+playPool :: TrackPool -> Audio -> Loop Bool
+playPool pool audio = playPoolWith pool 0 Nothing audio
+
+playPoolLoop :: TrackPool -> Audio -> Loop Bool
+playPoolLoop pool audio = playPoolWith pool (-1) Nothing audio
+
+playPoolPriority :: TrackPool -> Int -> Audio -> Loop Bool
+playPoolPriority pool priority audio = playPoolWith pool 0 (Just priority) audio
+
+playPoolPriorityLoop :: TrackPool -> Int -> Audio -> Loop Bool
+playPoolPriorityLoop pool priority audio = playPoolWith pool (-1) (Just priority) audio
+
+stopPool :: TrackPool -> Loop ()
+stopPool pool = Loop $ do
+  let tracks = pool.poolTracks
+  mapM_ (\track -> liftIO (mixStopTrack track 0)) tracks
+
+playPoolWith :: TrackPool -> Int -> Maybe Int -> Audio -> Loop Bool
+playPoolWith pool loops mPriority audio = Loop $ do
+  let tracks = pool.poolTracks
+  case tracks of
+    [] -> pure False
+    _ -> do
+      state <- liftIO (readIORef pool.poolState)
+      infos <- mapM (buildInfo state) (zip [0 ..] tracks)
+      ticks <- liftIO sdlGetTicks
+      let chooseResult = case pool.poolPolicy of
+            PoolRoundRobin -> chooseRoundRobin state infos
+            PoolOldest -> chooseOldest infos
+            PoolPriority -> choosePriority infos (fromMaybe 0 mPriority)
+            PoolBlend -> chooseRoundRobin state infos
+      case chooseResult of
+        Nothing -> pure False
+        Just (idx, info) -> do
+          when info.tiPlaying (void (liftIO (mixStopTrack info.tiTrack 0)))
+          okSet <- liftIO (mixSetTrackAudio info.tiTrack audio)
+          okPlay <- liftIO (mixPlayTrack info.tiTrack 0)
+          okLoop <- liftIO (mixSetTrackLoops info.tiTrack loops)
+          let priorityValue = fromMaybe (Map.findWithDefault 0 idx state.psPriorities) mPriority
+          let state' = state
+                { psNext = (idx + 1) `mod` length tracks
+                , psLastUsed = Map.insert idx ticks state.psLastUsed
+                , psPriorities = Map.insert idx priorityValue state.psPriorities
+                }
+          liftIO (writeIORef pool.poolState state')
+          pure (okSet && okPlay && okLoop)
+  where
+    buildInfo state (idx, track) = do
+      playing <- liftIO (mixTrackPlaying track)
+      let lastUsed = Map.findWithDefault 0 idx state.psLastUsed
+      let priorityValue = Map.findWithDefault 0 idx state.psPriorities
+      pure TrackInfo
+        { tiIndex = idx
+        , tiTrack = track
+        , tiPlaying = playing
+        , tiLastUsed = lastUsed
+        , tiPriority = priorityValue
+        }
+
+data TrackInfo = TrackInfo
+  { tiIndex :: !Int
+  , tiTrack :: !Track
+  , tiPlaying :: !Bool
+  , tiLastUsed :: !Word64
+  , tiPriority :: !Int
+  }
+
+chooseRoundRobin :: PoolState -> [TrackInfo] -> Maybe (Int, TrackInfo)
+chooseRoundRobin state infos =
+  case infos of
+    [] -> Nothing
+    _ ->
+      let idx = state.psNext `mod` length infos
+      in lookupInfo idx infos
+
+chooseOldest :: [TrackInfo] -> Maybe (Int, TrackInfo)
+chooseOldest infos =
+  case filter (\info -> not info.tiPlaying) infos of
+    (info : _) -> Just (info.tiIndex, info)
+    [] -> pickMinBy infos (\info -> info.tiLastUsed)
+
+choosePriority :: [TrackInfo] -> Int -> Maybe (Int, TrackInfo)
+choosePriority infos newPriority =
+  case filter (\info -> not info.tiPlaying) infos of
+    (info : _) -> Just (info.tiIndex, info)
+    [] ->
+      case pickMinBy infos (\info -> info.tiPriority) of
+        Nothing -> Nothing
+        Just (idx, info) ->
+          if newPriority < info.tiPriority
+            then Nothing
+            else Just (idx, info)
+
+pickMinBy :: Ord b => [TrackInfo] -> (TrackInfo -> b) -> Maybe (Int, TrackInfo)
+pickMinBy infos f =
+  case infos of
+    [] -> Nothing
+    (info : rest) ->
+      let best = foldl' (\acc item -> if f item < f acc then item else acc) info rest
+      in Just (best.tiIndex, best)
+
+lookupInfo :: Int -> [TrackInfo] -> Maybe (Int, TrackInfo)
+lookupInfo idx infos =
+  case infos of
+    [] -> Nothing
+    (info : rest) ->
+      if info.tiIndex == idx
+        then Just (idx, info)
+        else lookupInfo idx rest
+
+data BlendState = BlendState
+  { bsFrom :: !Track
+  , bsTo :: !Track
+  , bsDuration :: !Float
+  , bsElapsed :: !Float
+  , bsLoops :: !Int
+  }
+
+type BlendPool = TrackPool
+
+createBlendPool :: WindowM BlendPool
+createBlendPool = createTrackPool PoolBlend 2
+
+crossfadeTo :: TrackPool -> Audio -> Float -> Loop Bool
+crossfadeTo pool audio duration = crossfadeToWith pool audio duration 0
+
+crossfadeToLoop :: TrackPool -> Audio -> Float -> Loop Bool
+crossfadeToLoop pool audio duration = crossfadeToWith pool audio duration (-1)
+
+updateBlend :: TrackPool -> Float -> Loop ()
+updateBlend pool delta = Loop $ do
+  if pool.poolPolicy /= PoolBlend
+    then pure ()
+    else do
+      state <- liftIO (readIORef pool.poolState)
+      case state.psBlend of
+        Nothing -> pure ()
+        Just blend -> do
+          let duration = max 0 blend.bsDuration
+          let elapsed' = min duration (blend.bsElapsed + delta)
+          let t = if duration <= 0 then 1 else elapsed' / duration
+          _ <- liftIO (mixSetTrackGain blend.bsFrom (1 - t))
+          _ <- liftIO (mixSetTrackGain blend.bsTo t)
+          if elapsed' >= duration
+            then do
+              _ <- liftIO (mixStopTrack blend.bsFrom 0)
+              _ <- liftIO (mixSetTrackGain blend.bsTo 1)
+              let activeIdx = trackIndex pool blend.bsTo
+              liftIO (writeIORef pool.poolState state { psBlend = Nothing, psActive = activeIdx })
+            else
+              liftIO (writeIORef pool.poolState state { psBlend = Just blend { bsElapsed = elapsed' } })
+
+crossfadeToWith :: TrackPool -> Audio -> Float -> Int -> Loop Bool
+crossfadeToWith pool audio duration loops =
+  if pool.poolPolicy /= PoolBlend
+    then playPoolWith pool loops Nothing audio
+    else Loop $ do
+      let tracks = pool.poolTracks
+      case tracks of
+        [] -> pure False
+        [track] -> do
+          _ <- liftIO (mixSetTrackAudio track audio)
+          _ <- liftIO (mixPlayTrack track 0)
+          _ <- liftIO (mixSetTrackLoops track loops)
+          _ <- liftIO (mixSetTrackGain track 1)
+          pure True
+        (trackA : trackB : _) -> do
+          state <- liftIO (readIORef pool.poolState)
+          let activeIdx = state.psActive `mod` 2
+          let fromTrack = if activeIdx == 0 then trackA else trackB
+          let toTrack = if activeIdx == 0 then trackB else trackA
+          case state.psBlend of
+            Just blend -> do
+              _ <- liftIO (mixStopTrack blend.bsFrom 0)
+              _ <- liftIO (mixSetTrackGain blend.bsTo 1)
+              liftIO (writeIORef pool.poolState state { psBlend = Nothing, psActive = trackIndex pool blend.bsTo })
+            Nothing -> pure ()
+          if duration <= 0 || fromTrack == toTrack
+            then do
+              _ <- liftIO (mixSetTrackAudio fromTrack audio)
+              _ <- liftIO (mixPlayTrack fromTrack 0)
+              _ <- liftIO (mixSetTrackLoops fromTrack loops)
+              _ <- liftIO (mixSetTrackGain fromTrack 1)
+              liftIO (writeIORef pool.poolState state { psActive = trackIndex pool fromTrack })
+              pure True
+            else do
+              _ <- liftIO (mixSetTrackGain toTrack 0)
+              okSet <- liftIO (mixSetTrackAudio toTrack audio)
+              okPlay <- liftIO (mixPlayTrack toTrack 0)
+              okLoop <- liftIO (mixSetTrackLoops toTrack loops)
+              _ <- liftIO (mixSetTrackGain fromTrack 1)
+              let blend = BlendState
+                    { bsFrom = fromTrack
+                    , bsTo = toTrack
+                    , bsDuration = duration
+                    , bsElapsed = 0
+                    , bsLoops = loops
+                    }
+              liftIO (writeIORef pool.poolState state { psBlend = Just blend })
+              pure (okSet && okPlay && okLoop)
+
+trackIndex :: TrackPool -> Track -> Int
+trackIndex pool track =
+  case pool.poolTracks of
+    (t1 : t2 : _) ->
+      if track == t1 then 0 else if track == t2 then 1 else 0
+    (t1 : _) ->
+      if track == t1 then 0 else 0
+    [] -> 0
+
+createTrack :: WindowM (Maybe Track)
+createTrack = do
+  window <- ask
+  liftIO (mixCreateTrack window.appMixer)
+
+destroyTrack :: Track -> WindowM ()
+destroyTrack = liftIO . mixDestroyTrack
+
+playOn :: Track -> Audio -> Loop Bool
+playOn track audio = Loop $ do
+  okSet <- liftIO (mixSetTrackAudio track audio)
+  okPlay <- liftIO (mixPlayTrack track 0)
+  okLoop <- liftIO (mixSetTrackLoops track 0)
+  pure (okSet && okPlay && okLoop)
+
+playOnLoop :: Track -> Audio -> Loop Bool
+playOnLoop track audio = Loop $ do
+  okSet <- liftIO (mixSetTrackAudio track audio)
+  okPlay <- liftIO (mixPlayTrack track 0)
+  okLoop <- liftIO (mixSetTrackLoops track (-1))
+  pure (okSet && okPlay && okLoop)
+
+stopTrack :: Track -> Loop Bool
+stopTrack track = Loop (liftIO (mixStopTrack track 0))
 
 -- Shaders
 
@@ -1472,14 +1995,14 @@ toBytes value =
   BSI.create (sizeOf value) $ \ptr ->
     poke (castPtr ptr) value
 
-setShaderUniformCached :: Storable a => Shader -> Word32 -> a -> Render ()
+setShaderUniformCached :: Storable a => Shader -> Word32 -> a -> Loop ()
 setShaderUniformCached shader slot value = do
   bytes <- liftIO (toBytes value)
   setShaderUniformBytesCached shader slot bytes
 
-setShaderUniformBytesCached :: Shader -> Word32 -> ByteString -> Render ()
+setShaderUniformBytesCached :: Shader -> Word32 -> ByteString -> Loop ()
 setShaderUniformBytesCached shader slot bytes =
-  Render $ do
+  Loop $ do
     window <- ask
     let key = shaderUniformKey shader slot
     let ref = window.appRenderState
@@ -1523,9 +2046,9 @@ destroyShader shader = do
   liftIO (evictShaderCacheIO window shader)
   liftIO (destroyShaderIO shader)
 
-withShader :: Shader -> Render a -> Render a
-withShader shader (Render action) =
-  Render $ do
+withShader :: Shader -> Loop a -> Loop a
+withShader shader (Loop action) =
+  Loop $ do
     window <- ask
     liftIO $
       bracket
@@ -1538,7 +2061,7 @@ withShader shader (Render action) =
         (\_ -> void (sdlSetGPURenderState (window.appRenderer) Nothing))
         (\_ -> runWindowM window action)
 
-withShaderUniform :: Storable a => Shader -> Word32 -> a -> Render b -> Render b
+withShaderUniform :: Storable a => Shader -> Word32 -> a -> Loop b -> Loop b
 withShaderUniform shader slot value action = do
   setShaderUniformCached shader slot value
   withShader shader action

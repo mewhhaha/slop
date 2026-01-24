@@ -14,9 +14,14 @@ module Seedl.SDL.Raw
   , SDL_GPUShaderStage
   , SDL_EventType
   , SDL_PropertiesID
+  , SDL_Keycode
+  , SDL_Keymod
   , Window(..)
   , Renderer(..)
   , Texture(..)
+  , Mixer(..)
+  , Audio(..)
+  , Track(..)
   , GPUDevice(..)
   , GPUShader(..)
   , GPURenderState(..)
@@ -29,10 +34,12 @@ module Seedl.SDL.Raw
   , GPUShaderCreateInfo(..)
   , GPURenderStateCreateInfo(..)
   , sdlInitVideo
+  , sdlInitAudio
   , sdlEventQuit
   , sdlGPUShaderFormatSpirv
   , sdlGPUShaderStageVertex
   , sdlGPUShaderStageFragment
+  , sdlAudioDeviceDefaultPlayback
   , sdlInit
   , sdlQuit
   , sdlGetError
@@ -58,6 +65,7 @@ module Seedl.SDL.Raw
   , sdlPollEvent
   , sdlPumpEvents
   , sdlGetKeyboardState
+  , sdlGetKeyFromScancode
   , sdlGetMouseState
   , sdlGetWindowSize
   , allocaEvent
@@ -80,6 +88,22 @@ module Seedl.SDL.Raw
   , ttfDrawRendererText
   , TTF_GPUAtlasDrawSequence
   , ttfGetGPUTextDrawData
+  , mixCreateMixerDevice
+  , mixInit
+  , mixQuit
+  , mixDestroyMixer
+  , mixCreateTrack
+  , mixDestroyTrack
+  , mixLoadAudio
+  , mixDestroyAudio
+  , mixSetTrackAudio
+  , mixPlayTrack
+  , mixSetTrackLoops
+  , mixSetTrackGain
+  , mixGetTrackGain
+  , mixStopTrack
+  , mixTrackPlaying
+  , mixPlayAudio
   , sdlCreateGPUShader
   , sdlReleaseGPUShader
   , sdlCreateGPURenderState
@@ -90,6 +114,7 @@ module Seedl.SDL.Raw
 
 import Data.Bits (shiftL)
 import Data.Proxy (Proxy (..))
+import Data.Int (Int64)
 import Data.Word (Word32, Word64, Word8)
 import Foreign
 import Foreign.C.String
@@ -113,8 +138,19 @@ type SDL_EventType = Word32
 
 type SDL_PropertiesID = Word32
 
+type SDL_Keycode = Word32
+
+type SDL_Keymod = Word16
+
+type SDL_AudioDeviceID = Word32
+
+data SDL_AudioSpec
+
 sdlInitVideo :: SDL_InitFlags
 sdlInitVideo = 0x00000020
+
+sdlInitAudio :: SDL_InitFlags
+sdlInitAudio = 0x00000010
 
 sdlEventQuit :: SDL_EventType
 sdlEventQuit = 0x00000100
@@ -134,6 +170,9 @@ sdlTextureAccessTarget = 2
 sdlPixelFormatRGBA8888 :: SDL_PixelFormat
 sdlPixelFormatRGBA8888 = 0x16462004
 
+sdlAudioDeviceDefaultPlayback :: SDL_AudioDeviceID
+sdlAudioDeviceDefaultPlayback = 0xFFFFFFFF
+
 -- Opaque handles
 
 data SDL_Window
@@ -144,6 +183,15 @@ newtype Renderer = Renderer (Ptr SDL_Renderer) deriving (Eq, Show)
 
 data SDL_Texture
 newtype Texture = Texture (Ptr SDL_Texture) deriving (Eq, Show)
+
+data MIX_Mixer
+newtype Mixer = Mixer (Ptr MIX_Mixer) deriving (Eq, Show)
+
+data MIX_Audio
+newtype Audio = Audio (Ptr MIX_Audio) deriving (Eq, Show)
+
+data MIX_Track
+newtype Track = Track (Ptr MIX_Track) deriving (Eq, Show)
 
 data SDL_GPUDevice
 newtype GPUDevice = GPUDevice (Ptr SDL_GPUDevice) deriving (Eq, Show)
@@ -571,12 +619,19 @@ sdlPumpEvents = c_SDL_PumpEvents
 foreign import ccall unsafe "SDL_GetKeyboardState" c_SDL_GetKeyboardState
   :: Ptr CInt -> IO (Ptr Word8)
 
+foreign import ccall unsafe "SDL_GetKeyFromScancode" c_SDL_GetKeyFromScancode
+  :: CInt -> SDL_Keymod -> CBool -> IO SDL_Keycode
+
 sdlGetKeyboardState :: IO (Ptr Word8, Int)
 sdlGetKeyboardState =
   alloca $ \lenPtr -> do
     ptr <- c_SDL_GetKeyboardState lenPtr
     len <- peek lenPtr
     pure (ptr, fromIntegral len)
+
+sdlGetKeyFromScancode :: Int -> SDL_Keymod -> Bool -> IO SDL_Keycode
+sdlGetKeyFromScancode scancode modstate keyEvent =
+  c_SDL_GetKeyFromScancode (fromIntegral scancode) modstate (if keyEvent then 1 else 0)
 
 foreign import ccall unsafe "SDL_GetMouseState" c_SDL_GetMouseState
   :: Ptr CFloat -> Ptr CFloat -> IO Word32
@@ -718,6 +773,119 @@ foreign import ccall unsafe "TTF_GetGPUTextDrawData" c_TTF_GetGPUTextDrawData
 
 ttfGetGPUTextDrawData :: Text -> IO (Ptr TTF_GPUAtlasDrawSequence)
 ttfGetGPUTextDrawData (Text txt) = c_TTF_GetGPUTextDrawData txt
+
+-- SDL_mixer
+
+foreign import ccall unsafe "MIX_CreateMixerDevice" c_MIX_CreateMixerDevice
+  :: SDL_AudioDeviceID -> Ptr SDL_AudioSpec -> IO (Ptr MIX_Mixer)
+
+foreign import ccall unsafe "MIX_Init" c_MIX_Init
+  :: IO CBool
+
+foreign import ccall unsafe "MIX_Quit" c_MIX_Quit
+  :: IO ()
+
+foreign import ccall unsafe "MIX_DestroyMixer" c_MIX_DestroyMixer
+  :: Ptr MIX_Mixer -> IO ()
+
+foreign import ccall unsafe "MIX_CreateTrack" c_MIX_CreateTrack
+  :: Ptr MIX_Mixer -> IO (Ptr MIX_Track)
+
+foreign import ccall unsafe "MIX_DestroyTrack" c_MIX_DestroyTrack
+  :: Ptr MIX_Track -> IO ()
+
+foreign import ccall unsafe "MIX_LoadAudio" c_MIX_LoadAudio
+  :: Ptr MIX_Mixer -> CString -> CBool -> IO (Ptr MIX_Audio)
+
+foreign import ccall unsafe "MIX_DestroyAudio" c_MIX_DestroyAudio
+  :: Ptr MIX_Audio -> IO ()
+
+foreign import ccall unsafe "MIX_SetTrackAudio" c_MIX_SetTrackAudio
+  :: Ptr MIX_Track -> Ptr MIX_Audio -> IO CBool
+
+foreign import ccall unsafe "MIX_PlayTrack" c_MIX_PlayTrack
+  :: Ptr MIX_Track -> SDL_PropertiesID -> IO CBool
+
+foreign import ccall unsafe "MIX_SetTrackLoops" c_MIX_SetTrackLoops
+  :: Ptr MIX_Track -> CInt -> IO CBool
+
+foreign import ccall unsafe "MIX_SetTrackGain" c_MIX_SetTrackGain
+  :: Ptr MIX_Track -> CFloat -> IO CBool
+
+foreign import ccall unsafe "MIX_GetTrackGain" c_MIX_GetTrackGain
+  :: Ptr MIX_Track -> IO CFloat
+
+foreign import ccall unsafe "MIX_PlayAudio" c_MIX_PlayAudio
+  :: Ptr MIX_Mixer -> Ptr MIX_Audio -> IO CBool
+
+foreign import ccall unsafe "MIX_StopTrack" c_MIX_StopTrack
+  :: Ptr MIX_Track -> Int64 -> IO CBool
+
+foreign import ccall unsafe "MIX_TrackPlaying" c_MIX_TrackPlaying
+  :: Ptr MIX_Track -> IO CBool
+
+mixCreateMixerDevice :: SDL_AudioDeviceID -> IO (Maybe Mixer)
+mixCreateMixerDevice devid = do
+  ptr <- c_MIX_CreateMixerDevice devid nullPtr
+  pure $ if ptr == nullPtr then Nothing else Just (Mixer ptr)
+
+mixInit :: IO Bool
+mixInit = fromCBool <$> c_MIX_Init
+
+mixQuit :: IO ()
+mixQuit = c_MIX_Quit
+
+mixDestroyMixer :: Mixer -> IO ()
+mixDestroyMixer (Mixer mixer) = c_MIX_DestroyMixer mixer
+
+mixCreateTrack :: Mixer -> IO (Maybe Track)
+mixCreateTrack (Mixer mixer) = do
+  ptr <- c_MIX_CreateTrack mixer
+  pure $ if ptr == nullPtr then Nothing else Just (Track ptr)
+
+mixDestroyTrack :: Track -> IO ()
+mixDestroyTrack (Track track) = c_MIX_DestroyTrack track
+
+mixLoadAudio :: Mixer -> String -> Bool -> IO (Maybe Audio)
+mixLoadAudio (Mixer mixer) path predecode =
+  withCString path $ \cPath -> do
+    ptr <- c_MIX_LoadAudio mixer cPath (if predecode then 1 else 0)
+    pure $ if ptr == nullPtr then Nothing else Just (Audio ptr)
+
+mixDestroyAudio :: Audio -> IO ()
+mixDestroyAudio (Audio audio) = c_MIX_DestroyAudio audio
+
+mixSetTrackAudio :: Track -> Audio -> IO Bool
+mixSetTrackAudio (Track track) (Audio audio) =
+  fromCBool <$> c_MIX_SetTrackAudio track audio
+
+mixPlayTrack :: Track -> SDL_PropertiesID -> IO Bool
+mixPlayTrack (Track track) options =
+  fromCBool <$> c_MIX_PlayTrack track options
+
+mixSetTrackLoops :: Track -> Int -> IO Bool
+mixSetTrackLoops (Track track) loops =
+  fromCBool <$> c_MIX_SetTrackLoops track (fromIntegral loops)
+
+mixSetTrackGain :: Track -> Float -> IO Bool
+mixSetTrackGain (Track track) gain =
+  fromCBool <$> c_MIX_SetTrackGain track (realToFrac gain)
+
+mixGetTrackGain :: Track -> IO Float
+mixGetTrackGain (Track track) =
+  realToFrac <$> c_MIX_GetTrackGain track
+
+mixPlayAudio :: Mixer -> Audio -> IO Bool
+mixPlayAudio (Mixer mixer) (Audio audio) =
+  fromCBool <$> c_MIX_PlayAudio mixer audio
+
+mixStopTrack :: Track -> Int64 -> IO Bool
+mixStopTrack (Track track) fadeFrames =
+  fromCBool <$> c_MIX_StopTrack track fadeFrames
+
+mixTrackPlaying :: Track -> IO Bool
+mixTrackPlaying (Track track) =
+  fromCBool <$> c_MIX_TrackPlaying track
 
 -- GPU shaders and render state
 

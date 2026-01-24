@@ -33,6 +33,7 @@ library
     pkgconfig-depends:
         sdl3 >= 3.4,
         sdl3-image,
+        sdl3-mixer,
         sdl3-ttf
     hs-source-dirs:   lib
     default-language: GHC2024
@@ -47,6 +48,8 @@ executable seedl
         seedl,
         bytestring,
         spirdo
+    pkgconfig-depends:
+        sdl3-mixer
 
     hs-source-dirs:   exe
     default-language: GHC2024

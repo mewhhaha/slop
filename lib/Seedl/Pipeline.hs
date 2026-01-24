@@ -38,7 +38,7 @@ import Seedl
   , Shader
   , ShaderUniform
   , TargetRef(..)
-  , Render
+  , Loop
   , plan
   , pass
   , passBlit
@@ -71,7 +71,7 @@ newtype Pipeline a = Pipeline (PlanM a)
 pipeline :: Pipeline a -> RenderPlan
 pipeline (Pipeline action) = plan action
 
-runPipeline :: Pipeline a -> Render ()
+runPipeline :: Pipeline a -> Loop ()
 runPipeline = runPlan . pipeline
 
 fork :: Pipeline a -> Pipeline b -> Pipeline (a, b)

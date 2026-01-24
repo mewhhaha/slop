@@ -57,14 +57,24 @@ main = do
         (>==) = (>=>)
     texId <- loadAssetAsync (TextureAsset "assets/sprite.bmp")
     fontId <- loadAssetAsync (FontAsset "assets/Inter/Inter-VariableFont_opsz,wght.ttf" 28)
+    ambienceId <- loadAssetAsync (MusicAsset "assets/ambience - air conditioner.wav")
+    ambienceAltId <- loadAssetAsync (MusicAsset "assets/ambience - car sedan idling.wav")
+    sfxId <- loadAssetAsync (ChunkAsset "assets/air duster 7.wav")
 
     texture <- (awaitAsset >== crash) texId
     font <- (awaitAsset >== crash) fontId
+    ambience <- (awaitAsset >== crash) ambienceId
+    ambienceAlt <- (awaitAsset >== crash) ambienceAltId
+    sfx <- (awaitAsset >== crash) sfxId
 
     shaderId <- (loadAsset >== crash) demoShaderAsset
     shader <- (awaitAsset >== crash) shaderId
 
-    _ <- loop () $ \frame _ -> do
+    blend <- createTrackPool PoolBlend 2
+    sfxPool <- createTrackPool PoolRoundRobin 8
+    _ <- runLoop (crossfadeToLoop blend ambience 0)
+
+    _ <- loop (0 :: Int) $ \frame active -> do
       let (winWInt, winHInt) = frame.size
       let winW = fromIntegral winWInt
       let winH = fromIntegral winHInt
@@ -87,9 +97,22 @@ main = do
             post <- postProcess scene shader uniforms Nothing winRect
             output post Nothing winRect
 
+      active' <- if keyPressed KeyB frame.input
+        then do
+          let next = if active == 0 then 1 else 0
+          _ <- if next == 0
+            then crossfadeToLoop blend ambience 2.0
+            else crossfadeToLoop blend ambienceAlt 2.0
+          pure next
+        else pure active
+
+      _ <- if keyPressed keySpace frame.input
+        then playPool sfxPool sfx
+        else pure False
+
       render (winWInt, winHInt) pipeline
 
-      pure (Continue ())
+      pure (Continue active')
 
     removeAllAssets
     pure ()

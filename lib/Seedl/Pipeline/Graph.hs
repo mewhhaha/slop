@@ -32,12 +32,12 @@ import Seedl
   ( Color
   , Drawable
   , DrawItem (..)
-  , Render
+  , Loop
   , RenderTarget
   , Shader
   , ShaderUniform (..)
   , askWindow
-  , liftRender
+  , liftLoop
   , setShaderUniformBytesCached
   , setShaderUniformCached
   )
@@ -124,12 +124,12 @@ linear :: Node -> [(Shader, [ShaderUniform])] -> Maybe FRect -> FRect -> Graph N
 linear start passes src dst =
   foldM (\node (shader, uniforms) -> postProcess node shader uniforms src dst) start passes
 
-render :: (Int, Int) -> Graph a -> Render ()
+render :: (Int, Int) -> Graph a -> Loop ()
 render size (Graph action) = do
   let steps = toList (execWriter (evalStateT action 0))
   mapM_ (runStep size) steps
 
-runStep :: (Int, Int) -> Step -> Render ()
+runStep :: (Int, Int) -> Step -> Loop ()
 runStep size step =
   case step of
     StepPass node opsList -> do
@@ -139,10 +139,10 @@ runStep size step =
       target <- ensureTarget node size
       blitTarget target src dst
 
-runOps :: (Int, Int) -> [Op] -> Render ()
+runOps :: (Int, Int) -> [Op] -> Loop ()
 runOps size = mapM_ (runOp size)
 
-runOp :: (Int, Int) -> Op -> Render ()
+runOp :: (Int, Int) -> Op -> Loop ()
 runOp size op =
   case op of
     OpClear color -> clearTarget color
@@ -153,38 +153,38 @@ runOp size op =
     OpShader shader uniforms opsList -> do
       passWithShader shader uniforms (runOps size opsList)
 
-ensureTarget :: Node -> (Int, Int) -> Render RenderTarget
+ensureTarget :: Node -> (Int, Int) -> Loop RenderTarget
 ensureTarget (Node nodeId) size = do
-  window <- liftRender askWindow
-  targets <- liftRender (liftIO (readIORef window.appPipelineTargets))
+  window <- liftLoop askWindow
+  targets <- liftLoop (liftIO (readIORef window.appPipelineTargets))
   case Map.lookup nodeId targets of
     Just (target, targetSize)
       | targetSize == size -> pure target
       | otherwise -> do
-          _ <- liftRender (S.destroyTarget target)
-          target' <- liftRender (S.createRenderTarget (fst size) (snd size))
-          liftRender (liftIO (writeIORef window.appPipelineTargets (Map.insert nodeId (target', size) targets)))
+          _ <- liftLoop (S.destroyTarget target)
+          target' <- liftLoop (S.createRenderTarget (fst size) (snd size))
+          liftLoop (liftIO (writeIORef window.appPipelineTargets (Map.insert nodeId (target', size) targets)))
           pure target'
     Nothing -> do
-      target' <- liftRender (S.createRenderTarget (fst size) (snd size))
-      liftRender (liftIO (writeIORef window.appPipelineTargets (Map.insert nodeId (target', size) targets)))
+      target' <- liftLoop (S.createRenderTarget (fst size) (snd size))
+      liftLoop (liftIO (writeIORef window.appPipelineTargets (Map.insert nodeId (target', size) targets)))
       pure target'
 
-clearTarget :: Color -> Render ()
+clearTarget :: Color -> Loop ()
 clearTarget = S.clear
 
-drawTarget :: Drawable a => a -> Render ()
+drawTarget :: Drawable a => a -> Loop ()
 drawTarget = S.draw
 
-blitTarget :: RenderTarget -> Maybe FRect -> FRect -> Render ()
+blitTarget :: RenderTarget -> Maybe FRect -> FRect -> Loop ()
 blitTarget = S.output
 
-passWithShader :: Shader -> [ShaderUniform] -> Render a -> Render a
+passWithShader :: Shader -> [ShaderUniform] -> Loop a -> Loop a
 passWithShader shader uniforms action = do
   mapM_ (applyUniform shader) uniforms
   S.withShader shader action
 
-applyUniform :: Shader -> ShaderUniform -> Render ()
+applyUniform :: Shader -> ShaderUniform -> Loop ()
 applyUniform shader uniform =
   case uniform of
     ShaderUniform slot value -> setShaderUniformCached shader slot value
