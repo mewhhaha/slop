@@ -29,14 +29,26 @@ struct Params {
 
 @fragment
 fn main(@location(0) inColor: vec4<f32>, @location(1) uv: vec2<f32>) -> @location(0) vec4<f32> {
-  let pulse = 0.6 + 0.4 * sin(params.time);
-  let base = textureSample(spriteTex, spriteSamp, uv);
-  return vec4(
-    base.r * inColor.r * pulse,
-    base.g * inColor.g * pulse,
-    base.b * inColor.b * pulse,
-    base.a * inColor.a
-  );
+  let center = vec2(0.5, 0.5);
+  let offset = uv - center;
+  let r = length(offset);
+  let barrel = 1.0 + 0.12 * r * r;
+  let uvDistorted = center + offset * barrel;
+
+  let chroma = (0.0015 + 0.0015 * sin(params.time * 0.7)) * (1.0 + r * 1.5);
+  let sampleR = textureSample(spriteTex, spriteSamp, uvDistorted + vec2(chroma, 0.0));
+  let sampleG = textureSample(spriteTex, spriteSamp, uvDistorted);
+  let sampleB = textureSample(spriteTex, spriteSamp, uvDistorted - vec2(chroma, 0.0));
+
+  let vignette = 1.0 - smoothstep(0.35, 0.95, r);
+  let scan = 0.92 + 0.08 * sin(uv.y * params.height * 0.25 + params.time * 18.0);
+  let noise = fract(sin(dot(uv * vec2(12.9898, 78.233), vec2(12.9898, 78.233)) + params.time * 10.0) * 43758.5453);
+
+  var color = vec3(sampleR.r, sampleG.g, sampleB.b);
+  color = color * vignette * scan;
+  color = color + (noise - 0.5) * 0.02;
+
+  return vec4(color.r * inColor.r, color.g * inColor.g, color.b * inColor.b, sampleG.a * inColor.a);
 }
 |]
 
