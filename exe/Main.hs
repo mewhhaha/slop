@@ -59,7 +59,7 @@ main :: IO ()
 main = do
   let cfg =
         defaultConfig
-          { windowTitle = "Seedl SDL3.4 demo",
+          { windowTitle = "Slop SDL3.4 demo",
             windowWidth = 960,
             windowHeight = 540,
             windowResizable = True
@@ -105,7 +105,7 @@ main = do
               draw (RectOutline (rgb 0.2 0.8 0.9) (rect 80 150 200 120))
               draw (RectFill (rgba 0.25 0.25 0.8 0.9) (rect 320 150 120 120))
               draw (Sprite texture Nothing (rect 80 320 160 160) Nothing)
-              draw (text font "Seedl + SDL3.4" 80 40)
+              draw (text font "Slop + SDL3.4" 80 40)
             post <- postProcess scene shader uniforms Nothing winRect
             output post Nothing winRect
 

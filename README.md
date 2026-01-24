@@ -1,12 +1,12 @@
-# Seedl
+# Slop
 
-Seedl is a small SDL3.4-based rendering wrapper for Haskell with a focus on textures, sprites, and an ergonomic render pipeline.
+Slop is a small SDL3.4-based rendering and audio wrapper for Haskell with a focus on textures, sprites, and an ergonomic render pipeline.
 
 ## Build / Run
 
 ```sh
 cabal build
-cabal run seedl
+cabal run slop
 ```
 
 ## Render Pipeline (Graph DSL)
@@ -24,17 +24,17 @@ let pipeline = do
       scene <- pass $ do
         clear (rgb 0.06 0.07 0.1)
         draw (Sprite texture Nothing (rect 80 320 160 160) Nothing)
-        draw (text font "Seedl + SDL3.4" 80 40)
+        draw (text font "Slop + SDL3.4" 80 40)
       post <- postProcess scene shader uniforms Nothing winRect
       output post Nothing winRect
 render (winWInt, winHInt) pipeline
 ```
 
-This matches the current example in `exe/Main.hs`.
+This matches the current example in `exe/Main.hs`. (Package name: Slop. Module namespace: Seedl.*)
 
 ## Asset Management
 
-Seedl includes a built-in asset manager that runs inside `WindowM`. Assets are typed via `AssetId a`, and can be loaded synchronously or asynchronously.
+Slop includes a built-in asset manager that runs inside `WindowM`. Assets are typed via `AssetId a`, and can be loaded synchronously or asynchronously.
 
 ### Loading
 

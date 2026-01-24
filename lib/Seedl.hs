@@ -313,7 +313,7 @@ data Config = Config
 
 defaultConfig :: Config
 defaultConfig = Config
-  { windowTitle = "Seedl"
+  { windowTitle = "Slop"
   , windowWidth = 1280
   , windowHeight = 720
   , windowResizable = True

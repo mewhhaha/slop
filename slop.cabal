@@ -1,17 +1,25 @@
 cabal-version:      3.14
-name:               seedl
+name:               slop
 version:            0.1.0.0
--- synopsis:
--- description:
+synopsis:           SDL3-based rendering + audio toolkit for Haskell
+description:
+    Slop is a small SDL3.4-based rendering and audio wrapper for Haskell, with
+    a focus on textures, sprites, ergonomic render pipelines, and async asset
+    loading.
 license:            MIT
 license-file:       LICENSE
 author:             mewhhaha
 maintainer:         kopatheonlyone@hotmail.com
--- copyright:
-category:           Graphics
+category:           Graphics, Audio
 build-type:         Simple
-extra-doc-files:    CHANGELOG.md
--- extra-source-files:
+homepage:           https://github.com/mewhhaha/slop
+bug-reports:        https://github.com/mewhhaha/slop/issues
+tested-with:        GHC ==9.12.2
+extra-doc-files:    README.md, CHANGELOG.md
+
+source-repository head
+    type: git
+    location: https://github.com/mewhhaha/slop.git
 
 common warnings
     ghc-options: -Wall
@@ -38,14 +46,14 @@ library
     hs-source-dirs:   lib
     default-language: GHC2024
 
-executable seedl
+executable slop
     import:           warnings
     main-is:          Main.hs
     -- other-modules:
     -- other-extensions:
     build-depends:
         base ^>=4.21.0.0,
-        seedl,
+        slop,
         bytestring,
         spirdo
     pkgconfig-depends:
