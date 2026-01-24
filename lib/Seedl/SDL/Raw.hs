@@ -1,10 +1,15 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE NoFieldSelectors #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
 module Seedl.SDL.Raw
   ( SDL_InitFlags
   , SDL_WindowFlags
+  , SDL_PixelFormat
+  , SDL_TextureAccess
   , SDL_GPUShaderFormat
   , SDL_GPUShaderStage
   , SDL_EventType
@@ -45,10 +50,16 @@ module Seedl.SDL.Raw
   , sdlRenderLines
   , sdlRenderRect
   , sdlRenderFillRect
+  , sdlCreateTexture
+  , sdlSetRenderTarget
+  , sdlGetRenderTarget
+  , sdlTextureAccessTarget
+  , sdlPixelFormatRGBA8888
   , sdlPollEvent
   , sdlPumpEvents
   , sdlGetKeyboardState
   , sdlGetMouseState
+  , sdlGetWindowSize
   , allocaEvent
   , peekEventType
   , sdlGetTicks
@@ -90,6 +101,10 @@ type SDL_InitFlags = Word32
 
 type SDL_WindowFlags = Word64
 
+type SDL_PixelFormat = Word32
+
+type SDL_TextureAccess = CInt
+
 type SDL_GPUShaderFormat = Word32
 
 type SDL_GPUShaderStage = CInt
@@ -112,6 +127,12 @@ sdlGPUShaderStageVertex = 0
 
 sdlGPUShaderStageFragment :: SDL_GPUShaderStage
 sdlGPUShaderStageFragment = 1
+
+sdlTextureAccessTarget :: SDL_TextureAccess
+sdlTextureAccessTarget = 2
+
+sdlPixelFormatRGBA8888 :: SDL_PixelFormat
+sdlPixelFormatRGBA8888 = 0x16462004
 
 -- Opaque handles
 
@@ -315,16 +336,16 @@ instance Storable GPUShaderCreateInfo where
       , gpuShaderProps = props
       }
   poke ptr info = do
-    pokeByteOff ptr gpuShaderCodeSizeOffset (gpuShaderCodeSize info)
-    pokeByteOff ptr gpuShaderCodeOffset (gpuShaderCode info)
-    pokeByteOff ptr gpuShaderEntryOffset (gpuShaderEntryPoint info)
-    pokeByteOff ptr gpuShaderFormatOffset (gpuShaderFormat info)
-    pokeByteOff ptr gpuShaderStageOffset (gpuShaderStage info)
-    pokeByteOff ptr gpuShaderNumSamplersOffset (gpuShaderNumSamplers info)
-    pokeByteOff ptr gpuShaderNumStorageTexturesOffset (gpuShaderNumStorageTextures info)
-    pokeByteOff ptr gpuShaderNumStorageBuffersOffset (gpuShaderNumStorageBuffers info)
-    pokeByteOff ptr gpuShaderNumUniformBuffersOffset (gpuShaderNumUniformBuffers info)
-    pokeByteOff ptr gpuShaderPropsOffset (gpuShaderProps info)
+    pokeByteOff ptr gpuShaderCodeSizeOffset info.gpuShaderCodeSize
+    pokeByteOff ptr gpuShaderCodeOffset info.gpuShaderCode
+    pokeByteOff ptr gpuShaderEntryOffset info.gpuShaderEntryPoint
+    pokeByteOff ptr gpuShaderFormatOffset info.gpuShaderFormat
+    pokeByteOff ptr gpuShaderStageOffset info.gpuShaderStage
+    pokeByteOff ptr gpuShaderNumSamplersOffset info.gpuShaderNumSamplers
+    pokeByteOff ptr gpuShaderNumStorageTexturesOffset info.gpuShaderNumStorageTextures
+    pokeByteOff ptr gpuShaderNumStorageBuffersOffset info.gpuShaderNumStorageBuffers
+    pokeByteOff ptr gpuShaderNumUniformBuffersOffset info.gpuShaderNumUniformBuffers
+    pokeByteOff ptr gpuShaderPropsOffset info.gpuShaderProps
 
 gpuRenderStateSize :: Int
 gpuRenderStateAlign :: Int
@@ -377,14 +398,14 @@ instance Storable GPURenderStateCreateInfo where
       , gpuRenderProps = props
       }
   poke ptr info = do
-    pokeByteOff ptr gpuRenderFragmentShaderOffset (gpuRenderFragmentShader info)
-    pokeByteOff ptr gpuRenderNumSamplerBindingsOffset (gpuRenderNumSamplerBindings info)
-    pokeByteOff ptr gpuRenderSamplerBindingsOffset (gpuRenderSamplerBindings info)
-    pokeByteOff ptr gpuRenderNumStorageTexturesOffset (gpuRenderNumStorageTextures info)
-    pokeByteOff ptr gpuRenderStorageTexturesOffset (gpuRenderStorageTextures info)
-    pokeByteOff ptr gpuRenderNumStorageBuffersOffset (gpuRenderNumStorageBuffers info)
-    pokeByteOff ptr gpuRenderStorageBuffersOffset (gpuRenderStorageBuffers info)
-    pokeByteOff ptr gpuRenderPropsOffset (gpuRenderProps info)
+    pokeByteOff ptr gpuRenderFragmentShaderOffset info.gpuRenderFragmentShader
+    pokeByteOff ptr gpuRenderNumSamplerBindingsOffset info.gpuRenderNumSamplerBindings
+    pokeByteOff ptr gpuRenderSamplerBindingsOffset info.gpuRenderSamplerBindings
+    pokeByteOff ptr gpuRenderNumStorageTexturesOffset info.gpuRenderNumStorageTextures
+    pokeByteOff ptr gpuRenderStorageTexturesOffset info.gpuRenderStorageTextures
+    pokeByteOff ptr gpuRenderNumStorageBuffersOffset info.gpuRenderNumStorageBuffers
+    pokeByteOff ptr gpuRenderStorageBuffersOffset info.gpuRenderStorageBuffers
+    pokeByteOff ptr gpuRenderPropsOffset info.gpuRenderProps
 
 -- Helpers
 
@@ -467,6 +488,9 @@ foreign import ccall unsafe "SDL_RenderClear" c_SDL_RenderClear
 foreign import ccall unsafe "SDL_RenderPresent" c_SDL_RenderPresent
   :: Ptr SDL_Renderer -> IO ()
 
+foreign import ccall unsafe "SDL_CreateTexture" c_SDL_CreateTexture
+  :: Ptr SDL_Renderer -> SDL_PixelFormat -> SDL_TextureAccess -> CInt -> CInt -> IO (Ptr SDL_Texture)
+
 foreign import ccall unsafe "SDL_RenderTexture" c_SDL_RenderTexture
   :: Ptr SDL_Renderer -> Ptr SDL_Texture -> Ptr FRect -> Ptr FRect -> IO CBool
 
@@ -482,6 +506,12 @@ foreign import ccall unsafe "SDL_RenderRect" c_SDL_RenderRect
 foreign import ccall unsafe "SDL_RenderFillRect" c_SDL_RenderFillRect
   :: Ptr SDL_Renderer -> Ptr FRect -> IO CBool
 
+foreign import ccall unsafe "SDL_SetRenderTarget" c_SDL_SetRenderTarget
+  :: Ptr SDL_Renderer -> Ptr SDL_Texture -> IO CBool
+
+foreign import ccall unsafe "SDL_GetRenderTarget" c_SDL_GetRenderTarget
+  :: Ptr SDL_Renderer -> IO (Ptr SDL_Texture)
+
 sdlSetRenderDrawColorFloat :: Renderer -> CFloat -> CFloat -> CFloat -> CFloat -> IO Bool
 sdlSetRenderDrawColorFloat (Renderer ptr) r g b a =
   fromCBool <$> c_SDL_SetRenderDrawColorFloat ptr r g b a
@@ -491,6 +521,11 @@ sdlRenderClear (Renderer ptr) = fromCBool <$> c_SDL_RenderClear ptr
 
 sdlRenderPresent :: Renderer -> IO ()
 sdlRenderPresent (Renderer ptr) = c_SDL_RenderPresent ptr
+
+sdlCreateTexture :: Renderer -> SDL_PixelFormat -> SDL_TextureAccess -> Int -> Int -> IO (Maybe Texture)
+sdlCreateTexture (Renderer r) format access w h = do
+  ptr <- c_SDL_CreateTexture r format access (fromIntegral w) (fromIntegral h)
+  pure $ if ptr == nullPtr then Nothing else Just (Texture ptr)
 
 sdlRenderTexture :: Renderer -> Texture -> Ptr FRect -> Ptr FRect -> IO Bool
 sdlRenderTexture (Renderer r) (Texture t) src dst =
@@ -511,6 +546,15 @@ sdlRenderRect (Renderer r) rect =
 sdlRenderFillRect :: Renderer -> Ptr FRect -> IO Bool
 sdlRenderFillRect (Renderer r) rect =
   fromCBool <$> c_SDL_RenderFillRect r rect
+
+sdlSetRenderTarget :: Renderer -> Maybe Texture -> IO Bool
+sdlSetRenderTarget (Renderer r) target =
+  fromCBool <$> c_SDL_SetRenderTarget r (maybe nullPtr (\(Texture t) -> t) target)
+
+sdlGetRenderTarget :: Renderer -> IO (Maybe Texture)
+sdlGetRenderTarget (Renderer r) = do
+  ptr <- c_SDL_GetRenderTarget r
+  pure $ if ptr == nullPtr then Nothing else Just (Texture ptr)
 
 foreign import ccall unsafe "SDL_PollEvent" c_SDL_PollEvent
   :: EventPtr -> IO CBool
@@ -539,6 +583,18 @@ foreign import ccall unsafe "SDL_GetMouseState" c_SDL_GetMouseState
 
 sdlGetMouseState :: Ptr CFloat -> Ptr CFloat -> IO Word32
 sdlGetMouseState = c_SDL_GetMouseState
+
+foreign import ccall unsafe "SDL_GetWindowSize" c_SDL_GetWindowSize
+  :: Ptr SDL_Window -> Ptr CInt -> Ptr CInt -> IO ()
+
+sdlGetWindowSize :: Window -> IO (Int, Int)
+sdlGetWindowSize (Window win) =
+  alloca $ \wPtr ->
+    alloca $ \hPtr -> do
+      c_SDL_GetWindowSize win wPtr hPtr
+      w <- peek wPtr
+      h <- peek hPtr
+      pure (fromIntegral w, fromIntegral h)
 
 foreign import ccall unsafe "SDL_GetTicks" c_SDL_GetTicks
   :: IO Word64

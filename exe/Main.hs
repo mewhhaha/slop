@@ -1,3 +1,6 @@
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE NoFieldSelectors #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE QuasiQuotes #-}
 
 module Main (main) where
@@ -5,7 +8,8 @@ module Main (main) where
 import Control.Monad ((>=>))
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
-import Seedl
+import Seedl hiding (clear, draw, output, postProcess, withShader)
+import Seedl.Pipeline
 import Spirdo.Wesl (shaderSpirv, wesl)
 
 demoShaderSpirv :: ByteString
@@ -60,37 +64,35 @@ main = do
     shaderId <- (loadAsset >== crash) demoShaderAsset
     shader <- (awaitAsset >== crash) shaderId
 
-    _ <- loop () $ \frame _ -> do
-      render $ do
-        clear (rgb 0.06 0.07 0.1)
+    targetA <- createRenderTarget cfg.windowWidth cfg.windowHeight
+    targetB <- createRenderTarget cfg.windowWidth cfg.windowHeight
 
-        draw (Line (rgb 0.95 0.35 0.35) (point 80 90) (point 400 130))
-        draw (RectOutline (rgb 0.2 0.8 0.9) (rect 80 150 200 120))
-        draw (RectFill (rgba 0.25 0.25 0.8 0.9) (rect 320 150 120 120))
-        draw (Sprite texture Nothing (rect 80 320 160 160) Nothing)
+    _ <- loop (targetA, targetB) $ \frame (sceneTarget, postTarget) -> do
+      let (winWInt, winHInt) = frame.size
+      let winW = fromIntegral winWInt
+      let winH = fromIntegral winHInt
+      let winRect = rect 0 0 winW winH
+      let params =
+            Vec4
+              frame.time
+              winW
+              winH
+              0
+      let uniforms = [ShaderUniform 0 params]
+      let renderPipeline = do
+            into sceneTarget $ do
+              clear (rgb 0.06 0.07 0.1)
+              draw (Line (rgb 0.95 0.35 0.35) (point 80 90) (point 400 130))
+              draw (RectOutline (rgb 0.2 0.8 0.9) (rect 80 150 200 120))
+              draw (RectFill (rgba 0.25 0.25 0.8 0.9) (rect 320 150 120 120))
+              draw (Sprite texture Nothing (rect 80 320 160 160) Nothing)
+              draw (text font "Seedl + SDL3.4" 80 40)
+            _ <- postProcessTo sceneTarget postTarget shader uniforms Nothing winRect
+            output postTarget Nothing winRect
 
-        draw
-          ( Sprite
-              texture
-              Nothing
-              (rect 280 320 160 160)
-              ( Just
-                  ( shader,
-                    [ ShaderUniform
-                        0
-                        ( Vec4
-                            (frameTime frame)
-                            (fromIntegral (windowWidth cfg))
-                            (fromIntegral (windowHeight cfg))
-                            0
-                        )
-                    ]
-                  )
-              )
-          )
+      runPipeline renderPipeline
 
-        draw (text font "Seedl + SDL3.4" 80 40)
-        pure (Continue ())
+      pure (Continue (sceneTarget, postTarget))
 
     removeAllAssets
     pure ()

@@ -1,5 +1,8 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE NoFieldSelectors #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -11,8 +14,6 @@ module Seedl
   , Window(..)
   , Render
   , runWindowM
-  , runRender
-  , render
   , runWindow
   , runWindowIO
   , askWindow
@@ -20,12 +21,30 @@ module Seedl
   , liftRender
   , loop
   , clear
-  , present
   , setDrawColor
   , drawLine
   , drawRect
   , fillRect
   , drawTexture
+  , RenderTarget
+  , createRenderTarget
+  , destroyTarget
+  , render
+  , drawRender
+  , output
+  , postProcess
+  , TargetRef(..)
+  , RenderPlan
+  , PlanM
+  , PassM
+  , plan
+  , pass
+  , runPlan
+  , passClear
+  , passDraw
+  , passBlit
+  , passWithShader
+  , passPostProcess
   , loadTexture
   , destroyTexture
   , loadFont
@@ -60,7 +79,7 @@ module Seedl
   , point
   , rgb
   , rgba
-  , Texture
+  , Texture(..)
   , Font (..)
   , ShaderAsset(..)
   , SdfFontAsset(..)
@@ -147,6 +166,7 @@ import Control.Concurrent.STM
   , writeTVar
   )
 import Control.Monad.Reader (MonadReader (..), ReaderT (..))
+import Control.Monad.Writer.Strict (Writer, execWriter, runWriter, tell)
 import Control.Monad.IO.Class (MonadIO (..))
 import Data.Bits ((.&.), shiftL)
 import Data.ByteString (ByteString)
@@ -177,8 +197,9 @@ import Seedl.SDL.Raw
   , Renderer (..)
   , Text
   , TextEngine (..)
-  , Texture
+  , Texture(..)
   , imgLoadTexture
+  , sdlCreateTexture
   , sdlCreateGPURenderer
   , sdlCreateGPUShader
   , sdlCreateGPURenderState
@@ -196,6 +217,7 @@ import Seedl.SDL.Raw
   , sdlGPUShaderStageFragment
   , sdlInit
   , sdlInitVideo
+  , sdlGetWindowSize
   , sdlGetMouseState
   , sdlPollEvent
   , sdlPumpEvents
@@ -207,10 +229,14 @@ import Seedl.SDL.Raw
   , sdlRenderPresent
   , sdlRenderRect
   , sdlRenderTexture
+  , sdlGetRenderTarget
   , sdlSetWindowResizable
   , sdlSetGPURenderStateFragmentUniforms
   , sdlSetRenderDrawColorFloat
+  , sdlSetRenderTarget
   , sdlSetGPURenderState
+  , sdlTextureAccessTarget
+  , sdlPixelFormatRGBA8888
   , ttfCreateRendererTextEngine
   , ttfCreateText
   , ttfDestroyRendererTextEngine
@@ -249,16 +275,15 @@ data Window = Window
   , appGPUDevice :: GPUDevice
   , appTextEngine :: TextEngine
   , appAssets :: AssetManager
+  , appTargets :: IORef (Map.Map (Ptr ()) Texture)
   , appRenderState :: IORef RenderState
   }
 
 newtype WindowM a = WindowM (ReaderT Window IO a)
   deriving (Functor, Applicative, Monad, MonadIO, MonadReader Window)
 
-newtype Render a = Render
-  { unRender :: ReaderT Window IO a
-  }
-  deriving (Functor, Applicative, Monad, MonadIO, MonadReader Window)
+newtype Render a = Render (WindowM a)
+  deriving (Functor, Applicative, Monad, MonadIO)
 
 data RenderState = RenderState
   { rsUniformCache :: !(Map.Map UniformKey ByteString)
@@ -275,13 +300,26 @@ data CachedText = CachedText
   , ctLastUsed :: !Word64
   }
 
+newtype DList a = DList ([a] -> [a])
+
+instance Semigroup (DList a) where
+  DList f <> DList g = DList (f . g)
+
+instance Monoid (DList a) where
+  mempty = DList id
+
+singleton :: a -> DList a
+singleton x = DList (x :)
+
+toList :: DList a -> [a]
+toList (DList f) = f []
+
 runWindowM :: Window -> WindowM a -> IO a
 runWindowM window (WindowM action) =
   runReaderT action window
 
-runRender :: Window -> Render a -> IO a
-runRender window (Render action) =
-  runReaderT action window
+runRender :: Render a -> WindowM a
+runRender (Render action) = action
 
 runWindow :: Config -> WindowM a -> IO a
 runWindow cfg action = runWindowIO cfg (\window -> runWindowM window action)
@@ -294,15 +332,11 @@ liftWindow f = do
   window <- ask
   liftIO (f window)
 
-liftRender :: (Window -> IO a) -> Render a
-liftRender f = do
-  window <- ask
-  liftIO (f window)
+liftRender :: WindowM a -> Render a
+liftRender = Render
 
-render :: Render a -> WindowM a
-render action = do
-  window <- ask
-  liftIO (runRender window action)
+withWindowRender :: (Window -> IO a) -> Render a
+withWindowRender f = Render (liftWindow f)
 
 -- Asset manager
 
@@ -350,7 +384,7 @@ data ShaderAsset = ShaderAsset
 instance AssetLoader TextureAsset where
   type AssetType TextureAsset = Texture
   loadAssetIO app (TextureAsset path) = do
-    result <- imgLoadTexture (appRenderer app) path
+    result <- imgLoadTexture (app.appRenderer) path
     case result of
       Nothing -> Left <$> sdlGetError
       Just tex -> pure (Right tex)
@@ -370,7 +404,7 @@ instance AssetLoader FontAsset where
 instance AssetLoader TextAsset where
   type AssetType TextAsset = Text
   loadAssetIO app (TextAsset font str) = do
-    result <- ttfCreateText (appTextEngine app) font str
+    result <- ttfCreateText (app.appTextEngine) font str
     case result of
       Nothing -> Left <$> sdlGetError
       Just textObj -> pure (Right textObj)
@@ -396,11 +430,11 @@ instance AssetLoader SdfFontAsset where
 instance AssetLoader ShaderAsset where
   type AssetType ShaderAsset = Shader
   loadAssetIO app spec = do
-    let bytes = shaderSpirvBytes spec
-    let samplers = shaderSamplers spec
-    let storageTextures = shaderStorageTextures spec
-    let storageBuffers = shaderStorageBuffers spec
-    let uniformBuffers = shaderUniformBuffers spec
+    let bytes = spec.shaderSpirvBytes
+    let samplers = spec.shaderSamplers
+    let storageTextures = spec.shaderStorageTextures
+    let storageBuffers = spec.shaderStorageBuffers
+    let uniformBuffers = spec.shaderUniformBuffers
     Right <$> createShaderFromSpirvWithIO app bytes samplers storageTextures storageBuffers uniformBuffers
   unloadAssetIO _ _ = destroyShaderIO
   assetLabel _ = "shader"
@@ -446,7 +480,7 @@ initAssetManager app = do
 shutdownAssetManager :: Window -> AssetManager -> IO ()
 shutdownAssetManager app mgr = do
   stopVar <- atomically newEmptyTMVar
-  atomically (writeTQueue (amQueue mgr) (StopCommand stopVar))
+  atomically (writeTQueue (mgr.amQueue) (StopCommand stopVar))
   atomically (readTMVar stopVar)
   cleanupAssets app mgr
 
@@ -456,9 +490,9 @@ cleanupAssets app mgr = removeAllAssetsIO app mgr
 removeAllAssetsIO :: Window -> AssetManager -> IO ()
 removeAllAssetsIO app mgr = do
   entries <- atomically $ do
-    st <- readTVar (amState mgr)
-    writeTVar (amState mgr) st { msAssets = Map.empty }
-    pure (Map.elems (msAssets st))
+    st <- readTVar (mgr.amState)
+    writeTVar (mgr.amState) st { msAssets = Map.empty }
+    pure (Map.elems (st.msAssets))
   mapM_ (finalizeEntry app) entries
   where
     finalizeEntry _ (AssetSlot _ (SlotFailed _)) = pure ()
@@ -495,9 +529,9 @@ assetWorker app stateVar queue = go
       Left err -> do
         atomically $ do
           st <- readTVar stateVar
-          case Map.lookup assetId (msAssets st) of
+          case Map.lookup assetId (st.msAssets) of
             Just (AssetSlot typ (SlotLoading var)) -> do
-              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotFailed err)) (msAssets st) }
+              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotFailed err)) (st.msAssets) }
               void (tryPutTMVar var (Left err))
             _ -> pure ()
       Right asset -> do
@@ -506,9 +540,9 @@ assetWorker app stateVar queue = go
         let typ = typeOf asset
         cancelled <- atomically $ do
           st <- readTVar stateVar
-          case Map.lookup assetId (msAssets st) of
+          case Map.lookup assetId (st.msAssets) of
             Just (AssetSlot _ (SlotLoading var)) -> do
-              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotReady dyn finalizer)) (msAssets st) }
+              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotReady dyn finalizer)) (st.msAssets) }
               void (tryPutTMVar var (Right ()))
               pure False
             Nothing -> pure True
@@ -528,16 +562,16 @@ assetWorker app stateVar queue = go
         let typ = typeOf asset
         (_replaced, oldFinalizer, missing) <- atomically $ do
           st <- readTVar stateVar
-          case Map.lookup assetId (msAssets st) of
+          case Map.lookup assetId (st.msAssets) of
             Nothing -> pure (False, Nothing, True)
             Just (AssetSlot _ (SlotReady _ oldFin)) -> do
-              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotReady dyn finalizer)) (msAssets st) }
+              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotReady dyn finalizer)) (st.msAssets) }
               pure (True, Just oldFin, False)
             Just (AssetSlot _ (SlotFailed _)) -> do
-              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotReady dyn finalizer)) (msAssets st) }
+              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotReady dyn finalizer)) (st.msAssets) }
               pure (True, Nothing, False)
             Just (AssetSlot _ (SlotLoading _)) -> do
-              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotReady dyn finalizer)) (msAssets st) }
+              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotReady dyn finalizer)) (st.msAssets) }
               pure (True, Nothing, False)
         if missing
           then do
@@ -553,17 +587,17 @@ assetWorker app stateVar queue = go
 
 registerLoading :: forall a. Typeable a => AssetManager -> IO (AssetId a, TMVar (Either String ()))
 registerLoading mgr = atomically $ do
-  st <- readTVar (amState mgr)
+  st <- readTVar (mgr.amState)
   var <- newEmptyTMVar
-  let newId = msNextId st
+  let newId = st.msNextId
   let slot = AssetSlot (typeRep (Proxy :: Proxy a)) (SlotLoading var)
-  writeTVar (amState mgr) st { msNextId = newId + 1, msAssets = Map.insert newId slot (msAssets st) }
+  writeTVar (mgr.amState) st { msNextId = newId + 1, msAssets = Map.insert newId slot (st.msAssets) }
   pure (AssetId newId, var)
 
 loadAsset :: forall spec. AssetLoader spec => spec -> WindowM (Either String (AssetId (AssetType spec)))
 loadAsset spec = do
   app <- ask
-  let mgr = appAssets app
+  let mgr = app.appAssets
   (assetId, _) <- liftIO (registerLoading @(AssetType spec) mgr)
   result <- liftIO (try @SomeException (loadAssetIO app spec))
   let resolved = case result of
@@ -572,10 +606,10 @@ loadAsset spec = do
   liftIO $ case resolved of
     Left err -> do
       atomically $ do
-        st <- readTVar (amState mgr)
-        case Map.lookup (unAssetId assetId) (msAssets st) of
+        st <- readTVar (mgr.amState)
+        case Map.lookup (assetId.unAssetId) (st.msAssets) of
           Just (AssetSlot typ (SlotLoading var)) -> do
-            writeTVar (amState mgr) st { msAssets = Map.insert (unAssetId assetId) (AssetSlot typ (SlotFailed err)) (msAssets st) }
+            writeTVar (mgr.amState) st { msAssets = Map.insert (assetId.unAssetId) (AssetSlot typ (SlotFailed err)) (st.msAssets) }
             void (tryPutTMVar var (Left err))
           _ -> pure ()
     Right asset -> do
@@ -583,10 +617,10 @@ loadAsset spec = do
       let finalizer = unloadAssetIO app spec asset
       let typ = typeOf asset
       cancelled <- atomically $ do
-        st <- readTVar (amState mgr)
-        case Map.lookup (unAssetId assetId) (msAssets st) of
+        st <- readTVar (mgr.amState)
+        case Map.lookup (assetId.unAssetId) (st.msAssets) of
           Just (AssetSlot _ (SlotLoading var)) -> do
-            writeTVar (amState mgr) st { msAssets = Map.insert (unAssetId assetId) (AssetSlot typ (SlotReady dyn finalizer)) (msAssets st) }
+            writeTVar (mgr.amState) st { msAssets = Map.insert (assetId.unAssetId) (AssetSlot typ (SlotReady dyn finalizer)) (st.msAssets) }
             void (tryPutTMVar var (Right ()))
             pure False
           Nothing -> pure True
@@ -597,24 +631,24 @@ loadAsset spec = do
 loadAssetAsync :: forall spec. AssetLoader spec => spec -> WindowM (AssetId (AssetType spec))
 loadAssetAsync spec = do
   app <- ask
-  let mgr = appAssets app
+  let mgr = app.appAssets
   (assetId, _) <- liftIO (registerLoading @(AssetType spec) mgr)
   liftIO $ atomically $
-    writeTQueue (amQueue mgr) (AssetCommand (unAssetId assetId) spec RequestLoad Nothing)
+    writeTQueue (mgr.amQueue) (AssetCommand (assetId.unAssetId) spec RequestLoad Nothing)
   pure assetId
 
 reloadAssetAsync :: forall spec. AssetLoader spec => AssetId (AssetType spec) -> spec -> WindowM AssetUpdate
 reloadAssetAsync assetId spec = do
   app <- ask
-  let mgr = appAssets app
+  let mgr = app.appAssets
   notify <- liftIO (atomically newEmptyTMVar)
   exists <- liftIO $ atomically $ do
-    st <- readTVar (amState mgr)
-    pure (Map.member (unAssetId assetId) (msAssets st))
+    st <- readTVar (mgr.amState)
+    pure (Map.member (assetId.unAssetId) (st.msAssets))
   if exists
     then do
       liftIO $ atomically $
-        writeTQueue (amQueue mgr) (AssetCommand (unAssetId assetId) spec RequestReload (Just notify))
+        writeTQueue (mgr.amQueue) (AssetCommand (assetId.unAssetId) spec RequestReload (Just notify))
       pure (AssetUpdate notify)
     else do
       liftIO $ atomically (putTMVar notify (Left "asset not found"))
@@ -626,10 +660,10 @@ awaitAssetUpdate (AssetUpdate var) = liftIO (atomically (readTMVar var))
 awaitAsset :: forall a. Typeable a => AssetId a -> WindowM (Either String a)
 awaitAsset assetId = do
   app <- ask
-  let mgr = appAssets app
+  let mgr = app.appAssets
   mWait <- liftIO $ atomically $ do
-    st <- readTVar (amState mgr)
-    case Map.lookup (unAssetId assetId) (msAssets st) of
+    st <- readTVar (mgr.amState)
+    case Map.lookup (assetId.unAssetId) (st.msAssets) of
       Just (AssetSlot _ (SlotLoading var)) -> pure (Just var)
       _ -> pure Nothing
   case mWait of
@@ -656,13 +690,13 @@ getAsset assetId = do
 getAssetStatus :: forall a. Typeable a => AssetId a -> WindowM (Maybe (AssetStatus a))
 getAssetStatus assetId = do
   app <- ask
-  let mgr = appAssets app
+  let mgr = app.appAssets
   liftIO $ atomically $ do
-    st <- readTVar (amState mgr)
+    st <- readTVar (mgr.amState)
     pure $ do
-      slot <- Map.lookup (unAssetId assetId) (msAssets st)
-      let typ = slotType slot
-      let slotState' = slotState slot
+      slot <- Map.lookup (assetId.unAssetId) (st.msAssets)
+      let typ = slot.slotType
+      let slotState' = slot.slotState
       if typ /= typeRep (Proxy :: Proxy a)
         then Nothing
         else case slotState' of
@@ -673,14 +707,14 @@ getAssetStatus assetId = do
 removeAsset :: AssetId a -> WindowM Bool
 removeAsset assetId = do
   app <- ask
-  let mgr = appAssets app
+  let mgr = app.appAssets
   toFinalize <- liftIO $ atomically $ do
-    st <- readTVar (amState mgr)
-    case Map.lookup (unAssetId assetId) (msAssets st) of
+    st <- readTVar (mgr.amState)
+    case Map.lookup (assetId.unAssetId) (st.msAssets) of
       Nothing -> pure (Left False)
       Just slot -> do
-        writeTVar (amState mgr) st { msAssets = Map.delete (unAssetId assetId) (msAssets st) }
-        case slotState slot of
+        writeTVar (mgr.amState) st { msAssets = Map.delete (assetId.unAssetId) (st.msAssets) }
+        case slot.slotState of
           SlotLoading var -> do
             void (tryPutTMVar var (Left "asset removed"))
             pure (Left True)
@@ -709,15 +743,16 @@ removeAssets_ assetIds = do
 removeAllAssets :: WindowM ()
 removeAllAssets = do
   app <- ask
-  liftIO (removeAllAssetsIO app (appAssets app))
+  liftIO (removeAllAssetsIO app (app.appAssets))
 
 
 data Frame = Frame
-  { frameDelta :: Float
-  , frameTime :: Float
-  , frameTicks :: Word64
-  , frameQuitRequested :: Bool
-  , frameInput :: InputFrame
+  { delta :: Float
+  , time :: Float
+  , ticks :: Word64
+  , quitRequested :: Bool
+  , size :: (Int, Int)
+  , input :: InputFrame
   }
   deriving (Eq, Show)
 
@@ -874,6 +909,28 @@ data ShaderUniform where
   ShaderUniform :: Storable a => Word32 -> a -> ShaderUniform
   ShaderUniformBytes :: Word32 -> ByteString -> ShaderUniform
 
+newtype RenderTarget = RenderTarget Texture
+
+data TargetRef
+  = WindowTarget
+  | Target RenderTarget
+
+data Op
+  = OpClear Color
+  | OpDraw DrawItem
+  | OpBlit RenderTarget (Maybe FRect) FRect
+  | OpShader Shader [ShaderUniform] [Op]
+
+data Pass = Pass TargetRef [Op]
+
+newtype RenderPlan = RenderPlan [Pass]
+
+newtype PassM a = PassM (Writer (DList Op) a)
+  deriving (Functor, Applicative, Monad)
+
+newtype PlanM a = PlanM (Writer (DList Pass) a)
+  deriving (Functor, Applicative, Monad)
+
 instance Drawable Line where
   draw (Line color p1 p2) = drawLine color p1 p2
 
@@ -912,17 +969,18 @@ instance Drawable a => Drawable [a] where
 runWindowIO :: Config -> (Window -> IO a) -> IO a
 runWindowIO cfg action =
   bracket_ initSDL shutdownSDL $ do
-    let title = windowTitle cfg
-    let width = windowWidth cfg
-    let height = windowHeight cfg
+    let title = cfg.windowTitle
+    let width = cfg.windowWidth
+    let height = cfg.windowHeight
     window <- require "SDL_CreateWindow" (sdlCreateWindow title width height 0)
     bracket (pure window) sdlDestroyWindow $ \win -> do
-      void $ sdlSetWindowResizable win (windowResizable cfg)
+      void $ sdlSetWindowResizable win (cfg.windowResizable)
       renderer <- require "SDL_CreateGPURenderer" (sdlCreateGPURenderer Nothing (Just win))
       bracket (pure renderer) sdlDestroyRenderer $ \ren -> do
         gpu <- require "SDL_GetGPURendererDevice" (sdlGetGPURendererDevice ren)
         textEngine <- require "TTF_CreateRendererTextEngine" (ttfCreateRendererTextEngine ren)
         bracket (pure textEngine) ttfDestroyRendererTextEngine $ \engine -> do
+          targets <- newIORef Map.empty
           renderState <- newIORef (RenderState Map.empty Map.empty 0)
           let placeholderAssets = error "AssetManager not initialized"
           let windowBase = Window
@@ -931,11 +989,12 @@ runWindowIO cfg action =
                 , appGPUDevice = gpu
                 , appTextEngine = engine
                 , appAssets = placeholderAssets
+                , appTargets = targets
                 , appRenderState = renderState
                 }
           bracket (initAssetManager windowBase) (shutdownAssetManager windowBase) $ \assets -> do
             let windowHandle = windowBase { appAssets = assets }
-            action windowHandle
+            action windowHandle `finally` cleanupRenderTargets windowHandle
   where
     initSDL = do
       ok <- sdlInit sdlInitVideo
@@ -958,48 +1017,6 @@ require label action = do
       err <- sdlGetError
       ioError (userError (label <> " failed: " <> err))
 
-loopIO :: Window -> a -> (Frame -> a -> IO (LoopControl a)) -> IO (LoopExit a)
-loopIO window initialState onFrame = do
-  start <- sdlGetTicks
-  sdlPumpEvents
-  initialInput <- readInputState
-  let go previous frameId prevInput state = do
-        sdlPumpEvents
-        quitRequested <- pollQuit
-        now <- sdlGetTicks
-        currentInput <- readInputState
-        let dt = fromIntegral (now - previous) / 1000
-            t = fromIntegral (now - start) / 1000
-            nextFrame = frameId + 1
-        setFrameId window nextFrame
-        control <- onFrame Frame
-          { frameDelta = dt
-          , frameTime = t
-          , frameTicks = now
-          , frameQuitRequested = quitRequested
-          , frameInput = InputFrame prevInput currentInput
-          } state
-        pruneTextCache window
-        presentIO window
-        case control of
-          Quit result -> pure (ExitStopped result)
-          Continue result ->
-            if quitRequested
-              then pure (ExitQuitRequested result)
-              else go now nextFrame currentInput result
-  go start 0 initialInput initialState
-  where
-    pollQuit = allocaEvent $ \eventPtr ->
-      let step quitSeen = do
-            has <- sdlPollEvent eventPtr
-            if not has
-              then pure quitSeen
-              else do
-                eventType <- peekEventType eventPtr
-                let quitNow = quitSeen || eventType == sdlEventQuit
-                step quitNow
-      in step False
-
 readInputState :: IO InputState
 readInputState = do
   (keysPtr, keyCount) <- sdlGetKeyboardState
@@ -1010,6 +1027,28 @@ readInputState = do
     , inputMouseButtonsDown = buttons
     , inputMousePos = pos
     }
+
+renderTargetKey :: Texture -> Ptr ()
+renderTargetKey (Texture ptr) = castPtr ptr
+
+registerRenderTarget :: Window -> Texture -> IO ()
+registerRenderTarget window tex =
+  atomicModifyIORef' (window.appTargets) $ \targets ->
+    (Map.insert (renderTargetKey tex) tex targets, ())
+
+unregisterRenderTarget :: Window -> Texture -> IO Bool
+unregisterRenderTarget window tex =
+  atomicModifyIORef' (window.appTargets) $ \targets ->
+    let key = renderTargetKey tex
+    in if Map.member key targets
+         then (Map.delete key targets, True)
+         else (targets, False)
+
+cleanupRenderTargets :: Window -> IO ()
+cleanupRenderTargets window = do
+  targets <- atomicModifyIORef' (window.appTargets) $ \targets ->
+    (Map.empty, Map.elems targets)
+  mapM_ sdlDestroyTexture targets
 
 readKeySet :: Ptr Word8 -> Int -> IO IntSet
 readKeySet ptr count = go 0 IntSet.empty
@@ -1032,47 +1071,57 @@ readMouseState =
 
 clearIO :: Window -> Color -> IO ()
 clearIO window (Color r g b a) = do
-  void $ sdlSetRenderDrawColorFloat (appRenderer window) (realToFrac r) (realToFrac g) (realToFrac b) (realToFrac a)
-  void $ sdlRenderClear (appRenderer window)
+  void $ sdlSetRenderDrawColorFloat (window.appRenderer) (realToFrac r) (realToFrac g) (realToFrac b) (realToFrac a)
+  void $ sdlRenderClear (window.appRenderer)
 
 presentIO :: Window -> IO ()
-presentIO = sdlRenderPresent . appRenderer
+presentIO window = sdlRenderPresent window.appRenderer
 
 setDrawColorIO :: Window -> Color -> IO ()
 setDrawColorIO window (Color r g b a) =
-  void $ sdlSetRenderDrawColorFloat (appRenderer window) (realToFrac r) (realToFrac g) (realToFrac b) (realToFrac a)
+  void $ sdlSetRenderDrawColorFloat (window.appRenderer) (realToFrac r) (realToFrac g) (realToFrac b) (realToFrac a)
 
 drawLineIO :: Window -> Color -> FPoint -> FPoint -> IO ()
 drawLineIO window color (FPoint x1 y1) (FPoint x2 y2) = do
   setDrawColorIO window color
-  void $ sdlRenderLine (appRenderer window) x1 y1 x2 y2
+  void $ sdlRenderLine (window.appRenderer) x1 y1 x2 y2
 
 drawRectIO :: Window -> Color -> FRect -> IO ()
 drawRectIO window color rectShape = do
   setDrawColorIO window color
   alloca $ \ptr -> do
     poke ptr rectShape
-    void $ sdlRenderRect (appRenderer window) ptr
+    void $ sdlRenderRect (window.appRenderer) ptr
 
 fillRectIO :: Window -> Color -> FRect -> IO ()
 fillRectIO window color rectShape = do
   setDrawColorIO window color
   alloca $ \ptr -> do
     poke ptr rectShape
-    void $ sdlRenderFillRect (appRenderer window) ptr
+    void $ sdlRenderFillRect (window.appRenderer) ptr
 
 drawTextureIO :: Window -> Texture -> Maybe FRect -> FRect -> IO ()
 drawTextureIO window texture src dst =
   withMaybe src $ \srcPtr ->
     with dst $ \dstPtr ->
-      void $ sdlRenderTexture (appRenderer window) texture srcPtr dstPtr
+      void $ sdlRenderTexture (window.appRenderer) texture srcPtr dstPtr
+
+getRenderTargetIO :: Window -> IO (Maybe Texture)
+getRenderTargetIO window = sdlGetRenderTarget (window.appRenderer)
+
+setRenderTargetIO :: Window -> Maybe Texture -> IO ()
+setRenderTargetIO window target = do
+  ok <- sdlSetRenderTarget (window.appRenderer) target
+  unless ok $ do
+    err <- sdlGetError
+    ioError (userError ("SDL_SetRenderTarget failed: " <> err))
 
 withMaybe :: Storable a => Maybe a -> (Ptr a -> IO b) -> IO b
 withMaybe Nothing f = f nullPtr
 withMaybe (Just value) f = with value f
 
 loadTextureIO :: Window -> FilePath -> IO Texture
-loadTextureIO window path = require "IMG_LoadTexture" (imgLoadTexture (appRenderer window) path)
+loadTextureIO window path = require "IMG_LoadTexture" (imgLoadTexture (window.appRenderer) path)
 
 destroyTextureIO :: Texture -> IO ()
 destroyTextureIO = sdlDestroyTexture
@@ -1100,7 +1149,7 @@ loadFontSDFIO path size = do
   pure font
 
 createTextIO :: Window -> Font -> String -> IO Text
-createTextIO window font str = require "TTF_CreateText" (ttfCreateText (appTextEngine window) font str)
+createTextIO window font str = require "TTF_CreateText" (ttfCreateText (window.appTextEngine) font str)
 
 destroyTextIO :: Text -> IO ()
 destroyTextIO = ttfDestroyText
@@ -1110,44 +1159,172 @@ drawTextIO _ textObj x y = void $ ttfDrawRendererText textObj x y
 
 setFrameId :: Window -> Word64 -> IO ()
 setFrameId window frameId =
-  atomicModifyIORef' (appRenderState window) $ \st ->
+  atomicModifyIORef' (window.appRenderState) $ \st ->
     (st { rsFrameId = frameId }, ())
 
 pruneTextCache :: Window -> IO ()
 pruneTextCache window = do
-  stale <- atomicModifyIORef' (appRenderState window) $ \st ->
-    let (keep, dropMap) = Map.partition (\ct -> ctLastUsed ct == rsFrameId st) (rsTextCache st)
+  stale <- atomicModifyIORef' (window.appRenderState) $ \st ->
+    let (keep, dropMap) = Map.partition (\ct -> ct.ctLastUsed == st.rsFrameId) (st.rsTextCache)
         st' = st { rsTextCache = keep }
-    in (st', map ctText (Map.elems dropMap))
+    in (st', map (\ct -> ct.ctText) (Map.elems dropMap))
   mapM_ ttfDestroyText stale
 
 -- WindowM wrappers
 
-loop :: a -> (Frame -> a -> WindowM (LoopControl a)) -> WindowM (LoopExit a)
+loop :: a -> (Frame -> a -> Render (LoopControl a)) -> WindowM (LoopExit a)
 loop initialState onFrame = do
   window <- ask
-  liftIO (loopIO window initialState (\frame state -> runWindowM window (onFrame frame state)))
+  start <- liftIO sdlGetTicks
+  liftIO sdlPumpEvents
+  initialInput <- liftIO readInputState
+  let go previous frameId prevInput state = do
+        liftIO sdlPumpEvents
+        quitRequested <- liftIO pollQuit
+        now <- liftIO sdlGetTicks
+        currentInput <- liftIO readInputState
+        (winW, winH) <- liftIO (sdlGetWindowSize (window.appWindow))
+        let dt = fromIntegral (now - previous) / 1000
+            t = fromIntegral (now - start) / 1000
+            nextFrame = frameId + 1
+        liftIO (setFrameId window nextFrame)
+        let frame = Frame
+              { delta = dt
+              , time = t
+              , ticks = now
+              , quitRequested = quitRequested
+              , size = (winW, winH)
+              , input = InputFrame prevInput currentInput
+              }
+        control <- runRender (onFrame frame state)
+        liftIO (pruneTextCache window)
+        liftIO (presentIO window)
+        case control of
+          Quit result -> pure (ExitStopped result)
+          Continue result ->
+            if quitRequested
+              then pure (ExitQuitRequested result)
+              else go now nextFrame currentInput result
+  go start 0 initialInput initialState
+  where
+    pollQuit = allocaEvent $ \eventPtr ->
+      let step quitSeen = do
+            has <- sdlPollEvent eventPtr
+            if not has
+              then pure quitSeen
+              else do
+                eventType <- peekEventType eventPtr
+                let quitNow = quitSeen || eventType == sdlEventQuit
+                step quitNow
+      in step False
 
 clear :: Color -> Render ()
-clear color = liftRender (`clearIO` color)
-
-present :: Render ()
-present = liftRender presentIO
+clear color = withWindowRender (\window -> clearIO window color)
 
 setDrawColor :: Color -> Render ()
-setDrawColor color = liftRender (`setDrawColorIO` color)
+setDrawColor color = withWindowRender (\window -> setDrawColorIO window color)
 
 drawLine :: Color -> FPoint -> FPoint -> Render ()
-drawLine color p1 p2 = liftRender (\window -> drawLineIO window color p1 p2)
+drawLine color p1 p2 = withWindowRender (\window -> drawLineIO window color p1 p2)
 
 drawRect :: Color -> FRect -> Render ()
-drawRect color rectShape = liftRender (\window -> drawRectIO window color rectShape)
+drawRect color rectShape = withWindowRender (\window -> drawRectIO window color rectShape)
 
 fillRect :: Color -> FRect -> Render ()
-fillRect color rectShape = liftRender (\window -> fillRectIO window color rectShape)
+fillRect color rectShape = withWindowRender (\window -> fillRectIO window color rectShape)
 
 drawTexture :: Texture -> Maybe FRect -> FRect -> Render ()
-drawTexture texture src dst = liftRender (\window -> drawTextureIO window texture src dst)
+drawTexture texture src dst = withWindowRender (\window -> drawTextureIO window texture src dst)
+
+createRenderTarget :: Int -> Int -> WindowM RenderTarget
+createRenderTarget width height = do
+  window <- ask
+  tex <- liftIO $
+    require
+      "SDL_CreateTexture"
+      (sdlCreateTexture (window.appRenderer) sdlPixelFormatRGBA8888 sdlTextureAccessTarget width height)
+  liftIO (registerRenderTarget window tex)
+  pure (RenderTarget tex)
+
+destroyTarget :: RenderTarget -> WindowM ()
+destroyTarget (RenderTarget tex) = do
+  window <- ask
+  removed <- liftIO (unregisterRenderTarget window tex)
+  if removed
+    then liftIO (destroyTextureIO tex)
+    else pure ()
+
+render :: RenderTarget -> Render () -> Render ()
+render (RenderTarget tex) (Render action) =
+  Render $ do
+    window <- ask
+    prev <- liftIO (getRenderTargetIO window)
+    liftIO $
+      bracket_
+        (setRenderTargetIO window (Just tex))
+        (setRenderTargetIO window prev)
+        (runWindowM window action)
+
+drawRender :: RenderTarget -> Maybe FRect -> FRect -> Render ()
+drawRender (RenderTarget tex) src dst = do
+  drawTexture tex src dst
+
+output :: RenderTarget -> Maybe FRect -> FRect -> Render ()
+output = drawRender
+
+postProcess :: RenderTarget -> RenderTarget -> Shader -> [ShaderUniform] -> Maybe FRect -> FRect -> Render ()
+postProcess (RenderTarget inputTex) (RenderTarget outputTex) shader uniforms src dst = do
+  render (RenderTarget outputTex) $ do
+    withShader shader $ do
+      mapM_ (applyShaderUniform shader) uniforms
+      drawTexture inputTex src dst
+
+plan :: PlanM a -> RenderPlan
+plan (PlanM action) = RenderPlan (toList (execWriter action))
+
+pass :: TargetRef -> PassM a -> PlanM a
+pass passTarget (PassM action) =
+  PlanM $ do
+    let (value, opsList) = runWriter action
+    tell (singleton (Pass passTarget (toList opsList)))
+    pure value
+
+passClear :: Color -> PassM ()
+passClear color = PassM (tell (singleton (OpClear color)))
+
+passDraw :: Drawable a => a -> PassM ()
+passDraw item = PassM (tell (singleton (OpDraw (DrawItem item))))
+
+passBlit :: RenderTarget -> Maybe FRect -> FRect -> PassM ()
+passBlit target src dst = PassM (tell (singleton (OpBlit target src dst)))
+
+passWithShader :: Shader -> [ShaderUniform] -> PassM a -> PassM a
+passWithShader shader uniforms (PassM action) =
+  PassM $ do
+    let (value, opsList) = runWriter action
+    tell (singleton (OpShader shader uniforms (toList opsList)))
+    pure value
+
+passPostProcess :: RenderTarget -> Shader -> [ShaderUniform] -> Maybe FRect -> FRect -> PassM ()
+passPostProcess input shader uniforms src dst =
+  passWithShader shader uniforms (passBlit input src dst)
+
+runPlan :: RenderPlan -> Render ()
+runPlan (RenderPlan passes) = mapM_ runPass passes
+  where
+    runPass (Pass targetRef opsList) =
+      case targetRef of
+        WindowTarget -> runOps opsList
+        Target target -> render target (runOps opsList)
+    runOps = mapM_ runOp
+    runOp op =
+      case op of
+        OpClear color -> clear color
+        OpDraw item -> draw item
+        OpBlit target src dst -> drawRender target src dst
+        OpShader shader uniforms opsList -> do
+          mapM_ (applyShaderUniform shader) uniforms
+          withShader shader (runOps opsList)
 
 loadTexture :: FilePath -> WindowM Texture
 loadTexture path = liftWindow (\window -> loadTextureIO window path)
@@ -1173,30 +1350,31 @@ destroyText :: Text -> WindowM ()
 destroyText textObj = liftIO (destroyTextIO textObj)
 
 drawText :: Text -> Float -> Float -> Render ()
-drawText textObj x y = liftRender (\window -> drawTextIO window textObj x y)
+drawText textObj x y = withWindowRender (\window -> drawTextIO window textObj x y)
 
 drawTextCached :: Font -> String -> Float -> Float -> Render ()
-drawTextCached font str x y = do
-  window <- ask
-  frameId <- liftIO $ atomicModifyIORef' (appRenderState window) (\st -> (st, rsFrameId st))
-  let Font fontPtr = font
-  let key = (castPtr fontPtr, str)
-  cached <- liftIO $ atomicModifyIORef' (appRenderState window) $ \st ->
-    case Map.lookup key (rsTextCache st) of
-      Just entry ->
-        let entry' = entry { ctLastUsed = frameId }
-            cache' = Map.insert key entry' (rsTextCache st)
-        in (st { rsTextCache = cache' }, Just (ctText entry))
-      Nothing -> (st, Nothing)
-  textObj <- case cached of
-    Just t -> pure t
-    Nothing -> do
-      t <- liftIO (createTextIO window font str)
-      liftIO $ atomicModifyIORef' (appRenderState window) $ \st ->
-        let cache' = Map.insert key (CachedText t frameId) (rsTextCache st)
-        in (st { rsTextCache = cache' }, ())
-      pure t
-  liftIO (void $ ttfDrawRendererText textObj x y)
+drawTextCached font str x y =
+  Render $ do
+    window <- ask
+    frameId <- liftIO $ atomicModifyIORef' (window.appRenderState) (\st -> (st, st.rsFrameId))
+    let Font fontPtr = font
+    let key = (castPtr fontPtr, str)
+    cached <- liftIO $ atomicModifyIORef' (window.appRenderState) $ \st ->
+      case Map.lookup key (st.rsTextCache) of
+        Just entry ->
+          let entry' = entry { ctLastUsed = frameId }
+              cache' = Map.insert key entry' (st.rsTextCache)
+          in (st { rsTextCache = cache' }, Just (entry.ctText))
+        Nothing -> (st, Nothing)
+    textObj <- case cached of
+      Just t -> pure t
+      Nothing -> do
+        t <- liftIO (createTextIO window font str)
+        liftIO $ atomicModifyIORef' (window.appRenderState) $ \st ->
+          let cache' = Map.insert key (CachedText t frameId) (st.rsTextCache)
+          in (st { rsTextCache = cache' }, ())
+        pure t
+    liftIO (void $ ttfDrawRendererText textObj x y)
 
 -- Shaders
 
@@ -1226,7 +1404,7 @@ createShaderFromSpirvWithIO window spirv numSamplers numStorageTextures numStora
             , gpuShaderNumUniformBuffers = numUniformBuffers
             , gpuShaderProps = 0
             }
-      shader <- require "SDL_CreateGPUShader" (sdlCreateGPUShader (appGPUDevice window) createInfo)
+      shader <- require "SDL_CreateGPUShader" (sdlCreateGPUShader (window.appGPUDevice) createInfo)
       let GPUShader shaderPtr = shader
       let stateInfo = GPURenderStateCreateInfo
             { gpuRenderFragmentShader = shaderPtr
@@ -1238,37 +1416,37 @@ createShaderFromSpirvWithIO window spirv numSamplers numStorageTextures numStora
             , gpuRenderStorageBuffers = nullPtr
             , gpuRenderProps = 0
             }
-      stateResult <- sdlCreateGPURenderState (appRenderer window) stateInfo
+      stateResult <- sdlCreateGPURenderState (window.appRenderer) stateInfo
       case stateResult of
         Nothing -> do
-          sdlReleaseGPUShader (appGPUDevice window) shader
+          sdlReleaseGPUShader (window.appGPUDevice) shader
           err <- sdlGetError
           ioError (userError ("SDL_CreateGPURenderState failed: " <> err))
         Just gpuState ->
           pure Shader
             { shaderState = gpuState
             , shaderHandle = shader
-            , shaderDevice = appGPUDevice window
+            , shaderDevice = window.appGPUDevice
             }
 
 destroyShaderIO :: Shader -> IO ()
 destroyShaderIO shader = do
-  sdlDestroyGPURenderState (shaderState shader)
-  sdlReleaseGPUShader (shaderDevice shader) (shaderHandle shader)
+  sdlDestroyGPURenderState (shader.shaderState)
+  sdlReleaseGPUShader (shader.shaderDevice) (shader.shaderHandle)
 
 withShaderIO :: Window -> Shader -> IO a -> IO a
 withShaderIO window shader action = do
-  ok <- sdlSetGPURenderState (appRenderer window) (Just (shaderState shader))
+  ok <- sdlSetGPURenderState (window.appRenderer) (Just (shader.shaderState))
   unless ok $ do
     err <- sdlGetError
     ioError (userError ("SDL_SetGPURenderState failed: " <> err))
-  action `finally` void (sdlSetGPURenderState (appRenderer window) Nothing)
+  action `finally` void (sdlSetGPURenderState (window.appRenderer) Nothing)
 
 setShaderUniformIO :: Storable a => Shader -> Word32 -> a -> IO ()
 setShaderUniformIO shader slot value =
   with value $ \ptr -> do
     let sizeBytes = fromIntegral (sizeOf value)
-    ok <- sdlSetGPURenderStateFragmentUniforms (shaderState shader) slot (castPtr ptr) sizeBytes
+    ok <- sdlSetGPURenderStateFragmentUniforms (shader.shaderState) slot (castPtr ptr) sizeBytes
     unless ok $ do
       err <- sdlGetError
       ioError (userError ("SDL_SetGPURenderStateFragmentUniforms failed: " <> err))
@@ -1276,14 +1454,14 @@ setShaderUniformIO shader slot value =
 setShaderUniformBytesIO :: Shader -> Word32 -> ByteString -> IO ()
 setShaderUniformBytesIO shader slot bytes =
   BS.useAsCStringLen bytes $ \(ptr, len) -> do
-    ok <- sdlSetGPURenderStateFragmentUniforms (shaderState shader) slot (castPtr ptr) (fromIntegral len)
+    ok <- sdlSetGPURenderStateFragmentUniforms (shader.shaderState) slot (castPtr ptr) (fromIntegral len)
     unless ok $ do
       err <- sdlGetError
       ioError (userError ("SDL_SetGPURenderStateFragmentUniforms failed: " <> err))
 
 shaderUniformKey :: Shader -> Word32 -> UniformKey
 shaderUniformKey shader slot =
-  case shaderState shader of
+  case shader.shaderState of
     GPURenderState ptr -> (castPtr ptr, slot)
 
 toBytes :: Storable a => a -> IO ByteString
@@ -1297,19 +1475,21 @@ setShaderUniformCached shader slot value = do
   setShaderUniformBytesCached shader slot bytes
 
 setShaderUniformBytesCached :: Shader -> Word32 -> ByteString -> Render ()
-setShaderUniformBytesCached shader slot bytes = do
-  let key = shaderUniformKey shader slot
-  ref <- appRenderState <$> ask
-  shouldUpdate <- liftIO $
-    atomicModifyIORef' ref $ \st ->
-      case Map.lookup key (rsUniformCache st) of
-        Just old | old == bytes -> (st, False)
-        _ ->
-          let cache' = Map.insert key bytes (rsUniformCache st)
-          in (st { rsUniformCache = cache' }, True)
-  if shouldUpdate
-    then liftIO (setShaderUniformBytesIO shader slot bytes)
-    else pure ()
+setShaderUniformBytesCached shader slot bytes =
+  Render $ do
+    window <- ask
+    let key = shaderUniformKey shader slot
+    let ref = window.appRenderState
+    shouldUpdate <- liftIO $
+      atomicModifyIORef' ref $ \st ->
+        case Map.lookup key (st.rsUniformCache) of
+          Just old | old == bytes -> (st, False)
+          _ ->
+            let cache' = Map.insert key bytes (st.rsUniformCache)
+            in (st { rsUniformCache = cache' }, True)
+    if shouldUpdate
+      then liftIO (setShaderUniformBytesIO shader slot bytes)
+      else pure ()
 
 createShaderFromSpirv :: ByteString -> WindowM Shader
 createShaderFromSpirv spirv = liftWindow (\window -> createShaderFromSpirvIO window spirv)
@@ -1320,18 +1500,18 @@ createShaderFromSpirvWith spirv numSamplers numStorageTextures numStorageBuffers
 
 evictShaderCacheIO :: Window -> Shader -> IO ()
 evictShaderCacheIO window shader = do
-  let GPURenderState ptr = shaderState shader
-  atomicModifyIORef' (appRenderState window) $ \st ->
-    let cache' = Map.filterWithKey (\(p, _) _ -> p /= castPtr ptr) (rsUniformCache st)
+  let GPURenderState ptr = shader.shaderState
+  atomicModifyIORef' (window.appRenderState) $ \st ->
+    let cache' = Map.filterWithKey (\(p, _) _ -> p /= castPtr ptr) (st.rsUniformCache)
     in (st { rsUniformCache = cache' }, ())
 
 evictTextCacheForFontIO :: Window -> Font -> IO ()
 evictTextCacheForFontIO window font = do
   let Font fontPtr = font
-  stale <- atomicModifyIORef' (appRenderState window) $ \st ->
-    let (keep, dropMap) = Map.partitionWithKey (\(p, _) _ -> p /= castPtr fontPtr) (rsTextCache st)
+  stale <- atomicModifyIORef' (window.appRenderState) $ \st ->
+    let (keep, dropMap) = Map.partitionWithKey (\(p, _) _ -> p /= castPtr fontPtr) (st.rsTextCache)
         st' = st { rsTextCache = keep }
-    in (st', map ctText (Map.elems dropMap))
+    in (st', map (\ct -> ct.ctText) (Map.elems dropMap))
   mapM_ ttfDestroyText stale
 
 destroyShader :: Shader -> WindowM ()
@@ -1341,18 +1521,19 @@ destroyShader shader = do
   liftIO (destroyShaderIO shader)
 
 withShader :: Shader -> Render a -> Render a
-withShader shader action = do
-  window <- ask
-  liftIO $
-    bracket
-      (do
-        ok <- sdlSetGPURenderState (appRenderer window) (Just (shaderState shader))
-        unless ok $ do
-          err <- sdlGetError
-          ioError (userError ("SDL_SetGPURenderState failed: " <> err))
-      )
-      (\_ -> void (sdlSetGPURenderState (appRenderer window) Nothing))
-      (\_ -> runReaderT (unRender action) window)
+withShader shader (Render action) =
+  Render $ do
+    window <- ask
+    liftIO $
+      bracket
+        (do
+          ok <- sdlSetGPURenderState (window.appRenderer) (Just (shader.shaderState))
+          unless ok $ do
+            err <- sdlGetError
+            ioError (userError ("SDL_SetGPURenderState failed: " <> err))
+        )
+        (\_ -> void (sdlSetGPURenderState (window.appRenderer) Nothing))
+        (\_ -> runWindowM window action)
 
 withShaderUniform :: Storable a => Shader -> Word32 -> a -> Render b -> Render b
 withShaderUniform shader slot value action = do
