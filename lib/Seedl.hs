@@ -276,6 +276,7 @@ data Window = Window
   , appTextEngine :: TextEngine
   , appAssets :: AssetManager
   , appTargets :: IORef (Map.Map (Ptr ()) Texture)
+  , appPipelineTargets :: IORef (Map.Map Int (RenderTarget, (Int, Int)))
   , appRenderState :: IORef RenderState
   }
 
@@ -981,6 +982,7 @@ runWindowIO cfg action =
         textEngine <- require "TTF_CreateRendererTextEngine" (ttfCreateRendererTextEngine ren)
         bracket (pure textEngine) ttfDestroyRendererTextEngine $ \engine -> do
           targets <- newIORef Map.empty
+          pipelineTargets <- newIORef Map.empty
           renderState <- newIORef (RenderState Map.empty Map.empty 0)
           let placeholderAssets = error "AssetManager not initialized"
           let windowBase = Window
@@ -990,6 +992,7 @@ runWindowIO cfg action =
                 , appTextEngine = engine
                 , appAssets = placeholderAssets
                 , appTargets = targets
+                , appPipelineTargets = pipelineTargets
                 , appRenderState = renderState
                 }
           bracket (initAssetManager windowBase) (shutdownAssetManager windowBase) $ \assets -> do
