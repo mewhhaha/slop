@@ -49,7 +49,7 @@ This repo is a small SDL3.4-based rendering + audio toolkit for Haskell. It wrap
 - Asset manager runs on a background thread. Use `loadAssetAsync` + `awaitAsset`.
 - Assets are typed and tracked via `AssetId`. You can `removeAsset` / `removeAllAssets`.
 - Implement custom loaders by defining `AssetLoader` for a spec type.
-- Hot reload can be enabled via `enableHotReload intervalSeconds` and will auto-reload file-backed assets when timestamps change.
+- Hot reload is enabled by default. Use `enableHotReload intervalSeconds` to change the polling interval or `disableHotReload` to turn it off.
 
 ## Audio (SDL3_mixer)
 

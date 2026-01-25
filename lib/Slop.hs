@@ -1297,7 +1297,7 @@ runWindowIO cfg action =
             targets <- newIORef Map.empty
             pipelineTargets <- newIORef Map.empty
             renderState <- newIORef (RenderState Map.empty Map.empty 0)
-            hotReload <- newIORef (HotReloadConfig False 0 0)
+            hotReload <- newIORef (HotReloadConfig True 0.5 0)
             let placeholderAssets = error "AssetManager not initialized"
             let windowBase = Window
                   { appWindow = win

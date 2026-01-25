@@ -110,10 +110,11 @@ Custom loaders implement `AssetLoader`.
 
 ### Hot Reload
 
-Enable hot reload to automatically reload file-backed assets (textures, fonts, music, sfx) when the file timestamp changes:
+Hot reload is enabled by default and automatically reloads file-backed assets (textures, fonts, music, sfx) when the file timestamp changes. You can override the default interval or disable it:
 
 ```haskell
 enableHotReload 0.5 -- check every 0.5s
+disableHotReload
 ```
 
 Hot reload updates the asset manager entry. If you cache the asset value in a local variable, you should re-fetch it via `getAsset` or `awaitAsset` to pick up changes.
