@@ -80,6 +80,47 @@ render (winWInt, winHInt) pipeline
 
 If you want explicit targets instead, use `Slop.Pipeline` or `createRenderTarget` + `render`.
 
+## Shaders + Extra Samplers
+
+`ShaderUniform` now also supports extra sampler bindings. You can use the default sampler or create a custom one:
+
+```haskell
+sampler <- createSampler defaultSamplerDesc
+  { samplerAddressU = SamplerRepeat
+  , samplerAddressV = SamplerRepeat
+  }
+
+let bindings =
+      [ ShaderUniform 0 params
+      , ShaderSamplerWith 0 noiseTexture sampler
+      ]
+```
+
+Additional samplers are bound in order. For WESL/SPIR-V, the first extra sampler uses `@group(2) @binding(2)` for the texture and `@binding(3)` for the sampler (the main render texture is at bindings 0/1).
+
+### Named bindings
+
+If you prefer names over slots, register a binding table and resolve per-frame:
+
+```haskell
+let bindings =
+      ShaderBindings
+        { shaderUniformSlots = Map.fromList [("params", 0)]
+        , shaderSamplerSlots = Map.fromList [("noiseTex", 0)]
+        , shaderStorageTextureSlots = Map.empty
+        }
+setShaderBindings shader bindings
+
+uniforms <- resolveNamedUniforms bindings
+  [ NamedUniform "params" params
+  , NamedSamplerWith "noiseTex" noiseTexture sampler
+  ]
+```
+
+### Vertex/compute stages
+
+The renderer backend only supports fragment bindings today. The stage-aware API (`withShaderBindingsStage` / `ShaderBinding`) will throw if you try to bind vertex or compute stages.
+
 ## Input (Keycodes)
 
 Input is **keycode-based** (layout-aware), not raw scancodes. Use `KeyA`, `KeyB`, `KeySpace`, etc.

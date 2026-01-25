@@ -91,6 +91,15 @@ module Slop
   , Text
   , Audio(..)
   , Shader
+  , Sampler(..)
+  , SamplerDesc(..)
+  , SamplerFilter(..)
+  , SamplerMipmap(..)
+  , SamplerAddress(..)
+  , SamplerCompare(..)
+  , defaultSamplerDesc
+  , createSampler
+  , destroySampler
   , Drawable(..)
   , DrawItem(..)
   , Line(..)
@@ -101,6 +110,17 @@ module Slop
   , TextDraw(..)
   , text
   , ShaderUniform(..)
+  , ShaderStage(..)
+  , ShaderBinding(..)
+  , NamedShaderBinding(..)
+  , ShaderBindings(..)
+  , NamedUniform(..)
+  , emptyShaderBindings
+  , setShaderBindings
+  , getShaderBindings
+  , resolveNamedUniforms
+  , withShaderBindingsStage
+  , withShaderBindingsNamed
   , AssetId(..)
   , AnyAssetId(..)
   , AssetStatus(..)
@@ -171,6 +191,7 @@ module Slop
   , createShaderFromSpirv
   , createShaderFromSpirvWith
   , destroyShader
+  , withShaderBindings
   , withShader
   , setShaderUniformCached
   , setShaderUniformBytesCached
@@ -178,7 +199,7 @@ module Slop
   ) where
 
 import Control.Exception (SomeException, bracket, bracket_, finally, try)
-import Control.Monad (foldM, replicateM, unless, void, when)
+import Control.Monad (foldM, forM, replicateM, unless, void, when)
 import Control.Concurrent (ThreadId, forkIO)
 import Control.Concurrent.STM
   ( TMVar
@@ -214,7 +235,7 @@ import Data.Proxy (Proxy (..))
 import Data.Time.Clock (UTCTime)
 import Data.Typeable (TypeRep, Typeable, typeOf, typeRep)
 import Data.Word (Word8, Word32, Word64)
-import Foreign (Ptr, Storable (..), alloca, castPtr, nullPtr, peek, poke, pokeByteOff, with)
+import Foreign (Ptr, Storable (..), alloca, castPtr, nullPtr, peek, poke, pokeByteOff, with, withArrayLen)
 import Foreign.C.String (withCString)
 import Foreign.C.Types (CFloat (..))
 import System.Directory (getModificationTime)
@@ -227,9 +248,17 @@ import Slop.SDL.Raw
   , Mixer(..)
   , Audio(..)
   , Track(..)
+  , SDL_GPUFilter
+  , SDL_GPUSamplerMipmapMode
+  , SDL_GPUSamplerAddressMode
+  , SDL_GPUCompareOp
   , GPUDevice (..)
+  , GPUTexture (..)
   , GPUShader (..)
   , GPURenderState (..)
+  , GPUSampler (..)
+  , GPUTextureSamplerBinding (..)
+  , GPUSamplerCreateInfo (..)
   , GPURenderStateCreateInfo (..)
   , GPUShaderCreateInfo (..)
   , Renderer (..)
@@ -255,10 +284,12 @@ import Slop.SDL.Raw
   , sdlAudioDeviceDefaultPlayback
   , sdlCreateTexture
   , sdlCreateGPURenderer
+  , sdlCreateGPUSampler
   , sdlCreateGPUShader
   , sdlCreateGPURenderState
   , sdlCreateWindow
   , sdlDestroyGPURenderState
+  , sdlReleaseGPUSampler
   , sdlDestroyRenderer
   , sdlDestroyTexture
   , sdlDestroyWindow
@@ -286,6 +317,9 @@ import Slop.SDL.Raw
   , sdlRenderRect
   , sdlRenderTexture
   , sdlGetRenderTarget
+  , sdlGetTextureProperties
+  , sdlGetPointerProperty
+  , sdlPropTextureGpuTexturePointer
   , sdlSetWindowResizable
   , sdlSetGPURenderStateFragmentUniforms
   , sdlSetRenderDrawColorFloat
@@ -335,6 +369,7 @@ data Window = Window
   { appWindow :: SDL.Window
   , appRenderer :: Renderer
   , appGPUDevice :: GPUDevice
+  , appDefaultSampler :: Sampler
   , appTextEngine :: TextEngine
   , appMixer :: Mixer
   , appMusicTrack :: IORef (Maybe Track)
@@ -366,6 +401,21 @@ data CachedText = CachedText
   { ctText :: !Text
   , ctLastUsed :: !Word64
   }
+
+newtype PtrKey = PtrKey (Ptr ())
+  deriving (Eq, Ord, Show)
+
+data SamplerKey = SamplerKey
+  { samplerTextureKey :: !PtrKey
+  , samplerSamplerKey :: !PtrKey
+  }
+  deriving (Eq, Ord, Show)
+
+data BindingKey = BindingKey
+  { bindingSamplers :: ![SamplerKey]
+  , bindingStorageTextures :: ![PtrKey]
+  }
+  deriving (Eq, Ord, Show)
 
 newtype DList a = DList ([a] -> [a])
 
@@ -1218,6 +1268,102 @@ text = TextDraw
 data ShaderUniform where
   ShaderUniform :: Storable a => Word32 -> a -> ShaderUniform
   ShaderUniformBytes :: Word32 -> ByteString -> ShaderUniform
+  ShaderSampler :: Word32 -> Texture -> ShaderUniform
+  ShaderSamplerWith :: Word32 -> Texture -> Sampler -> ShaderUniform
+  ShaderStorageTexture :: Word32 -> Texture -> ShaderUniform
+
+data ShaderStage
+  = ShaderFragment
+  | ShaderVertex
+  | ShaderCompute
+  deriving (Eq, Ord, Show)
+
+data ShaderBinding where
+  ShaderBindUniform :: Storable a => ShaderStage -> Word32 -> a -> ShaderBinding
+  ShaderBindUniformBytes :: ShaderStage -> Word32 -> ByteString -> ShaderBinding
+  ShaderBindSampler :: ShaderStage -> Word32 -> Texture -> ShaderBinding
+  ShaderBindSamplerWith :: ShaderStage -> Word32 -> Texture -> Sampler -> ShaderBinding
+  ShaderBindStorageTexture :: ShaderStage -> Word32 -> Texture -> ShaderBinding
+
+data NamedShaderBinding where
+  ShaderBindUniformNamed :: Storable a => ShaderStage -> String -> a -> NamedShaderBinding
+  ShaderBindUniformBytesNamed :: ShaderStage -> String -> ByteString -> NamedShaderBinding
+  ShaderBindSamplerNamed :: ShaderStage -> String -> Texture -> NamedShaderBinding
+  ShaderBindSamplerWithNamed :: ShaderStage -> String -> Texture -> Sampler -> NamedShaderBinding
+  ShaderBindStorageTextureNamed :: ShaderStage -> String -> Texture -> NamedShaderBinding
+
+data ShaderBindings = ShaderBindings
+  { shaderUniformSlots :: Map.Map String Word32
+  , shaderSamplerSlots :: Map.Map String Word32
+  , shaderStorageTextureSlots :: Map.Map String Word32
+  }
+  deriving (Eq, Show)
+
+emptyShaderBindings :: ShaderBindings
+emptyShaderBindings = ShaderBindings Map.empty Map.empty Map.empty
+
+data NamedUniform where
+  NamedUniform :: Storable a => String -> a -> NamedUniform
+  NamedUniformBytes :: String -> ByteString -> NamedUniform
+  NamedSampler :: String -> Texture -> NamedUniform
+  NamedSamplerWith :: String -> Texture -> Sampler -> NamedUniform
+  NamedStorageTexture :: String -> Texture -> NamedUniform
+
+data UniformBinding = UniformBinding !Word32 !ByteString
+
+newtype Sampler = Sampler GPUSampler
+  deriving (Eq, Show)
+
+data SamplerFilter
+  = SamplerNearest
+  | SamplerLinear
+  deriving (Eq, Show)
+
+data SamplerMipmap
+  = SamplerMipmapNearest
+  | SamplerMipmapLinear
+  deriving (Eq, Show)
+
+data SamplerAddress
+  = SamplerRepeat
+  | SamplerMirroredRepeat
+  | SamplerClampToEdge
+  deriving (Eq, Show)
+
+data SamplerCompare
+  = SamplerCompareInvalid
+  | SamplerCompareNever
+  | SamplerCompareLess
+  | SamplerCompareEqual
+  | SamplerCompareLessOrEqual
+  | SamplerCompareGreater
+  | SamplerCompareNotEqual
+  | SamplerCompareGreaterOrEqual
+  | SamplerCompareAlways
+  deriving (Eq, Show)
+
+data SamplerDesc = SamplerDesc
+  { samplerMinFilter :: SamplerFilter
+  , samplerMagFilter :: SamplerFilter
+  , samplerMipmapMode :: SamplerMipmap
+  , samplerAddressU :: SamplerAddress
+  , samplerAddressV :: SamplerAddress
+  , samplerAddressW :: SamplerAddress
+  , samplerMipLodBias :: Float
+  , samplerMaxAnisotropy :: Float
+  , samplerCompareOp :: SamplerCompare
+  , samplerMinLod :: Float
+  , samplerMaxLod :: Float
+  , samplerEnableAnisotropy :: Bool
+  , samplerEnableCompare :: Bool
+  }
+  deriving (Eq, Show)
+
+data SamplerBindingSpec = SamplerBindingSpec !Word32 !Texture !(Maybe Sampler)
+
+data SamplerBinding = SamplerBinding !Texture !Sampler
+
+data StorageBinding = StorageBinding !Word32 !Texture
 
 newtype RenderTarget = RenderTarget Texture
 
@@ -1254,21 +1400,14 @@ instance Drawable Sprite where
   draw (Sprite texture src dst shaderSpec) =
     case shaderSpec of
       Nothing -> drawTexture texture src dst
-      Just (sh, uniforms) -> do
-        mapM_ (applyShaderUniform sh) uniforms
-        withShader sh (drawTexture texture src dst)
+      Just (sh, uniforms) ->
+        withShaderBindings sh uniforms (drawTexture texture src dst)
 
 instance Drawable Label where
   draw (Label textObj x y) = drawText textObj x y
 
 instance Drawable TextDraw where
   draw (TextDraw font str x y) = drawTextCached font str x y
-
-applyShaderUniform :: Shader -> ShaderUniform -> Loop ()
-applyShaderUniform shader uniform =
-  case uniform of
-    ShaderUniform slot value -> setShaderUniformCached shader slot value
-    ShaderUniformBytes slot bytes -> setShaderUniformBytesCached shader slot bytes
 
 instance Drawable DrawItem where
   draw (DrawItem item) = draw item
@@ -1288,34 +1427,38 @@ runWindowIO cfg action =
       renderer <- require "SDL_CreateGPURenderer" (sdlCreateGPURenderer Nothing (Just win))
       bracket (pure renderer) sdlDestroyRenderer $ \ren -> do
         gpu <- require "SDL_GetGPURendererDevice" (sdlGetGPURendererDevice ren)
-        textEngine <- require "TTF_CreateRendererTextEngine" (ttfCreateRendererTextEngine ren)
-        bracket (pure textEngine) ttfDestroyRendererTextEngine $ \engine -> do
-          mixer <- require "MIX_CreateMixerDevice" (mixCreateMixerDevice sdlAudioDeviceDefaultPlayback)
-          bracket (pure mixer) mixDestroyMixer $ \mix -> do
-            musicTrackRef <- newIORef Nothing
-            blendPools <- newIORef []
-            targets <- newIORef Map.empty
-            pipelineTargets <- newIORef Map.empty
-            renderState <- newIORef (RenderState Map.empty Map.empty 0)
-            hotReload <- newIORef (HotReloadConfig True 0.5 0)
-            let placeholderAssets = error "AssetManager not initialized"
-            let windowBase = Window
-                  { appWindow = win
-                  , appRenderer = ren
-                  , appGPUDevice = gpu
-                  , appTextEngine = engine
-                  , appMixer = mix
-                  , appMusicTrack = musicTrackRef
-                  , appBlendPools = blendPools
-                  , appAssets = placeholderAssets
-                  , appTargets = targets
-                  , appPipelineTargets = pipelineTargets
-                  , appRenderState = renderState
-                  , appHotReload = hotReload
-                  }
-            bracket (initAssetManager windowBase) (shutdownAssetManager windowBase) $ \assets -> do
-              let windowHandle = windowBase { appAssets = assets }
-              action windowHandle `finally` cleanupRenderTargets windowHandle
+        sampler <- require "SDL_CreateGPUSampler" (sdlCreateGPUSampler gpu defaultSamplerCreateInfo)
+        let defaultSampler = Sampler sampler
+        bracket (pure sampler) (sdlReleaseGPUSampler gpu) $ \_ -> do
+          textEngine <- require "TTF_CreateRendererTextEngine" (ttfCreateRendererTextEngine ren)
+          bracket (pure textEngine) ttfDestroyRendererTextEngine $ \engine -> do
+            mixer <- require "MIX_CreateMixerDevice" (mixCreateMixerDevice sdlAudioDeviceDefaultPlayback)
+            bracket (pure mixer) mixDestroyMixer $ \mix -> do
+              musicTrackRef <- newIORef Nothing
+              blendPools <- newIORef []
+              targets <- newIORef Map.empty
+              pipelineTargets <- newIORef Map.empty
+              renderState <- newIORef (RenderState Map.empty Map.empty 0)
+              hotReload <- newIORef (HotReloadConfig True 0.5 0)
+              let placeholderAssets = error "AssetManager not initialized"
+              let windowBase = Window
+                    { appWindow = win
+                    , appRenderer = ren
+                    , appGPUDevice = gpu
+                    , appDefaultSampler = defaultSampler
+                    , appTextEngine = engine
+                    , appMixer = mix
+                    , appMusicTrack = musicTrackRef
+                    , appBlendPools = blendPools
+                    , appAssets = placeholderAssets
+                    , appTargets = targets
+                    , appPipelineTargets = pipelineTargets
+                    , appRenderState = renderState
+                    , appHotReload = hotReload
+                    }
+              bracket (initAssetManager windowBase) (shutdownAssetManager windowBase) $ \assets -> do
+                let windowHandle = windowBase { appAssets = assets }
+                action windowHandle `finally` cleanupRenderTargets windowHandle
   where
     initSDL = do
       ok <- sdlInit (sdlInitVideo .|. sdlInitAudio)
@@ -1626,10 +1769,8 @@ output = drawRender
 
 postProcess :: RenderTarget -> RenderTarget -> Shader -> [ShaderUniform] -> Maybe FRect -> FRect -> Loop ()
 postProcess (RenderTarget inputTex) (RenderTarget outputTex) shader uniforms src dst = do
-  render (RenderTarget outputTex) $ do
-    withShader shader $ do
-      mapM_ (applyShaderUniform shader) uniforms
-      drawTexture inputTex src dst
+  render (RenderTarget outputTex) $
+    withShaderBindings shader uniforms (drawTexture inputTex src dst)
 
 plan :: PlanM a -> RenderPlan
 plan (PlanM action) = RenderPlan (toList (execWriter action))
@@ -1674,9 +1815,8 @@ runPlan (RenderPlan passes) = mapM_ runPass passes
         OpClear color -> clear color
         OpDraw item -> draw item
         OpBlit target src dst -> drawRender target src dst
-        OpShader shader uniforms opsList -> do
-          mapM_ (applyShaderUniform shader) uniforms
-          withShader shader (runOps opsList)
+        OpShader shader uniforms opsList ->
+          withShaderBindings shader uniforms (runOps opsList)
 
 loadTexture :: FilePath -> WindowM Texture
 loadTexture path = liftWindow (\window -> loadTextureIO window path)
@@ -2044,7 +2184,100 @@ data Shader = Shader
   { shaderState :: GPURenderState
   , shaderHandle :: GPUShader
   , shaderDevice :: GPUDevice
+  , shaderStateCache :: IORef (Map.Map BindingKey GPURenderState)
+  , shaderBindingTable :: IORef ShaderBindings
   }
+
+defaultSamplerDesc :: SamplerDesc
+defaultSamplerDesc = SamplerDesc
+  { samplerMinFilter = SamplerLinear
+  , samplerMagFilter = SamplerLinear
+  , samplerMipmapMode = SamplerMipmapLinear
+  , samplerAddressU = SamplerClampToEdge
+  , samplerAddressV = SamplerClampToEdge
+  , samplerAddressW = SamplerClampToEdge
+  , samplerMipLodBias = 0
+  , samplerMaxAnisotropy = 1
+  , samplerCompareOp = SamplerCompareInvalid
+  , samplerMinLod = 0
+  , samplerMaxLod = 0
+  , samplerEnableAnisotropy = False
+  , samplerEnableCompare = False
+  }
+
+samplerFilterToSDL :: SamplerFilter -> SDL_GPUFilter
+samplerFilterToSDL filterMode =
+  case filterMode of
+    SamplerNearest -> 0
+    SamplerLinear -> 1
+
+samplerMipmapToSDL :: SamplerMipmap -> SDL_GPUSamplerMipmapMode
+samplerMipmapToSDL mode =
+  case mode of
+    SamplerMipmapNearest -> 0
+    SamplerMipmapLinear -> 1
+
+samplerAddressToSDL :: SamplerAddress -> SDL_GPUSamplerAddressMode
+samplerAddressToSDL mode =
+  case mode of
+    SamplerRepeat -> 0
+    SamplerMirroredRepeat -> 1
+    SamplerClampToEdge -> 2
+
+samplerCompareToSDL :: SamplerCompare -> SDL_GPUCompareOp
+samplerCompareToSDL mode =
+  case mode of
+    SamplerCompareInvalid -> 0
+    SamplerCompareNever -> 1
+    SamplerCompareLess -> 2
+    SamplerCompareEqual -> 3
+    SamplerCompareLessOrEqual -> 4
+    SamplerCompareGreater -> 5
+    SamplerCompareNotEqual -> 6
+    SamplerCompareGreaterOrEqual -> 7
+    SamplerCompareAlways -> 8
+
+samplerDescToCreateInfo :: SamplerDesc -> GPUSamplerCreateInfo
+samplerDescToCreateInfo desc = GPUSamplerCreateInfo
+  { gpuSamplerMinFilter = samplerFilterToSDL desc.samplerMinFilter
+  , gpuSamplerMagFilter = samplerFilterToSDL desc.samplerMagFilter
+  , gpuSamplerMipmapMode = samplerMipmapToSDL desc.samplerMipmapMode
+  , gpuSamplerAddressModeU = samplerAddressToSDL desc.samplerAddressU
+  , gpuSamplerAddressModeV = samplerAddressToSDL desc.samplerAddressV
+  , gpuSamplerAddressModeW = samplerAddressToSDL desc.samplerAddressW
+  , gpuSamplerMipLodBias = realToFrac desc.samplerMipLodBias
+  , gpuSamplerMaxAnisotropy = realToFrac desc.samplerMaxAnisotropy
+  , gpuSamplerCompareOp = samplerCompareToSDL desc.samplerCompareOp
+  , gpuSamplerMinLod = realToFrac desc.samplerMinLod
+  , gpuSamplerMaxLod = realToFrac desc.samplerMaxLod
+  , gpuSamplerEnableAnisotropy = if desc.samplerEnableAnisotropy then 1 else 0
+  , gpuSamplerEnableCompare = if desc.samplerEnableCompare then 1 else 0
+  , gpuSamplerPadding1 = 0
+  , gpuSamplerPadding2 = 0
+  , gpuSamplerProps = 0
+  }
+
+defaultSamplerCreateInfo :: GPUSamplerCreateInfo
+defaultSamplerCreateInfo = samplerDescToCreateInfo defaultSamplerDesc
+
+createSampler :: SamplerDesc -> WindowM Sampler
+createSampler desc = do
+  window <- ask
+  sampler <- liftIO $ require "SDL_CreateGPUSampler" (sdlCreateGPUSampler window.appGPUDevice (samplerDescToCreateInfo desc))
+  pure (Sampler sampler)
+
+destroySampler :: Sampler -> WindowM ()
+destroySampler (Sampler sampler) = do
+  window <- ask
+  liftIO (sdlReleaseGPUSampler window.appGPUDevice sampler)
+
+setShaderBindings :: Shader -> ShaderBindings -> WindowM ()
+setShaderBindings shader bindings =
+  liftIO (writeIORef shader.shaderBindingTable bindings)
+
+getShaderBindings :: Shader -> WindowM ShaderBindings
+getShaderBindings shader =
+  liftIO (readIORef shader.shaderBindingTable)
 
 createShaderFromSpirvIO :: Window -> ByteString -> IO Shader
 createShaderFromSpirvIO window spirv =
@@ -2084,15 +2317,21 @@ createShaderFromSpirvWithIO window spirv numSamplers numStorageTextures numStora
           sdlReleaseGPUShader (window.appGPUDevice) shader
           err <- sdlGetError
           ioError (userError ("SDL_CreateGPURenderState failed: " <> err))
-        Just gpuState ->
+        Just gpuState -> do
+          cacheRef <- newIORef Map.empty
+          bindingsRef <- newIORef emptyShaderBindings
           pure Shader
             { shaderState = gpuState
             , shaderHandle = shader
             , shaderDevice = window.appGPUDevice
+            , shaderStateCache = cacheRef
+            , shaderBindingTable = bindingsRef
             }
 
 destroyShaderIO :: Shader -> IO ()
 destroyShaderIO shader = do
+  cached <- readIORef shader.shaderStateCache
+  mapM_ sdlDestroyGPURenderState (Map.elems cached)
   sdlDestroyGPURenderState (shader.shaderState)
   sdlReleaseGPUShader (shader.shaderDevice) (shader.shaderHandle)
 
@@ -2121,26 +2360,255 @@ setShaderUniformBytesIO shader slot bytes =
       err <- sdlGetError
       ioError (userError ("SDL_SetGPURenderStateFragmentUniforms failed: " <> err))
 
-shaderUniformKey :: Shader -> Word32 -> UniformKey
-shaderUniformKey shader slot =
-  case shader.shaderState of
+setShaderUniformBytesIOFromState :: GPURenderState -> Word32 -> ByteString -> IO ()
+setShaderUniformBytesIOFromState state slot bytes =
+  BS.useAsCStringLen bytes $ \(ptr, len) -> do
+    ok <- sdlSetGPURenderStateFragmentUniforms state slot (castPtr ptr) (fromIntegral len)
+    unless ok $ do
+      err <- sdlGetError
+      ioError (userError ("SDL_SetGPURenderStateFragmentUniforms failed: " <> err))
+
+shaderUniformKeyState :: GPURenderState -> Word32 -> UniformKey
+shaderUniformKeyState state slot =
+  case state of
     GPURenderState ptr -> (castPtr ptr, slot)
+
 
 toBytes :: Storable a => a -> IO ByteString
 toBytes value =
   BSI.create (sizeOf value) $ \ptr ->
     poke (castPtr ptr) value
 
-setShaderUniformCached :: Storable a => Shader -> Word32 -> a -> Loop ()
-setShaderUniformCached shader slot value = do
-  bytes <- liftIO (toBytes value)
-  setShaderUniformBytesCached shader slot bytes
+collectShaderBindings :: [ShaderUniform] -> IO ([UniformBinding], [SamplerBindingSpec], [StorageBinding])
+collectShaderBindings = foldM step ([], [], [])
+  where
+    step (uniforms, samplers, storage) binding =
+      case binding of
+        ShaderUniform slot value -> do
+          bytes <- toBytes value
+          pure (UniformBinding slot bytes : uniforms, samplers, storage)
+        ShaderUniformBytes slot bytes ->
+          pure (UniformBinding slot bytes : uniforms, samplers, storage)
+        ShaderSampler slot tex ->
+          pure (uniforms, SamplerBindingSpec slot tex Nothing : samplers, storage)
+        ShaderSamplerWith slot tex sampler ->
+          pure (uniforms, SamplerBindingSpec slot tex (Just sampler) : samplers, storage)
+        ShaderStorageTexture slot tex ->
+          pure (uniforms, samplers, StorageBinding slot tex : storage)
 
-setShaderUniformBytesCached :: Shader -> Word32 -> ByteString -> Loop ()
-setShaderUniformBytesCached shader slot bytes =
+collectStageBindings :: [ShaderBinding] -> IO ([UniformBinding], [SamplerBindingSpec], [StorageBinding])
+collectStageBindings = foldM step ([], [], [])
+  where
+    step acc binding =
+      case binding of
+        ShaderBindUniform stage slot value -> do
+          ensureFragmentStage stage
+          bytes <- toBytes value
+          let (uniforms, samplers, storage) = acc
+          pure (UniformBinding slot bytes : uniforms, samplers, storage)
+        ShaderBindUniformBytes stage slot bytes -> do
+          ensureFragmentStage stage
+          let (uniforms, samplers, storage) = acc
+          pure (UniformBinding slot bytes : uniforms, samplers, storage)
+        ShaderBindSampler stage slot tex -> do
+          ensureFragmentStage stage
+          let (uniforms, samplers, storage) = acc
+          pure (uniforms, SamplerBindingSpec slot tex Nothing : samplers, storage)
+        ShaderBindSamplerWith stage slot tex sampler -> do
+          ensureFragmentStage stage
+          let (uniforms, samplers, storage) = acc
+          pure (uniforms, SamplerBindingSpec slot tex (Just sampler) : samplers, storage)
+        ShaderBindStorageTexture stage slot tex -> do
+          ensureFragmentStage stage
+          let (uniforms, samplers, storage) = acc
+          pure (uniforms, samplers, StorageBinding slot tex : storage)
+
+ensureFragmentStage :: ShaderStage -> IO ()
+ensureFragmentStage stage =
+  case stage of
+    ShaderFragment -> pure ()
+    ShaderVertex ->
+      ioError (userError "vertex-stage bindings are not supported by the SDL renderer backend")
+    ShaderCompute ->
+      ioError (userError "compute-stage bindings are not supported by the SDL renderer backend")
+
+normalizeBindings :: String -> [(Word32, a)] -> IO [a]
+normalizeBindings label bindings =
+  case bindings of
+    [] -> pure []
+    _ -> do
+      let pairs = map (\(slot, value) -> (fromIntegral slot :: Int, value)) bindings
+      let mapSlots = Map.fromList pairs
+      when (Map.size mapSlots /= length pairs) $
+        ioError (userError ("duplicate " <> label <> " binding slot"))
+      let slots = Map.keys mapSlots
+      let maxSlot = last slots
+      let expected = [0 .. maxSlot]
+      when (slots /= expected) $
+        ioError (userError ("non-contiguous " <> label <> " binding slots; expected 0.." <> show maxSlot))
+      pure (map snd (Map.toAscList mapSlots))
+
+resolveNamedUniforms :: ShaderBindings -> [NamedUniform] -> IO [ShaderUniform]
+resolveNamedUniforms bindings =
+  fmap reverse . foldM (step bindings) []
+  where
+    step table acc entry =
+      case entry of
+        NamedUniform name value -> do
+          slot <- lookupUniformSlot table name
+          pure (ShaderUniform slot value : acc)
+        NamedUniformBytes name bytes -> do
+          slot <- lookupUniformSlot table name
+          pure (ShaderUniformBytes slot bytes : acc)
+        NamedSampler name tex -> do
+          slot <- lookupSamplerSlot table name
+          pure (ShaderSampler slot tex : acc)
+        NamedSamplerWith name tex sampler -> do
+          slot <- lookupSamplerSlot table name
+          pure (ShaderSamplerWith slot tex sampler : acc)
+        NamedStorageTexture name tex -> do
+          slot <- lookupStorageTextureSlot table name
+          pure (ShaderStorageTexture slot tex : acc)
+
+resolveNamedBindings :: ShaderBindings -> [NamedShaderBinding] -> IO [ShaderBinding]
+resolveNamedBindings bindings =
+  fmap reverse . foldM (step bindings) []
+  where
+    step table acc entry =
+      case entry of
+        ShaderBindUniformNamed stage name value -> do
+          slot <- lookupUniformSlot table name
+          pure (ShaderBindUniform stage slot value : acc)
+        ShaderBindUniformBytesNamed stage name bytes -> do
+          slot <- lookupUniformSlot table name
+          pure (ShaderBindUniformBytes stage slot bytes : acc)
+        ShaderBindSamplerNamed stage name tex -> do
+          slot <- lookupSamplerSlot table name
+          pure (ShaderBindSampler stage slot tex : acc)
+        ShaderBindSamplerWithNamed stage name tex sampler -> do
+          slot <- lookupSamplerSlot table name
+          pure (ShaderBindSamplerWith stage slot tex sampler : acc)
+        ShaderBindStorageTextureNamed stage name tex -> do
+          slot <- lookupStorageTextureSlot table name
+          pure (ShaderBindStorageTexture stage slot tex : acc)
+
+lookupUniformSlot :: ShaderBindings -> String -> IO Word32
+lookupUniformSlot table name =
+  case Map.lookup name table.shaderUniformSlots of
+    Just slot -> pure slot
+    Nothing -> ioError (userError ("unknown uniform binding: " <> name))
+
+lookupSamplerSlot :: ShaderBindings -> String -> IO Word32
+lookupSamplerSlot table name =
+  case Map.lookup name table.shaderSamplerSlots of
+    Just slot -> pure slot
+    Nothing -> ioError (userError ("unknown sampler binding: " <> name))
+
+lookupStorageTextureSlot :: ShaderBindings -> String -> IO Word32
+lookupStorageTextureSlot table name =
+  case Map.lookup name table.shaderStorageTextureSlots of
+    Just slot -> pure slot
+    Nothing -> ioError (userError ("unknown storage texture binding: " <> name))
+
+textureToGPUTextureIO :: Texture -> IO (Maybe GPUTexture)
+textureToGPUTextureIO texture = do
+  props <- sdlGetTextureProperties texture
+  if props == 0
+    then pure Nothing
+    else do
+      ptr <- sdlGetPointerProperty props sdlPropTextureGpuTexturePointer nullPtr
+      if ptr == nullPtr
+        then pure Nothing
+        else pure (Just (GPUTexture (castPtr ptr)))
+
+requireGPUTexture :: Texture -> IO GPUTexture
+requireGPUTexture texture = do
+  result <- textureToGPUTextureIO texture
+  case result of
+    Just gpuTex -> pure gpuTex
+    Nothing -> ioError (userError "texture is not GPU-backed; sampler bindings require a GPU renderer texture")
+
+buildSamplerBindings :: Window -> [SamplerBinding] -> IO ([GPUTextureSamplerBinding], [SamplerKey])
+buildSamplerBindings _ bindings = do
+  pairs <- forM bindings $ \(SamplerBinding tex sampler) -> do
+    gpuTex@(GPUTexture texPtr) <- requireGPUTexture tex
+    let Sampler (GPUSampler samplerPtr) = sampler
+    let binding = GPUTextureSamplerBinding gpuTex (GPUSampler samplerPtr)
+    let key = SamplerKey (PtrKey (castPtr texPtr)) (PtrKey (castPtr samplerPtr))
+    pure (binding, key)
+  pure (map fst pairs, map snd pairs)
+
+buildStorageBindings :: [Texture] -> IO ([GPUTexture], [PtrKey])
+buildStorageBindings textures = do
+  gpuTexs <- mapM requireGPUTexture textures
+  let keys = map (\(GPUTexture ptr) -> PtrKey (castPtr ptr)) gpuTexs
+  pure (gpuTexs, keys)
+
+createRenderStateWithBindings :: Window -> Shader -> [GPUTextureSamplerBinding] -> [GPUTexture] -> IO GPURenderState
+createRenderStateWithBindings window shader samplerBindings storageTextures = do
+  let GPUShader shaderPtr = shader.shaderHandle
+  let renderer = window.appRenderer
+  let withSamplers action =
+        if null samplerBindings
+          then action 0 nullPtr
+          else withArrayLen samplerBindings (\count ptr -> action (fromIntegral count) (castPtr ptr))
+  let withStorage action =
+        if null storageTextures
+          then action 0 nullPtr
+          else
+            let storagePtrs = map (\(GPUTexture ptr) -> ptr) storageTextures
+            in withArrayLen storagePtrs (\count ptr -> action (fromIntegral count) (castPtr ptr))
+  withSamplers $ \samplerCount samplerPtr ->
+    withStorage $ \storageCount storagePtr -> do
+      let stateInfo = GPURenderStateCreateInfo
+            { gpuRenderFragmentShader = shaderPtr
+            , gpuRenderNumSamplerBindings = samplerCount
+            , gpuRenderSamplerBindings = samplerPtr
+            , gpuRenderNumStorageTextures = storageCount
+            , gpuRenderStorageTextures = storagePtr
+            , gpuRenderNumStorageBuffers = 0
+            , gpuRenderStorageBuffers = nullPtr
+            , gpuRenderProps = 0
+            }
+      result <- sdlCreateGPURenderState renderer stateInfo
+      case result of
+        Nothing -> do
+          err <- sdlGetError
+          ioError (userError ("SDL_CreateGPURenderState failed: " <> err))
+        Just state -> pure state
+
+getShaderRenderState :: Window -> Shader -> [SamplerBindingSpec] -> [StorageBinding] -> IO GPURenderState
+getShaderRenderState window shader samplers storage
+  | null samplers && null storage = pure shader.shaderState
+  | otherwise = do
+      samplerList <- normalizeBindings "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) samplers)
+      let samplerBindings = map (\(tex, sampler) -> SamplerBinding tex (fromMaybe window.appDefaultSampler sampler)) samplerList
+      storageList <- normalizeBindings "storage texture" (map (\(StorageBinding slot tex) -> (slot, tex)) storage)
+      (samplerBindingsRaw, samplerKeys) <- buildSamplerBindings window samplerBindings
+      (storageTextures, storageKeys) <- buildStorageBindings storageList
+      let key = BindingKey samplerKeys storageKeys
+      cache <- readIORef shader.shaderStateCache
+      case Map.lookup key cache of
+        Just state -> pure state
+        Nothing -> do
+          state <- createRenderStateWithBindings window shader samplerBindingsRaw storageTextures
+          writeIORef shader.shaderStateCache (Map.insert key state cache)
+          pure state
+
+setShaderUniformCachedOn :: Storable a => GPURenderState -> Word32 -> a -> Loop ()
+setShaderUniformCachedOn state slot value = do
+  bytes <- liftIO (toBytes value)
+  setShaderUniformBytesCachedOn state slot bytes
+
+setShaderUniformCached :: Storable a => Shader -> Word32 -> a -> Loop ()
+setShaderUniformCached shader slot value =
+  setShaderUniformCachedOn shader.shaderState slot value
+
+setShaderUniformBytesCachedOn :: GPURenderState -> Word32 -> ByteString -> Loop ()
+setShaderUniformBytesCachedOn state slot bytes =
   Loop $ do
     window <- ask
-    let key = shaderUniformKey shader slot
+    let key = shaderUniformKeyState state slot
     let ref = window.appRenderState
     shouldUpdate <- liftIO $
       atomicModifyIORef' ref $ \st ->
@@ -2150,8 +2618,12 @@ setShaderUniformBytesCached shader slot bytes =
             let cache' = Map.insert key bytes (st.rsUniformCache)
             in (st { rsUniformCache = cache' }, True)
     if shouldUpdate
-      then liftIO (setShaderUniformBytesIO shader slot bytes)
+      then liftIO (setShaderUniformBytesIOFromState state slot bytes)
       else pure ()
+
+setShaderUniformBytesCached :: Shader -> Word32 -> ByteString -> Loop ()
+setShaderUniformBytesCached shader slot bytes =
+  setShaderUniformBytesCachedOn shader.shaderState slot bytes
 
 createShaderFromSpirv :: ByteString -> WindowM Shader
 createShaderFromSpirv spirv = liftWindow (\window -> createShaderFromSpirvIO window spirv)
@@ -2162,9 +2634,10 @@ createShaderFromSpirvWith spirv numSamplers numStorageTextures numStorageBuffers
 
 evictShaderCacheIO :: Window -> Shader -> IO ()
 evictShaderCacheIO window shader = do
-  let GPURenderState ptr = shader.shaderState
+  cached <- readIORef shader.shaderStateCache
+  let statePtrs = map (\(GPURenderState ptr) -> castPtr ptr) (shader.shaderState : Map.elems cached)
   atomicModifyIORef' (window.appRenderState) $ \st ->
-    let cache' = Map.filterWithKey (\(p, _) _ -> p /= castPtr ptr) (st.rsUniformCache)
+    let cache' = Map.filterWithKey (\(p, _) _ -> p `notElem` statePtrs) (st.rsUniformCache)
     in (st { rsUniformCache = cache' }, ())
 
 evictTextCacheForFontIO :: Window -> Font -> IO ()
@@ -2181,6 +2654,45 @@ destroyShader shader = do
   window <- ask
   liftIO (evictShaderCacheIO window shader)
   liftIO (destroyShaderIO shader)
+
+withShaderBindings :: Shader -> [ShaderUniform] -> Loop a -> Loop a
+withShaderBindings shader bindings action =
+  Loop $ do
+    collected <- liftIO (collectShaderBindings bindings)
+    runLoop (withShaderBindingsInternal shader collected action)
+
+withShaderBindingsStage :: Shader -> [ShaderBinding] -> Loop a -> Loop a
+withShaderBindingsStage shader bindings action =
+  Loop $ do
+    collected <- liftIO (collectStageBindings bindings)
+    runLoop (withShaderBindingsInternal shader collected action)
+
+withShaderBindingsNamed :: Shader -> [NamedShaderBinding] -> Loop a -> Loop a
+withShaderBindingsNamed shader bindings action =
+  Loop $ do
+    table <- liftIO (readIORef shader.shaderBindingTable)
+    resolved <- liftIO (resolveNamedBindings table bindings)
+    runLoop (withShaderBindingsStage shader resolved action)
+
+withShaderBindingsInternal :: Shader -> ([UniformBinding], [SamplerBindingSpec], [StorageBinding]) -> Loop a -> Loop a
+withShaderBindingsInternal shader (uniforms, samplers, storage) (Loop action) =
+  Loop $ do
+    window <- ask
+    state <- liftIO (getShaderRenderState window shader samplers storage)
+    mapM_ (applyUniformBinding state) uniforms
+    liftIO $
+      bracket
+        (do
+          ok <- sdlSetGPURenderState (window.appRenderer) (Just state)
+          unless ok $ do
+            err <- sdlGetError
+            ioError (userError ("SDL_SetGPURenderState failed: " <> err))
+        )
+        (\_ -> void (sdlSetGPURenderState (window.appRenderer) Nothing))
+        (\_ -> runWindowM window action)
+  where
+    applyUniformBinding state (UniformBinding slot bytes) =
+      runLoop (setShaderUniformBytesCachedOn state slot bytes)
 
 withShader :: Shader -> Loop a -> Loop a
 withShader shader (Loop action) =

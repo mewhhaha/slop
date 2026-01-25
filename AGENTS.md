@@ -31,6 +31,10 @@ This repo is a small SDL3.4-based rendering + audio toolkit for Haskell. It wrap
 - `render target (Loop ())` sets the current render target; `output` draws the target to the window.
 - The Graph DSL (`Slop.Pipeline.Graph`) builds a declarative render pipeline. It manages render targets per node and resizes them automatically when the window size changes.
 - Shader uniforms are applied via `ShaderUniform` values and cached per-frame in the render state.
+- `ShaderUniform` also supports extra sampler bindings (`ShaderSampler`) for additional textures.
+- Use `createSampler` + `ShaderSamplerWith` to bind custom samplers (wrap modes, filtering).
+- Named bindings are supported via `ShaderBindings` + `resolveNamedUniforms`.
+- Stage-aware bindings exist (`ShaderBinding`, `withShaderBindingsStage`), but vertex/compute are not supported by the SDL renderer backend yet.
 
 ## Text
 

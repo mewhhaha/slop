@@ -12,6 +12,10 @@ module Slop.SDL.Raw
   , SDL_TextureAccess
   , SDL_GPUShaderFormat
   , SDL_GPUShaderStage
+  , SDL_GPUFilter
+  , SDL_GPUSamplerMipmapMode
+  , SDL_GPUSamplerAddressMode
+  , SDL_GPUCompareOp
   , SDL_EventType
   , SDL_PropertiesID
   , SDL_Keycode
@@ -23,15 +27,19 @@ module Slop.SDL.Raw
   , Audio(..)
   , Track(..)
   , GPUDevice(..)
+  , GPUTexture(..)
   , GPUShader(..)
   , GPURenderState(..)
+  , GPUSampler(..)
   , TextEngine(..)
   , Font(..)
   , Text(..)
   , SDL_Event
   , FRect(..)
   , FPoint(..)
+  , GPUTextureSamplerBinding(..)
   , GPUShaderCreateInfo(..)
+  , GPUSamplerCreateInfo(..)
   , GPURenderStateCreateInfo(..)
   , sdlInitVideo
   , sdlInitAudio
@@ -39,6 +47,14 @@ module Slop.SDL.Raw
   , sdlGPUShaderFormatSpirv
   , sdlGPUShaderStageVertex
   , sdlGPUShaderStageFragment
+  , sdlGPUFilterNearest
+  , sdlGPUFilterLinear
+  , sdlGPUSamplerMipmapModeNearest
+  , sdlGPUSamplerMipmapModeLinear
+  , sdlGPUSamplerAddressModeRepeat
+  , sdlGPUSamplerAddressModeMirroredRepeat
+  , sdlGPUSamplerAddressModeClampToEdge
+  , sdlGPUCompareOpInvalid
   , sdlAudioDeviceDefaultPlayback
   , sdlInit
   , sdlQuit
@@ -60,6 +76,9 @@ module Slop.SDL.Raw
   , sdlCreateTexture
   , sdlSetRenderTarget
   , sdlGetRenderTarget
+  , sdlGetTextureProperties
+  , sdlGetPointerProperty
+  , sdlPropTextureGpuTexturePointer
   , sdlTextureAccessTarget
   , sdlPixelFormatRGBA8888
   , sdlPollEvent
@@ -110,6 +129,8 @@ module Slop.SDL.Raw
   , sdlDestroyGPURenderState
   , sdlSetGPURenderState
   , sdlSetGPURenderStateFragmentUniforms
+  , sdlCreateGPUSampler
+  , sdlReleaseGPUSampler
   ) where
 
 import Data.Bits (shiftL)
@@ -133,6 +154,14 @@ type SDL_TextureAccess = CInt
 type SDL_GPUShaderFormat = Word32
 
 type SDL_GPUShaderStage = CInt
+
+type SDL_GPUFilter = CInt
+
+type SDL_GPUSamplerMipmapMode = CInt
+
+type SDL_GPUSamplerAddressMode = CInt
+
+type SDL_GPUCompareOp = CInt
 
 type SDL_EventType = Word32
 
@@ -164,11 +193,38 @@ sdlGPUShaderStageVertex = 0
 sdlGPUShaderStageFragment :: SDL_GPUShaderStage
 sdlGPUShaderStageFragment = 1
 
+sdlGPUFilterNearest :: SDL_GPUFilter
+sdlGPUFilterNearest = 0
+
+sdlGPUFilterLinear :: SDL_GPUFilter
+sdlGPUFilterLinear = 1
+
+sdlGPUSamplerMipmapModeNearest :: SDL_GPUSamplerMipmapMode
+sdlGPUSamplerMipmapModeNearest = 0
+
+sdlGPUSamplerMipmapModeLinear :: SDL_GPUSamplerMipmapMode
+sdlGPUSamplerMipmapModeLinear = 1
+
+sdlGPUSamplerAddressModeRepeat :: SDL_GPUSamplerAddressMode
+sdlGPUSamplerAddressModeRepeat = 0
+
+sdlGPUSamplerAddressModeMirroredRepeat :: SDL_GPUSamplerAddressMode
+sdlGPUSamplerAddressModeMirroredRepeat = 1
+
+sdlGPUSamplerAddressModeClampToEdge :: SDL_GPUSamplerAddressMode
+sdlGPUSamplerAddressModeClampToEdge = 2
+
+sdlGPUCompareOpInvalid :: SDL_GPUCompareOp
+sdlGPUCompareOpInvalid = 0
+
 sdlTextureAccessTarget :: SDL_TextureAccess
 sdlTextureAccessTarget = 2
 
 sdlPixelFormatRGBA8888 :: SDL_PixelFormat
 sdlPixelFormatRGBA8888 = 0x16462004
+
+sdlPropTextureGpuTexturePointer :: String
+sdlPropTextureGpuTexturePointer = "SDL.texture.gpu.texture"
 
 sdlAudioDeviceDefaultPlayback :: SDL_AudioDeviceID
 sdlAudioDeviceDefaultPlayback = 0xFFFFFFFF
@@ -196,11 +252,17 @@ newtype Track = Track (Ptr MIX_Track) deriving (Eq, Show)
 data SDL_GPUDevice
 newtype GPUDevice = GPUDevice (Ptr SDL_GPUDevice) deriving (Eq, Show)
 
+data SDL_GPUTexture
+newtype GPUTexture = GPUTexture (Ptr SDL_GPUTexture) deriving (Eq, Show)
+
 data SDL_GPUShader
 newtype GPUShader = GPUShader (Ptr SDL_GPUShader) deriving (Eq, Show)
 
 data SDL_GPURenderState
 newtype GPURenderState = GPURenderState (Ptr SDL_GPURenderState) deriving (Eq, Show)
+
+data SDL_GPUSampler
+newtype GPUSampler = GPUSampler (Ptr SDL_GPUSampler) deriving (Eq, Show)
 
 data TTF_TextEngine
 newtype TextEngine = TextEngine (Ptr TTF_TextEngine) deriving (Eq, Show)
@@ -276,6 +338,43 @@ instance Storable FRect where
 
 -- GPU structs
 
+data GPUTextureSamplerBinding = GPUTextureSamplerBinding
+  { gpuSamplerTexture :: GPUTexture
+  , gpuSamplerSampler :: GPUSampler
+  }
+  deriving (Eq, Show)
+
+instance Storable GPUTextureSamplerBinding where
+  sizeOf _ = 2 * sizeOf (undefined :: Ptr ())
+  alignment _ = alignment (undefined :: Ptr ())
+  peek ptr = do
+    texturePtr <- peekByteOff ptr 0
+    samplerPtr <- peekByteOff ptr (sizeOf (undefined :: Ptr ()))
+    pure (GPUTextureSamplerBinding (GPUTexture texturePtr) (GPUSampler samplerPtr))
+  poke ptr (GPUTextureSamplerBinding (GPUTexture texturePtr) (GPUSampler samplerPtr)) = do
+    pokeByteOff ptr 0 texturePtr
+    pokeByteOff ptr (sizeOf (undefined :: Ptr ())) samplerPtr
+
+data GPUSamplerCreateInfo = GPUSamplerCreateInfo
+  { gpuSamplerMinFilter :: SDL_GPUFilter
+  , gpuSamplerMagFilter :: SDL_GPUFilter
+  , gpuSamplerMipmapMode :: SDL_GPUSamplerMipmapMode
+  , gpuSamplerAddressModeU :: SDL_GPUSamplerAddressMode
+  , gpuSamplerAddressModeV :: SDL_GPUSamplerAddressMode
+  , gpuSamplerAddressModeW :: SDL_GPUSamplerAddressMode
+  , gpuSamplerMipLodBias :: CFloat
+  , gpuSamplerMaxAnisotropy :: CFloat
+  , gpuSamplerCompareOp :: SDL_GPUCompareOp
+  , gpuSamplerMinLod :: CFloat
+  , gpuSamplerMaxLod :: CFloat
+  , gpuSamplerEnableAnisotropy :: CBool
+  , gpuSamplerEnableCompare :: CBool
+  , gpuSamplerPadding1 :: Word8
+  , gpuSamplerPadding2 :: Word8
+  , gpuSamplerProps :: SDL_PropertiesID
+  }
+  deriving (Eq, Show)
+
 data GPUShaderCreateInfo = GPUShaderCreateInfo
   { gpuShaderCodeSize :: CSize
   , gpuShaderCode :: Ptr Word8
@@ -324,6 +423,106 @@ structLayout fields = go 0 1 [] fields
     go offset maxAlign acc (CField sz al : rest) =
       let off = alignTo offset al
       in go (off + sz) (max maxAlign al) (off : acc) rest
+
+gpuSamplerCreateInfoSize :: Int
+gpuSamplerCreateInfoAlign :: Int
+gpuSamplerCreateInfoOffsets :: [Int]
+(gpuSamplerCreateInfoSize, gpuSamplerCreateInfoAlign, gpuSamplerCreateInfoOffsets) =
+  structLayout
+    [ cField (Proxy @CInt)
+    , cField (Proxy @CInt)
+    , cField (Proxy @CInt)
+    , cField (Proxy @CInt)
+    , cField (Proxy @CInt)
+    , cField (Proxy @CInt)
+    , cField (Proxy @CFloat)
+    , cField (Proxy @CFloat)
+    , cField (Proxy @CInt)
+    , cField (Proxy @CFloat)
+    , cField (Proxy @CFloat)
+    , cField (Proxy @CBool)
+    , cField (Proxy @CBool)
+    , cField (Proxy @Word8)
+    , cField (Proxy @Word8)
+    , cField (Proxy @Word32)
+    ]
+
+( gpuSamplerMinFilterOffset
+  , gpuSamplerMagFilterOffset
+  , gpuSamplerMipmapModeOffset
+  , gpuSamplerAddressModeUOffset
+  , gpuSamplerAddressModeVOffset
+  , gpuSamplerAddressModeWOffset
+  , gpuSamplerMipLodBiasOffset
+  , gpuSamplerMaxAnisotropyOffset
+  , gpuSamplerCompareOpOffset
+  , gpuSamplerMinLodOffset
+  , gpuSamplerMaxLodOffset
+  , gpuSamplerEnableAnisotropyOffset
+  , gpuSamplerEnableCompareOffset
+  , gpuSamplerPadding1Offset
+  , gpuSamplerPadding2Offset
+  , gpuSamplerPropsOffset
+  ) =
+  case gpuSamplerCreateInfoOffsets of
+    [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] -> (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p)
+    _ -> error "GPUSamplerCreateInfo layout mismatch"
+
+instance Storable GPUSamplerCreateInfo where
+  sizeOf _ = gpuSamplerCreateInfoSize
+  alignment _ = gpuSamplerCreateInfoAlign
+  peek ptr = do
+    minFilter <- peekByteOff ptr gpuSamplerMinFilterOffset
+    magFilter <- peekByteOff ptr gpuSamplerMagFilterOffset
+    mipmapMode <- peekByteOff ptr gpuSamplerMipmapModeOffset
+    addrU <- peekByteOff ptr gpuSamplerAddressModeUOffset
+    addrV <- peekByteOff ptr gpuSamplerAddressModeVOffset
+    addrW <- peekByteOff ptr gpuSamplerAddressModeWOffset
+    mipBias <- peekByteOff ptr gpuSamplerMipLodBiasOffset
+    maxAniso <- peekByteOff ptr gpuSamplerMaxAnisotropyOffset
+    compareOp <- peekByteOff ptr gpuSamplerCompareOpOffset
+    minLod <- peekByteOff ptr gpuSamplerMinLodOffset
+    maxLod <- peekByteOff ptr gpuSamplerMaxLodOffset
+    enableAniso <- peekByteOff ptr gpuSamplerEnableAnisotropyOffset
+    enableCompare <- peekByteOff ptr gpuSamplerEnableCompareOffset
+    pad1 <- peekByteOff ptr gpuSamplerPadding1Offset
+    pad2 <- peekByteOff ptr gpuSamplerPadding2Offset
+    props <- peekByteOff ptr gpuSamplerPropsOffset
+    pure GPUSamplerCreateInfo
+      { gpuSamplerMinFilter = minFilter
+      , gpuSamplerMagFilter = magFilter
+      , gpuSamplerMipmapMode = mipmapMode
+      , gpuSamplerAddressModeU = addrU
+      , gpuSamplerAddressModeV = addrV
+      , gpuSamplerAddressModeW = addrW
+      , gpuSamplerMipLodBias = mipBias
+      , gpuSamplerMaxAnisotropy = maxAniso
+      , gpuSamplerCompareOp = compareOp
+      , gpuSamplerMinLod = minLod
+      , gpuSamplerMaxLod = maxLod
+      , gpuSamplerEnableAnisotropy = enableAniso
+      , gpuSamplerEnableCompare = enableCompare
+      , gpuSamplerPadding1 = pad1
+      , gpuSamplerPadding2 = pad2
+      , gpuSamplerProps = props
+      }
+  poke ptr info = do
+    pokeByteOff ptr gpuSamplerMinFilterOffset info.gpuSamplerMinFilter
+    pokeByteOff ptr gpuSamplerMagFilterOffset info.gpuSamplerMagFilter
+    pokeByteOff ptr gpuSamplerMipmapModeOffset info.gpuSamplerMipmapMode
+    pokeByteOff ptr gpuSamplerAddressModeUOffset info.gpuSamplerAddressModeU
+    pokeByteOff ptr gpuSamplerAddressModeVOffset info.gpuSamplerAddressModeV
+    pokeByteOff ptr gpuSamplerAddressModeWOffset info.gpuSamplerAddressModeW
+    pokeByteOff ptr gpuSamplerMipLodBiasOffset info.gpuSamplerMipLodBias
+    pokeByteOff ptr gpuSamplerMaxAnisotropyOffset info.gpuSamplerMaxAnisotropy
+    pokeByteOff ptr gpuSamplerCompareOpOffset info.gpuSamplerCompareOp
+    pokeByteOff ptr gpuSamplerMinLodOffset info.gpuSamplerMinLod
+    pokeByteOff ptr gpuSamplerMaxLodOffset info.gpuSamplerMaxLod
+    pokeByteOff ptr gpuSamplerEnableAnisotropyOffset info.gpuSamplerEnableAnisotropy
+    pokeByteOff ptr gpuSamplerEnableCompareOffset info.gpuSamplerEnableCompare
+    pokeByteOff ptr gpuSamplerPadding1Offset info.gpuSamplerPadding1
+    pokeByteOff ptr gpuSamplerPadding2Offset info.gpuSamplerPadding2
+    pokeByteOff ptr gpuSamplerPropsOffset info.gpuSamplerProps
 
 gpuShaderCreateInfoSize :: Int
 gpuShaderCreateInfoAlign :: Int
@@ -603,6 +802,19 @@ sdlGetRenderTarget :: Renderer -> IO (Maybe Texture)
 sdlGetRenderTarget (Renderer r) = do
   ptr <- c_SDL_GetRenderTarget r
   pure $ if ptr == nullPtr then Nothing else Just (Texture ptr)
+
+foreign import ccall unsafe "SDL_GetTextureProperties" c_SDL_GetTextureProperties
+  :: Ptr SDL_Texture -> IO SDL_PropertiesID
+
+sdlGetTextureProperties :: Texture -> IO SDL_PropertiesID
+sdlGetTextureProperties (Texture t) = c_SDL_GetTextureProperties t
+
+foreign import ccall unsafe "SDL_GetPointerProperty" c_SDL_GetPointerProperty
+  :: SDL_PropertiesID -> CString -> Ptr () -> IO (Ptr ())
+
+sdlGetPointerProperty :: SDL_PropertiesID -> String -> Ptr () -> IO (Ptr ())
+sdlGetPointerProperty props name def =
+  withCString name (\cName -> c_SDL_GetPointerProperty props cName def)
 
 foreign import ccall unsafe "SDL_PollEvent" c_SDL_PollEvent
   :: EventPtr -> IO CBool
@@ -889,6 +1101,12 @@ mixTrackPlaying (Track track) =
 
 -- GPU shaders and render state
 
+foreign import ccall unsafe "SDL_CreateGPUSampler" c_SDL_CreateGPUSampler
+  :: Ptr SDL_GPUDevice -> Ptr GPUSamplerCreateInfo -> IO (Ptr SDL_GPUSampler)
+
+foreign import ccall unsafe "SDL_ReleaseGPUSampler" c_SDL_ReleaseGPUSampler
+  :: Ptr SDL_GPUDevice -> Ptr SDL_GPUSampler -> IO ()
+
 foreign import ccall unsafe "SDL_CreateGPUShader" c_SDL_CreateGPUShader
   :: Ptr SDL_GPUDevice -> Ptr GPUShaderCreateInfo -> IO (Ptr SDL_GPUShader)
 
@@ -912,6 +1130,16 @@ sdlCreateGPUShader (GPUDevice dev) info =
   with info $ \ptr -> do
     shader <- c_SDL_CreateGPUShader dev ptr
     pure $ if shader == nullPtr then Nothing else Just (GPUShader shader)
+
+sdlCreateGPUSampler :: GPUDevice -> GPUSamplerCreateInfo -> IO (Maybe GPUSampler)
+sdlCreateGPUSampler (GPUDevice dev) info =
+  with info $ \ptr -> do
+    sampler <- c_SDL_CreateGPUSampler dev ptr
+    pure $ if sampler == nullPtr then Nothing else Just (GPUSampler sampler)
+
+sdlReleaseGPUSampler :: GPUDevice -> GPUSampler -> IO ()
+sdlReleaseGPUSampler (GPUDevice dev) (GPUSampler sampler) =
+  c_SDL_ReleaseGPUSampler dev sampler
 
 sdlReleaseGPUShader :: GPUDevice -> GPUShader -> IO ()
 sdlReleaseGPUShader (GPUDevice dev) (GPUShader shader) =

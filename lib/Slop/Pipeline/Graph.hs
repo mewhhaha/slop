@@ -38,8 +38,7 @@ import Slop
   , ShaderUniform (..)
   , askWindow
   , liftLoop
-  , setShaderUniformBytesCached
-  , setShaderUniformCached
+  , withShaderBindings
   )
 import Slop.SDL.Raw (FRect)
 
@@ -180,12 +179,5 @@ blitTarget :: RenderTarget -> Maybe FRect -> FRect -> Loop ()
 blitTarget = S.output
 
 passWithShader :: Shader -> [ShaderUniform] -> Loop a -> Loop a
-passWithShader shader uniforms action = do
-  mapM_ (applyUniform shader) uniforms
-  S.withShader shader action
-
-applyUniform :: Shader -> ShaderUniform -> Loop ()
-applyUniform shader uniform =
-  case uniform of
-    ShaderUniform slot value -> setShaderUniformCached shader slot value
-    ShaderUniformBytes slot bytes -> setShaderUniformBytesCached shader slot bytes
+passWithShader shader uniforms action =
+  withShaderBindings shader uniforms action

@@ -8,6 +8,7 @@ module Main (main) where
 import Control.Monad ((>=>))
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
+import qualified Data.Map.Strict as Map
 import Slop hiding (clear, draw, output, pass, postProcess, render, withShader)
 import Slop.Pipeline.Graph
 import Spirdo.Wesl (shaderSpirv, wesl)
@@ -26,6 +27,8 @@ struct Params {
 @group(3) @binding(0) var<uniform> params: Params;
 @group(2) @binding(0) var spriteTex: texture_2d<f32>;
 @group(2) @binding(1) var spriteSamp: sampler;
+@group(2) @binding(2) var noiseTex: texture_2d<f32>;
+@group(2) @binding(3) var noiseSamp: sampler;
 
 @fragment
 fn main(@location(0) inColor: vec4<f32>, @location(1) uv: vec2<f32>) -> @location(0) vec4<f32> {
@@ -43,17 +46,19 @@ fn main(@location(0) inColor: vec4<f32>, @location(1) uv: vec2<f32>) -> @locatio
   let vignette = 1.0 - smoothstep(0.35, 0.95, r);
   let scan = 0.92 + 0.08 * sin(uv.y * params.height * 0.25 + params.time * 18.0);
   let noise = fract(sin(dot(uv * vec2(12.9898, 78.233), vec2(12.9898, 78.233)) + params.time * 10.0) * 43758.5453);
+  let noiseTexSample = textureSample(noiseTex, noiseSamp, uv * vec2(3.0, 3.0) + vec2(params.time * 0.03, params.time * 0.01));
 
   var color = vec3(sampleR.r, sampleG.g, sampleB.b);
   color = color * vignette * scan;
   color = color + (noise - 0.5) * 0.02;
+  color = mix(color, noiseTexSample.rgb, 0.15);
 
   return vec4(color.r * inColor.r, color.g * inColor.g, color.b * inColor.b, sampleG.a * inColor.a);
 }
 |]
 
 demoShaderAsset :: ShaderAsset
-demoShaderAsset = ShaderAsset demoShaderSpirv 1 0 0 1
+demoShaderAsset = ShaderAsset demoShaderSpirv 2 0 0 1
 
 main :: IO ()
 main = do
@@ -78,6 +83,10 @@ main = do
     ambience <- (awaitAsset >== crash) ambienceId
     ambienceAlt <- (awaitAsset >== crash) ambienceAltId
     sfx <- (awaitAsset >== crash) sfxId
+    noiseSampler <- createSampler defaultSamplerDesc
+      { samplerAddressU = SamplerRepeat
+      , samplerAddressV = SamplerRepeat
+      }
 
     shaderId <- (loadAsset >== crash) demoShaderAsset
     shader <- (awaitAsset >== crash) shaderId
@@ -85,6 +94,14 @@ main = do
     blend <- createTrackPool PoolBlend 2
     sfxPool <- createTrackPool PoolRoundRobin 8
     _ <- runLoop (crossfadeToLoop blend ambience 0)
+
+    let bindingsTable =
+          ShaderBindings
+            { shaderUniformSlots = Map.fromList [("params", 0)]
+            , shaderSamplerSlots = Map.fromList [("noiseTex", 0)]
+            , shaderStorageTextureSlots = Map.empty
+            }
+    setShaderBindings shader bindingsTable
 
     _ <- loop (0 :: Int) $ \frame active -> do
       let (winWInt, winHInt) = frame.size
@@ -97,7 +114,8 @@ main = do
               winW
               winH
               0
-      let uniforms = [ShaderUniform 0 params]
+      uniforms <- liftLoop (getShaderBindings shader) >>= \table ->
+        liftIO (resolveNamedUniforms table [NamedUniform "params" params, NamedSamplerWith "noiseTex" texture noiseSampler])
       let pipeline = do
             scene <- pass $ do
               clear (rgb 0.06 0.07 0.1)
@@ -126,5 +144,6 @@ main = do
 
       pure (Continue active')
 
+    destroySampler noiseSampler
     removeAllAssets
     pure ()
