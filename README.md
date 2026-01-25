@@ -25,8 +25,10 @@ Slop is a small SDL3.4-based rendering + audio toolkit for Haskell. It focuses o
 
 ```sh
 cabal build
-cabal run slop
+cabal run -f demo slop
 ```
+
+If you only need the library (e.g. as a dependency), the demo executable stays disabled by default.
 
 ## Modules
 

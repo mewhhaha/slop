@@ -5,7 +5,7 @@ This repo is a small SDL3.4-based rendering + audio toolkit for Haskell. It wrap
 ## Build / Run
 
 - Build: `cabal build`
-- Run demo: `cabal run slop`
+- Run demo: `cabal run -f demo slop` (demo exe disabled by default)
 
 ## Layout
 

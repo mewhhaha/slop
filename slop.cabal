@@ -24,6 +24,11 @@ source-repository head
 common warnings
     ghc-options: -Wall
 
+flag demo
+    description: Build the demo executable (depends on spirdo).
+    default: False
+    manual: True
+
 library
     import:           warnings
     exposed-modules:  Slop
@@ -53,6 +58,8 @@ executable slop
     main-is:          Main.hs
     -- other-modules:
     -- other-extensions:
+    if !flag(demo)
+        buildable: False
     build-depends:
         base ^>=4.21.0.0,
         slop,
