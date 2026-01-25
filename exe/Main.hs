@@ -8,8 +8,8 @@ module Main (main) where
 import Control.Monad ((>=>))
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString (ByteString)
-import Seedl hiding (clear, draw, output, pass, postProcess, render, withShader)
-import Seedl.Pipeline.Graph
+import Slop hiding (clear, draw, output, pass, postProcess, render, withShader)
+import Slop.Pipeline.Graph
 import Spirdo.Wesl (shaderSpirv, wesl)
 
 demoShaderSpirv :: ByteString

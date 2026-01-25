@@ -2,7 +2,7 @@
 {-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module Seedl.Pipeline
+module Slop.Pipeline
   ( TargetRef(..)
   , RenderPlan
   , PlanM
@@ -28,7 +28,7 @@ module Seedl.Pipeline
   , postProcess
   ) where
 
-import Seedl
+import Slop
   ( Color
   , Drawable
   , PassM
@@ -48,7 +48,7 @@ import Seedl
   , passWithShader
   , runPlan
   )
-import Seedl.SDL.Raw (FRect)
+import Slop.SDL.Raw (FRect)
 
 clear :: Color -> PassM ()
 clear = passClear

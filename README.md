@@ -1,6 +1,25 @@
 # Slop
 
-Slop is a small SDL3.4-based rendering and audio wrapper for Haskell with a focus on textures, sprites, and an ergonomic render pipeline.
+Slop is a small SDL3.4-based rendering + audio toolkit for Haskell. It focuses on textures/sprites, a declarative render pipeline, async asset loading, and SDL3_mixer audio with track pools and crossfades.
+
+## Features
+
+- SDL3.4 GPU renderer backend (`SDL_CreateGPURenderer`) with texture-first rendering.
+- Declarative render pipelines (graph DSL or explicit targets).
+- SDL_ttf TextEngine support + optional SDF fonts.
+- Keycode-based input with just-pressed/just-released helpers.
+- Async asset manager with background loading + typed asset IDs.
+- SDL3_mixer audio pools (round-robin, oldest, priority, blend/crossfade).
+- Spirdo shader integration (WESL -> SPIR-V).
+
+## Requirements
+
+- SDL3 >= 3.4
+- SDL3_image
+- SDL3_ttf
+- SDL3_mixer
+
+`cabal.project` pins `spirdo` as a git dependency for shader compilation.
 
 ## Build / Run
 
@@ -9,15 +28,42 @@ cabal build
 cabal run slop
 ```
 
-## Render Pipeline (Graph DSL)
+## Modules
 
-The render pipeline is modeled as a graph of passes without explicit render targets. You build a pipeline, then call `render` with the current window size.
+- `Slop` — public API, window/loop, rendering helpers, assets, audio pools.
+- `Slop.SDL.Raw` — raw SDL3 / SDL3_image / SDL3_ttf / SDL3_mixer FFI bindings.
+- `Slop.Pipeline` — explicit render targets + pass-based pipeline helpers.
+- `Slop.Pipeline.Graph` — graph-based pipeline DSL (implicit targets).
+
+## Window + Loop
+
+The main loop runs in `WindowM` and renders via the `Loop` monad.
 
 ```haskell
-import Seedl hiding (clear, draw, output, pass, postProcess, render, withShader)
-import Seedl.Pipeline.Graph
+import Slop
 
--- inside loop
+main :: IO ()
+main = runWindow defaultConfig $ do
+  texId <- loadAssetAsync (TextureAsset "assets/sprite.bmp")
+  texture <- awaitAsset texId >>= either (error . ("texture: " <>)) pure
+  loop () $ \frame _ -> do
+    when (frame.quitRequested || keyPressed KeyEscape frame.input) $
+      pure (Quit ())
+    clear (rgb 0.06 0.07 0.1)
+    draw (Sprite texture Nothing (rect 80 320 160 160) Nothing)
+    pure (Continue ())
+```
+
+`Frame` includes time, delta, window size, quitRequested, and `InputFrame` with key/mouse state.
+
+## Render Pipeline (Graph DSL)
+
+Build a pipeline graph and render it each frame. The graph automatically manages render targets per node and resizes them when the window size changes.
+
+```haskell
+import Slop hiding (clear, draw, output, pass, postProcess, render, withShader)
+import Slop.Pipeline.Graph
+
 let (winWInt, winHInt) = frame.size
 let winRect = rect 0 0 (fromIntegral winWInt) (fromIntegral winHInt)
 let pipeline = do
@@ -30,61 +76,71 @@ let pipeline = do
 render (winWInt, winHInt) pipeline
 ```
 
-This matches the current example in `exe/Main.hs`. (Package name: Slop. Module namespace: Seedl.*)
+If you want explicit targets instead, use `Slop.Pipeline` or `createRenderTarget` + `render`.
 
-## Asset Management
+## Input (Keycodes)
 
-Slop includes a built-in asset manager that runs inside `WindowM`. Assets are typed via `AssetId a`, and can be loaded synchronously or asynchronously.
-
-### Loading
+Input is **keycode-based** (layout-aware), not raw scancodes. Use `KeyA`, `KeyB`, `KeySpace`, etc.
 
 ```haskell
--- synchronous (loads immediately on the calling thread)
-texIdE <- loadAsset (TextureAsset "assets/sprite.bmp")
-
--- asynchronous (queues work on the asset worker thread)
-texId <- loadAssetAsync (TextureAsset "assets/sprite.bmp")
-
--- wait until ready
-texture <- awaitAsset texId
+when (keyPressed KeyB frame.input) ...
+when (keyReleased KeySpace frame.input) ...
 ```
 
-`awaitAsset` blocks until the asset finishes loading, and returns `Either String a` for errors.
+## Assets
 
-### Querying and unloading
+Assets are typed and managed in `WindowM`. Async loads run on a background thread.
 
 ```haskell
-status <- getAssetStatus texId
-maybeTex <- getAsset texId
+texId <- loadAssetAsync (TextureAsset "assets/sprite.bmp")
+texture <- awaitAsset texId >>= either (error . ("texture: " <>)) pure
 
-_ <- removeAsset texId
-removeAssets_ [AnyAssetId texId]
+fontId <- loadAssetAsync (FontAsset "assets/Inter/Inter-VariableFont_opsz,wght.ttf" 28)
+font <- awaitAsset fontId >>= either (error . ("font: " <>)) pure
+```
+
+Remove assets manually or let the window clean them up:
+
+```haskell
+removeAsset texId
 removeAllAssets
 ```
 
-### Reloading
+Custom loaders implement `AssetLoader`.
+
+### Hot Reload
+
+Enable hot reload to automatically reload file-backed assets (textures, fonts, music, sfx) when the file timestamp changes:
 
 ```haskell
-update <- reloadAssetAsync texId (TextureAsset "assets/sprite.bmp")
-_ <- awaitAssetUpdate update
+enableHotReload 0.5 -- check every 0.5s
 ```
 
-### Custom loaders
+Hot reload updates the asset manager entry. If you cache the asset value in a local variable, you should re-fetch it via `getAsset` or `awaitAsset` to pick up changes.
 
-Define a spec type and implement `AssetLoader`. The `AssetType` associated type is what you get back from `awaitAsset`.
+## Audio
+
+Slop wraps SDL3_mixer 3.x. Audio assets load as `Audio` via `MusicAsset` or `ChunkAsset` (both use `MIX_LoadAudio`).
+
+### Pools
+
+- `createTrackPool PoolRoundRobin n` — round-robin pool for SFX.
+- `createTrackPool PoolOldest n` — reuse the oldest track.
+- `createTrackPool PoolPriority n` — priority-based stealing.
+- `createTrackPool PoolBlend 2` — crossfade pool (auto-updated each frame).
+
+Example crossfade:
 
 ```haskell
-data MeshAsset = MeshAsset FilePath
+blend <- createTrackPool PoolBlend 2
+_ <- runLoop (crossfadeToLoop blend ambience 0)
 
-instance AssetLoader MeshAsset where
-  type AssetType MeshAsset = Mesh
-  loadAssetIO _ (MeshAsset path) = loadMeshFromDisk path
-  unloadAssetIO _ _ mesh = destroyMesh mesh
-  assetLabel (MeshAsset path) = path
-
--- usage
-meshId <- loadAssetAsync (MeshAsset "assets/mesh.bin")
-mesh <- awaitAsset meshId
+-- inside loop, no manual update needed (auto-updated)
+when (keyPressed KeyB frame.input) $ do
+  _ <- crossfadeToLoop blend ambienceAlt 2.0
+  pure ()
 ```
 
-Assets are owned by the window; `runWindow` automatically cleans up remaining assets when it exits. You can call `removeAllAssets` to clear them earlier.
+## Example
+
+See `exe/Main.hs` for a full demo: window, pipeline, shaders, text, audio pools, and blend crossfades.

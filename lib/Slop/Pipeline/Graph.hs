@@ -2,7 +2,7 @@
 {-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
-module Seedl.Pipeline.Graph
+module Slop.Pipeline.Graph
   ( Node
   , Graph
   , PassM
@@ -27,8 +27,8 @@ import Control.Monad.Writer.Strict (Writer, execWriter, runWriter, tell)
 import Data.IORef (readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 
-import qualified Seedl as S
-import Seedl
+import qualified Slop as S
+import Slop
   ( Color
   , Drawable
   , DrawItem (..)
@@ -41,7 +41,7 @@ import Seedl
   , setShaderUniformBytesCached
   , setShaderUniformCached
   )
-import Seedl.SDL.Raw (FRect)
+import Slop.SDL.Raw (FRect)
 
 newtype DList a = DList ([a] -> [a])
 

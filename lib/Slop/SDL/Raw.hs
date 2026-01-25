@@ -5,7 +5,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
-module Seedl.SDL.Raw
+module Slop.SDL.Raw
   ( SDL_InitFlags
   , SDL_WindowFlags
   , SDL_PixelFormat

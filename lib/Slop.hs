@@ -7,7 +7,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Seedl
+module Slop
   ( Config(..)
   , defaultConfig
   , WindowM
@@ -120,6 +120,8 @@ module Seedl
   , removeAssets
   , removeAssets_
   , removeAllAssets
+  , enableHotReload
+  , disableHotReload
   , reloadAssetAsync
   , awaitAssetUpdate
   , playMusic
@@ -176,7 +178,7 @@ module Seedl
   ) where
 
 import Control.Exception (SomeException, bracket, bracket_, finally, try)
-import Control.Monad (replicateM, unless, void, when)
+import Control.Monad (foldM, replicateM, unless, void, when)
 import Control.Concurrent (ThreadId, forkIO)
 import Control.Concurrent.STM
   ( TMVar
@@ -186,6 +188,7 @@ import Control.Concurrent.STM
   , newEmptyTMVar
   , newTQueueIO
   , newTVarIO
+  , modifyTVar'
   , putTMVar
   , readTMVar
   , readTQueue
@@ -208,14 +211,16 @@ import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef,
 import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Map.Strict as Map
 import Data.Proxy (Proxy (..))
+import Data.Time.Clock (UTCTime)
 import Data.Typeable (TypeRep, Typeable, typeOf, typeRep)
 import Data.Word (Word8, Word32, Word64)
 import Foreign (Ptr, Storable (..), alloca, castPtr, nullPtr, peek, poke, pokeByteOff, with)
 import Foreign.C.String (withCString)
 import Foreign.C.Types (CFloat (..))
+import System.Directory (getModificationTime)
 
-import qualified Seedl.SDL.Raw as SDL
-import Seedl.SDL.Raw
+import qualified Slop.SDL.Raw as SDL
+import Slop.SDL.Raw
   ( FPoint (..)
   , FRect (..)
   , Font (..)
@@ -319,6 +324,12 @@ defaultConfig = Config
   , windowResizable = True
   }
 
+data HotReloadConfig = HotReloadConfig
+  { hrEnabled :: !Bool
+  , hrInterval :: !Float
+  , hrElapsed :: !Float
+  }
+  deriving (Eq, Show)
 
 data Window = Window
   { appWindow :: SDL.Window
@@ -332,6 +343,7 @@ data Window = Window
   , appTargets :: IORef (Map.Map (Ptr ()) Texture)
   , appPipelineTargets :: IORef (Map.Map Int (RenderTarget, (Int, Int)))
   , appRenderState :: IORef RenderState
+  , appHotReload :: IORef HotReloadConfig
   }
 
 newtype WindowM a = WindowM (ReaderT Window IO a)
@@ -409,11 +421,13 @@ data AssetStatus a
 
 newtype AssetUpdate = AssetUpdate (TMVar (Either String ()))
 
-class Typeable (AssetType spec) => AssetLoader spec where
+class (Typeable spec, Typeable (AssetType spec)) => AssetLoader spec where
   type AssetType spec
   loadAssetIO :: Window -> spec -> IO (Either String (AssetType spec))
   unloadAssetIO :: Window -> spec -> AssetType spec -> IO ()
   assetLabel :: spec -> String
+  assetFiles :: spec -> [FilePath]
+  assetFiles _ = []
 
 data TextureAsset = TextureAsset FilePath
   deriving (Eq, Show)
@@ -451,6 +465,7 @@ instance AssetLoader TextureAsset where
       Just tex -> pure (Right tex)
   unloadAssetIO _ _ = sdlDestroyTexture
   assetLabel (TextureAsset path) = path
+  assetFiles (TextureAsset path) = [path]
 
 instance AssetLoader FontAsset where
   type AssetType FontAsset = Font
@@ -461,6 +476,7 @@ instance AssetLoader FontAsset where
       Just font -> pure (Right font)
   unloadAssetIO _ _ = ttfCloseFont
   assetLabel (FontAsset path _) = path
+  assetFiles (FontAsset path _) = [path]
 
 instance AssetLoader TextAsset where
   type AssetType TextAsset = Text
@@ -481,6 +497,7 @@ instance AssetLoader MusicAsset where
       Just audio -> pure (Right audio)
   unloadAssetIO _ _ = mixDestroyAudio
   assetLabel (MusicAsset path) = path
+  assetFiles (MusicAsset path) = [path]
 
 instance AssetLoader ChunkAsset where
   type AssetType ChunkAsset = Audio
@@ -491,6 +508,7 @@ instance AssetLoader ChunkAsset where
       Just audio -> pure (Right audio)
   unloadAssetIO _ _ = mixDestroyAudio
   assetLabel (ChunkAsset path) = path
+  assetFiles (ChunkAsset path) = [path]
 
 instance AssetLoader SdfFontAsset where
   type AssetType SdfFontAsset = Font
@@ -507,6 +525,7 @@ instance AssetLoader SdfFontAsset where
             Left <$> sdlGetError
   unloadAssetIO _ _ = ttfCloseFont
   assetLabel (SdfFontAsset path _) = path
+  assetFiles (SdfFontAsset path _) = [path]
 
 instance AssetLoader ShaderAsset where
   type AssetType ShaderAsset = Shader
@@ -531,9 +550,16 @@ data ManagerState = ManagerState
   , msAssets :: !(Map.Map Int AssetSlot)
   }
 
+data HotReloadInfo = HotReloadInfo
+  { hrFiles :: ![FilePath]
+  , hrTimes :: !(Map.Map FilePath (Maybe UTCTime))
+  , hrReload :: !(IO ())
+  }
+
 data AssetSlot = AssetSlot
   { slotType :: !TypeRep
   , slotState :: !SlotState
+  , slotHotReload :: !(Maybe HotReloadInfo)
   }
 
 data SlotState
@@ -576,10 +602,10 @@ removeAllAssetsIO app mgr = do
     pure (Map.elems (st.msAssets))
   mapM_ (finalizeEntry app) entries
   where
-    finalizeEntry _ (AssetSlot _ (SlotFailed _)) = pure ()
-    finalizeEntry _ (AssetSlot _ (SlotLoading var)) =
+    finalizeEntry _ (AssetSlot _ (SlotFailed _) _) = pure ()
+    finalizeEntry _ (AssetSlot _ (SlotLoading var) _) =
       void (atomically (tryPutTMVar var (Left "asset removed")))
-    finalizeEntry app' (AssetSlot _ (SlotReady dyn finalizer)) = do
+    finalizeEntry app' (AssetSlot _ (SlotReady dyn finalizer) _) = do
       case fromDynamic dyn :: Maybe Shader of
         Just shader -> evictShaderCacheIO app' shader
         Nothing -> pure ()
@@ -611,8 +637,9 @@ assetWorker app stateVar queue = go
         atomically $ do
           st <- readTVar stateVar
           case Map.lookup assetId (st.msAssets) of
-            Just (AssetSlot typ (SlotLoading var)) -> do
-              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotFailed err)) (st.msAssets) }
+            Just slot@AssetSlot { slotState = SlotLoading var } -> do
+              let slot' = slot { slotState = SlotFailed err }
+              writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
               void (tryPutTMVar var (Left err))
             _ -> pure ()
       Right asset -> do
@@ -622,8 +649,9 @@ assetWorker app stateVar queue = go
         cancelled <- atomically $ do
           st <- readTVar stateVar
           case Map.lookup assetId (st.msAssets) of
-            Just (AssetSlot _ (SlotLoading var)) -> do
-              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotReady dyn finalizer)) (st.msAssets) }
+            Just slot@AssetSlot { slotState = SlotLoading var } -> do
+              let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
+              writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
               void (tryPutTMVar var (Right ()))
               pure False
             Nothing -> pure True
@@ -645,14 +673,17 @@ assetWorker app stateVar queue = go
           st <- readTVar stateVar
           case Map.lookup assetId (st.msAssets) of
             Nothing -> pure (False, Nothing, True)
-            Just (AssetSlot _ (SlotReady _ oldFin)) -> do
-              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotReady dyn finalizer)) (st.msAssets) }
+            Just slot@AssetSlot { slotState = SlotReady _ oldFin } -> do
+              let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
+              writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
               pure (True, Just oldFin, False)
-            Just (AssetSlot _ (SlotFailed _)) -> do
-              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotReady dyn finalizer)) (st.msAssets) }
+            Just slot@AssetSlot { slotState = SlotFailed _ } -> do
+              let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
+              writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
               pure (True, Nothing, False)
-            Just (AssetSlot _ (SlotLoading _)) -> do
-              writeTVar stateVar st { msAssets = Map.insert assetId (AssetSlot typ (SlotReady dyn finalizer)) (st.msAssets) }
+            Just slot@AssetSlot { slotState = SlotLoading _ } -> do
+              let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
+              writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
               pure (True, Nothing, False)
         if missing
           then do
@@ -671,7 +702,7 @@ registerLoading mgr = atomically $ do
   st <- readTVar (mgr.amState)
   var <- newEmptyTMVar
   let newId = st.msNextId
-  let slot = AssetSlot (typeRep (Proxy :: Proxy a)) (SlotLoading var)
+  let slot = AssetSlot (typeRep (Proxy :: Proxy a)) (SlotLoading var) Nothing
   writeTVar (mgr.amState) st { msNextId = newId + 1, msAssets = Map.insert newId slot (st.msAssets) }
   pure (AssetId newId, var)
 
@@ -680,6 +711,7 @@ loadAsset spec = do
   app <- ask
   let mgr = app.appAssets
   (assetId, _) <- liftIO (registerLoading @(AssetType spec) mgr)
+  liftIO (installHotReloadInfo app assetId spec)
   result <- liftIO (try @SomeException (loadAssetIO app spec))
   let resolved = case result of
         Left ex -> Left (show ex)
@@ -689,8 +721,9 @@ loadAsset spec = do
       atomically $ do
         st <- readTVar (mgr.amState)
         case Map.lookup (assetId.unAssetId) (st.msAssets) of
-          Just (AssetSlot typ (SlotLoading var)) -> do
-            writeTVar (mgr.amState) st { msAssets = Map.insert (assetId.unAssetId) (AssetSlot typ (SlotFailed err)) (st.msAssets) }
+          Just slot@AssetSlot { slotState = SlotLoading var } -> do
+            let slot' = slot { slotState = SlotFailed err }
+            writeTVar (mgr.amState) st { msAssets = Map.insert (assetId.unAssetId) slot' (st.msAssets) }
             void (tryPutTMVar var (Left err))
           _ -> pure ()
     Right asset -> do
@@ -700,8 +733,9 @@ loadAsset spec = do
       cancelled <- atomically $ do
         st <- readTVar (mgr.amState)
         case Map.lookup (assetId.unAssetId) (st.msAssets) of
-          Just (AssetSlot _ (SlotLoading var)) -> do
-            writeTVar (mgr.amState) st { msAssets = Map.insert (assetId.unAssetId) (AssetSlot typ (SlotReady dyn finalizer)) (st.msAssets) }
+          Just slot@AssetSlot { slotState = SlotLoading var } -> do
+            let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
+            writeTVar (mgr.amState) st { msAssets = Map.insert (assetId.unAssetId) slot' (st.msAssets) }
             void (tryPutTMVar var (Right ()))
             pure False
           Nothing -> pure True
@@ -714,6 +748,7 @@ loadAssetAsync spec = do
   app <- ask
   let mgr = app.appAssets
   (assetId, _) <- liftIO (registerLoading @(AssetType spec) mgr)
+  liftIO (installHotReloadInfo app assetId spec)
   liftIO $ atomically $
     writeTQueue (mgr.amQueue) (AssetCommand (assetId.unAssetId) spec RequestLoad Nothing)
   pure assetId
@@ -728,6 +763,7 @@ reloadAssetAsync assetId spec = do
     pure (Map.member (assetId.unAssetId) (st.msAssets))
   if exists
     then do
+      liftIO (installHotReloadInfo app assetId spec)
       liftIO $ atomically $
         writeTQueue (mgr.amQueue) (AssetCommand (assetId.unAssetId) spec RequestReload (Just notify))
       pure (AssetUpdate notify)
@@ -745,7 +781,7 @@ awaitAsset assetId = do
   mWait <- liftIO $ atomically $ do
     st <- readTVar (mgr.amState)
     case Map.lookup (assetId.unAssetId) (st.msAssets) of
-      Just (AssetSlot _ (SlotLoading var)) -> pure (Just var)
+      Just (AssetSlot _ (SlotLoading var) _) -> pure (Just var)
       _ -> pure Nothing
   case mWait of
     Just var -> do
@@ -825,6 +861,87 @@ removeAllAssets :: WindowM ()
 removeAllAssets = do
   app <- ask
   liftIO (removeAllAssetsIO app (app.appAssets))
+
+enableHotReload :: Float -> WindowM ()
+enableHotReload interval = do
+  window <- ask
+  let interval' = max 0 interval
+  liftIO (writeIORef window.appHotReload (HotReloadConfig True interval' 0))
+
+disableHotReload :: WindowM ()
+disableHotReload = do
+  window <- ask
+  liftIO (modifyIORef' window.appHotReload (\cfg -> cfg { hrEnabled = False }))
+
+installHotReloadInfo :: forall spec. AssetLoader spec => Window -> AssetId (AssetType spec) -> spec -> IO ()
+installHotReloadInfo app assetId spec = do
+  let mgr = app.appAssets
+  let files = assetFiles spec
+  info <- case files of
+    [] -> pure Nothing
+    _ -> do
+      times <- loadHotReloadTimes files
+      let reloadAction = atomically $
+            writeTQueue (mgr.amQueue) (AssetCommand (assetId.unAssetId) spec RequestReload Nothing)
+      pure (Just HotReloadInfo
+        { hrFiles = files
+        , hrTimes = times
+        , hrReload = reloadAction
+        })
+  atomically $ modifyTVar' (mgr.amState) $ \st ->
+    st { msAssets = Map.adjust (\slot -> slot { slotHotReload = info }) (assetId.unAssetId) (st.msAssets) }
+
+loadHotReloadTimes :: [FilePath] -> IO (Map.Map FilePath (Maybe UTCTime))
+loadHotReloadTimes files = do
+  pairs <- mapM (\path -> do time <- safeGetModTime path; pure (path, time)) files
+  pure (Map.fromList pairs)
+
+safeGetModTime :: FilePath -> IO (Maybe UTCTime)
+safeGetModTime path = do
+  result <- try @SomeException (getModificationTime path)
+  case result of
+    Left _ -> pure Nothing
+    Right time -> pure (Just time)
+
+refreshHotReloadInfo :: HotReloadInfo -> IO (HotReloadInfo, Bool)
+refreshHotReloadInfo info = do
+  (times', changed) <- foldM update (info.hrTimes, False) (info.hrFiles)
+  pure (info { hrTimes = times' }, changed)
+  where
+    update (times, changed) path = do
+      mTime <- safeGetModTime path
+      case mTime of
+        Nothing -> pure (times, changed)
+        Just time -> do
+          let old = Map.findWithDefault Nothing path times
+          let changed' = changed || maybe True (time >) old
+          pure (Map.insert path (Just time) times, changed')
+
+hotReloadAssets :: WindowM ()
+hotReloadAssets = do
+  app <- ask
+  let mgr = app.appAssets
+  entries <- liftIO $ atomically $ do
+    st <- readTVar (mgr.amState)
+    pure (Map.toList (st.msAssets))
+  updates <- liftIO $ mapM checkEntry entries
+  let updates' = catMaybes updates
+  liftIO $ atomically $ modifyTVar' (mgr.amState) $ \st ->
+    let assets' = foldl'
+          (\assets (assetId, info) -> Map.adjust (\slot -> slot { slotHotReload = Just info }) assetId assets)
+          (st.msAssets)
+          updates'
+    in st { msAssets = assets' }
+  where
+    checkEntry (_, AssetSlot _ _ Nothing) = pure Nothing
+    checkEntry (assetId, AssetSlot _ slotState (Just info)) = do
+      (info', changed) <- refreshHotReloadInfo info
+      let shouldReload = changed && case slotState of
+            SlotReady {} -> True
+            SlotFailed {} -> True
+            SlotLoading {} -> False
+      when shouldReload (info'.hrReload)
+      pure (Just (assetId, info'))
 
 
 data Frame = Frame
@@ -1180,6 +1297,7 @@ runWindowIO cfg action =
             targets <- newIORef Map.empty
             pipelineTargets <- newIORef Map.empty
             renderState <- newIORef (RenderState Map.empty Map.empty 0)
+            hotReload <- newIORef (HotReloadConfig False 0 0)
             let placeholderAssets = error "AssetManager not initialized"
             let windowBase = Window
                   { appWindow = win
@@ -1193,6 +1311,7 @@ runWindowIO cfg action =
                   , appTargets = targets
                   , appPipelineTargets = pipelineTargets
                   , appRenderState = renderState
+                  , appHotReload = hotReload
                   }
             bracket (initAssetManager windowBase) (shutdownAssetManager windowBase) $ \assets -> do
               let windowHandle = windowBase { appAssets = assets }
@@ -1406,6 +1525,7 @@ loop initialState onFrame = do
               , input = InputFrame prevInput currentInput
               }
         autoUpdateBlendPools dt
+        autoHotReload dt
         control <- runLoop (onFrame frame state)
         liftIO (pruneTextCache window)
         liftIO (presentIO window)
@@ -1433,6 +1553,22 @@ autoUpdateBlendPools delta = do
   window <- ask
   pools <- liftIO (readIORef window.appBlendPools)
   mapM_ (\pool -> runLoop (updateBlend pool delta)) pools
+
+autoHotReload :: Float -> WindowM ()
+autoHotReload delta = do
+  window <- ask
+  cfg <- liftIO (readIORef window.appHotReload)
+  if not cfg.hrEnabled
+    then pure ()
+    else do
+      let interval = cfg.hrInterval
+      let elapsed' = cfg.hrElapsed + delta
+      if interval > 0 && elapsed' < interval
+        then liftIO (writeIORef window.appHotReload cfg { hrElapsed = elapsed' })
+        else do
+          let leftover = if interval <= 0 then 0 else elapsed' - interval
+          liftIO (writeIORef window.appHotReload cfg { hrElapsed = max 0 leftover })
+          hotReloadAssets
 
 clear :: Color -> Loop ()
 clear color = withWindowLoop (\window -> clearIO window color)

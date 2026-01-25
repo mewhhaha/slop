@@ -26,18 +26,20 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  Seedl
-                      Seedl.SDL.Raw
-                      Seedl.Pipeline
-                      Seedl.Pipeline.Graph
+    exposed-modules:  Slop
+                      Slop.SDL.Raw
+                      Slop.Pipeline
+                      Slop.Pipeline.Graph
     -- other-modules:
     -- other-extensions:
     build-depends:
         base ^>=4.21.0.0,
         bytestring,
         containers,
+        directory,
         mtl,
-        stm
+        stm,
+        time
     pkgconfig-depends:
         sdl3 >= 3.4,
         sdl3-image,
