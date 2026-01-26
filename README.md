@@ -67,9 +67,11 @@ main = runWindow defaultConfig $ do
   loop () $ \frame _ -> do
     when (frame.quitRequested || keyPressed KeyEscape frame.input) $
       pure (Quit ())
+    let (winWInt, winHInt) = frame.size
+    let cam = camera2DScreen (fromIntegral winWInt, fromIntegral winHInt)
     clear (rgb 0.06 0.07 0.1)
-    draw as2D (Sprite texture Nothing (rect 80 320 160 160) Nothing)
-    draw (as2DWith shader uniforms) (Sprite texture Nothing (rect 280 320 160 160) Nothing)
+    draw (basic2D cam) (Sprite texture Nothing (rect 80 320 160 160) Nothing)
+    draw (basic2D cam) (Sprite texture Nothing (rect 280 320 160 160) (Just (spriteEffect shader uniforms)))
     pure (Continue ())
 ```
 
@@ -111,11 +113,12 @@ import Slop.Pipeline.Graph
 _ <- loop () $ \frame _ -> do
   let (winWInt, winHInt) = frame.size
   let winRect = rect 0 0 (fromIntegral winWInt) (fromIntegral winHInt)
+  let cam = camera2DScreen (fromIntegral winWInt, fromIntegral winHInt)
   let pipeline = do
         scene <- pass $ do
           clear (rgb 0.06 0.07 0.1)
-          draw as2D (Sprite texture Nothing (rect 80 320 160 160) Nothing)
-          draw as2D (text font "Slop + SDL3.4" 80 40)
+          draw (basic2D cam) (Sprite texture Nothing (rect 80 320 160 160) Nothing)
+          draw basicUI (text font "Slop + SDL3.4" 80 40)
         output scene Nothing winRect
   render (winWInt, winHInt) pipeline
   pure (Continue ())
@@ -141,7 +144,7 @@ let pipeline = do
         (groupsX, groupsY, 1)
       scene <- pass $ do
         clear (rgb 0 0 0)
-        draw as2D (Sprite outTex Nothing (rect 0 0 256 256) Nothing)
+        draw (basic2D cam) (Sprite outTex Nothing (rect 0 0 256 256) Nothing)
       output scene Nothing winRect
 ```
 
@@ -151,28 +154,61 @@ Slop supports custom graphics/compute pipelines with explicit bindings (`Pipelin
 
 ### Standard 2D pipeline
 
-For 2D draws the pipeline is fixed (sprite layout, triangles, alpha blend, swapchain target). You can swap the fragment shader while keeping the rest the same via `as2DWith`:
+For 2D draws the pipeline is fixed (sprite layout, triangles, swapchain target). Use `SpriteEffect` to apply a fragment shader override:
 
 ```haskell
-draw as2D (Sprite tex Nothing dst Nothing)
-draw (as2DWith fx uniforms) (Sprite tex Nothing dst Nothing)
+draw (basic2D cam) (Sprite tex Nothing dst Nothing)
+draw (basic2D cam) (Sprite tex Nothing dst (Just (spriteEffect fx uniforms)))
 ```
 
-If you want a shader on a single sprite (instead of the whole `as2DWith` context), use `SpriteEffect`:
+If you want a shader on a single sprite, use `SpriteEffect`:
 
 ```haskell
 effect <- spriteEffectNamed fx
   [ NamedUniform "params" params
   , NamedSamplerWith "noiseTex" noiseTexture sampler
   ]
-draw as2D (Sprite tex Nothing dst (Just effect))
+draw (basic2D cam) (Sprite tex Nothing dst (Just effect))
 ```
 
-### Spirdo HList inputs
+The built-in draw contexts only differ by blend mode today:
 
-If you use Spirdo for WESL shaders, the demo shows how to turn Spirdo's typed `HList`
-inputs into Slop bindings directly in `exe/Main.hs`. The demo now uses
-`prepareShader` + `inputsForPrepared` + `orderedUniforms` for fewer moving parts.
+- `basic2D`: standard alpha blending (camera required).
+- `basicUI` / `basicUIWith`: premultiplied alpha (best for UI/text atlases).
+- `basicParticle` / `basicParticleWith`: additive blending.
+- `basic3D`: 3D mesh pipeline (depth test/write on; blending off).
+
+`basic2D` uses a camera transform. `basicUI` stays in raw screen space.
+
+`basic3D` is meant for meshes, not the built-in 2D shapes. It enables depth test/write, uses a 4D position attribute, and builds the model-view-projection matrix from the camera + model:
+
+```haskell
+mesh <- createMesh3D vertices
+let cam = camera3D (Vec3 0 0 5) (Vec3 0 0 0) (Vec3 0 1 0) (pi/3) (16/9) 0.1 100
+draw (basic3D cam) (mesh3D mesh mat4Identity [])
+```
+
+`Vertex3D` packs position as `vec4` (x, y, z, w), UV as `vec2`, and color as `vec4` in that order.
+
+For 2D, you can supply a camera transform that maps world coordinates to NDC on the CPU:
+
+```haskell
+let cam2 = camera2D (Vec2 320 180) 1 (640, 360)
+draw (basic2D cam2) (RectOutline (rgb 0.2 0.8 0.9) (rect 100 100 120 80))
+```
+
+If you want the camera to auto‑size from the window, use `camera2DWindow`:
+
+```haskell
+let cam2 = camera2DWindow (Vec2 0 0) 1
+draw (basic2D cam2) (RectOutline (rgb 0.2 0.8 0.9) (rect 0 0 120 80))
+```
+
+### Spirdo inputs builder
+
+If you use Spirdo for WESL shaders, the demo shows how to build inputs with
+the new semigroup-based builder and feed them into Slop in `exe/Main.hs`.
+It uses `prepareShader` + `inputsFromPrepared` + `uniformSlots` for fewer moving parts.
 
 ### Legacy shader helpers
 

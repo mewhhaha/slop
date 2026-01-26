@@ -96,6 +96,7 @@ module Slop.SDL.Raw
   , GPUTextureRegion(..)
   , GPUBufferRegion(..)
   , GPUColorTargetInfo(..)
+  , GPUDepthStencilTargetInfo(..)
   , GPUGraphicsPipelineCreateInfo(..)
   , sdlInitVideo
   , sdlInitAudio
@@ -111,11 +112,19 @@ module Slop.SDL.Raw
   , sdlGPUSamplerAddressModeMirroredRepeat
   , sdlGPUSamplerAddressModeClampToEdge
   , sdlGPUCompareOpInvalid
+  , sdlGPUCompareOpLess
+  , sdlGPUCompareOpLessOrEqual
   , sdlGPUCompareOpAlways
   , sdlGPUTextureFormatRGBA8
+  , sdlGPUTextureFormatD16UNORM
+  , sdlGPUTextureFormatD24UNORM
+  , sdlGPUTextureFormatD32Float
+  , sdlGPUTextureFormatD24UNORMS8UINT
+  , sdlGPUTextureFormatD32FloatS8UINT
   , sdlGPUTextureType2D
   , sdlGPUTextureUsageSampler
   , sdlGPUTextureUsageColorTarget
+  , sdlGPUTextureUsageDepthStencilTarget
   , sdlGPUTextureUsageComputeStorageRead
   , sdlGPUTextureUsageComputeStorageWrite
   , sdlGPUTextureUsageComputeStorageSimultaneousReadWrite
@@ -392,11 +401,32 @@ sdlGPUSamplerAddressModeClampToEdge = 2
 sdlGPUCompareOpInvalid :: SDL_GPUCompareOp
 sdlGPUCompareOpInvalid = 0
 
+sdlGPUCompareOpLess :: SDL_GPUCompareOp
+sdlGPUCompareOpLess = 2
+
+sdlGPUCompareOpLessOrEqual :: SDL_GPUCompareOp
+sdlGPUCompareOpLessOrEqual = 4
+
 sdlGPUCompareOpAlways :: SDL_GPUCompareOp
 sdlGPUCompareOpAlways = 8
 
 sdlGPUTextureFormatRGBA8 :: SDL_GPUTextureFormat
 sdlGPUTextureFormatRGBA8 = 4
+
+sdlGPUTextureFormatD16UNORM :: SDL_GPUTextureFormat
+sdlGPUTextureFormatD16UNORM = 58
+
+sdlGPUTextureFormatD24UNORM :: SDL_GPUTextureFormat
+sdlGPUTextureFormatD24UNORM = 59
+
+sdlGPUTextureFormatD32Float :: SDL_GPUTextureFormat
+sdlGPUTextureFormatD32Float = 60
+
+sdlGPUTextureFormatD24UNORMS8UINT :: SDL_GPUTextureFormat
+sdlGPUTextureFormatD24UNORMS8UINT = 61
+
+sdlGPUTextureFormatD32FloatS8UINT :: SDL_GPUTextureFormat
+sdlGPUTextureFormatD32FloatS8UINT = 62
 
 sdlGPUTextureType2D :: SDL_GPUTextureType
 sdlGPUTextureType2D = 0
@@ -406,6 +436,9 @@ sdlGPUTextureUsageSampler = 1 `shiftL` 0
 
 sdlGPUTextureUsageColorTarget :: SDL_GPUTextureUsageFlags
 sdlGPUTextureUsageColorTarget = 1 `shiftL` 1
+
+sdlGPUTextureUsageDepthStencilTarget :: SDL_GPUTextureUsageFlags
+sdlGPUTextureUsageDepthStencilTarget = 1 `shiftL` 2
 
 sdlGPUTextureUsageComputeStorageRead :: SDL_GPUTextureUsageFlags
 sdlGPUTextureUsageComputeStorageRead = 1 `shiftL` 4
@@ -1071,6 +1104,20 @@ data GPUColorTargetInfo = GPUColorTargetInfo
   , gpuColorTargetCycleResolve :: CBool
   , gpuColorTargetPadding1 :: Word8
   , gpuColorTargetPadding2 :: Word8
+  }
+  deriving (Eq, Show)
+
+data GPUDepthStencilTargetInfo = GPUDepthStencilTargetInfo
+  { gpuDepthStencilTexture :: Ptr SDL_GPUTexture
+  , gpuDepthStencilClearDepth :: CFloat
+  , gpuDepthStencilLoadOp :: SDL_GPULoadOp
+  , gpuDepthStencilStoreOp :: SDL_GPUStoreOp
+  , gpuDepthStencilStencilLoadOp :: SDL_GPULoadOp
+  , gpuDepthStencilStencilStoreOp :: SDL_GPUStoreOp
+  , gpuDepthStencilCycle :: CBool
+  , gpuDepthStencilClearStencil :: Word8
+  , gpuDepthStencilMipLevel :: Word8
+  , gpuDepthStencilLayer :: Word8
   }
   deriving (Eq, Show)
 
@@ -2467,6 +2514,76 @@ instance Storable GPUColorTargetInfo where
     pokeByteOff ptr gpuColorTargetPadding1Offset info.gpuColorTargetPadding1
     pokeByteOff ptr gpuColorTargetPadding2Offset info.gpuColorTargetPadding2
 
+gpuDepthStencilTargetInfoSize :: Int
+gpuDepthStencilTargetInfoAlign :: Int
+gpuDepthStencilTargetInfoOffsets :: [Int]
+(gpuDepthStencilTargetInfoSize, gpuDepthStencilTargetInfoAlign, gpuDepthStencilTargetInfoOffsets) =
+  structLayout
+    [ cField (Proxy @(Ptr SDL_GPUTexture))
+    , cField (Proxy @CFloat)
+    , cField (Proxy @SDL_GPULoadOp)
+    , cField (Proxy @SDL_GPUStoreOp)
+    , cField (Proxy @SDL_GPULoadOp)
+    , cField (Proxy @SDL_GPUStoreOp)
+    , cField (Proxy @CBool)
+    , cField (Proxy @Word8)
+    , cField (Proxy @Word8)
+    , cField (Proxy @Word8)
+    ]
+
+( gpuDepthStencilTextureOffset
+  , gpuDepthStencilClearDepthOffset
+  , gpuDepthStencilLoadOpOffset
+  , gpuDepthStencilStoreOpOffset
+  , gpuDepthStencilStencilLoadOpOffset
+  , gpuDepthStencilStencilStoreOpOffset
+  , gpuDepthStencilCycleOffset
+  , gpuDepthStencilClearStencilOffset
+  , gpuDepthStencilMipLevelOffset
+  , gpuDepthStencilLayerOffset
+  ) =
+  case gpuDepthStencilTargetInfoOffsets of
+    [a, b, c, d, e, f, g, h, i, j] -> (a, b, c, d, e, f, g, h, i, j)
+    _ -> error "GPUDepthStencilTargetInfo layout mismatch"
+
+instance Storable GPUDepthStencilTargetInfo where
+  sizeOf _ = gpuDepthStencilTargetInfoSize
+  alignment _ = gpuDepthStencilTargetInfoAlign
+  peek ptr = do
+    tex <- peekByteOff ptr gpuDepthStencilTextureOffset
+    clearDepth <- peekByteOff ptr gpuDepthStencilClearDepthOffset
+    loadOp <- peekByteOff ptr gpuDepthStencilLoadOpOffset
+    storeOp <- peekByteOff ptr gpuDepthStencilStoreOpOffset
+    stencilLoadOp <- peekByteOff ptr gpuDepthStencilStencilLoadOpOffset
+    stencilStoreOp <- peekByteOff ptr gpuDepthStencilStencilStoreOpOffset
+    cycle <- peekByteOff ptr gpuDepthStencilCycleOffset
+    clearStencil <- peekByteOff ptr gpuDepthStencilClearStencilOffset
+    mip <- peekByteOff ptr gpuDepthStencilMipLevelOffset
+    layer <- peekByteOff ptr gpuDepthStencilLayerOffset
+    pure GPUDepthStencilTargetInfo
+      { gpuDepthStencilTexture = tex
+      , gpuDepthStencilClearDepth = clearDepth
+      , gpuDepthStencilLoadOp = loadOp
+      , gpuDepthStencilStoreOp = storeOp
+      , gpuDepthStencilStencilLoadOp = stencilLoadOp
+      , gpuDepthStencilStencilStoreOp = stencilStoreOp
+      , gpuDepthStencilCycle = cycle
+      , gpuDepthStencilClearStencil = clearStencil
+      , gpuDepthStencilMipLevel = mip
+      , gpuDepthStencilLayer = layer
+      }
+  poke ptr info = do
+    pokeByteOff ptr gpuDepthStencilTextureOffset info.gpuDepthStencilTexture
+    pokeByteOff ptr gpuDepthStencilClearDepthOffset info.gpuDepthStencilClearDepth
+    pokeByteOff ptr gpuDepthStencilLoadOpOffset info.gpuDepthStencilLoadOp
+    pokeByteOff ptr gpuDepthStencilStoreOpOffset info.gpuDepthStencilStoreOp
+    pokeByteOff ptr gpuDepthStencilStencilLoadOpOffset info.gpuDepthStencilStencilLoadOp
+    pokeByteOff ptr gpuDepthStencilStencilStoreOpOffset info.gpuDepthStencilStencilStoreOp
+    pokeByteOff ptr gpuDepthStencilCycleOffset info.gpuDepthStencilCycle
+    pokeByteOff ptr gpuDepthStencilClearStencilOffset info.gpuDepthStencilClearStencil
+    pokeByteOff ptr gpuDepthStencilMipLevelOffset info.gpuDepthStencilMipLevel
+    pokeByteOff ptr gpuDepthStencilLayerOffset info.gpuDepthStencilLayer
+
 surfaceInfoSize :: Int
 surfaceInfoAlign :: Int
 surfaceInfoOffsets :: [Int]
@@ -2670,7 +2787,7 @@ foreign import ccall unsafe "SDL_WaitAndAcquireGPUSwapchainTexture" c_SDL_WaitAn
   :: Ptr SDL_GPUCommandBuffer -> Ptr SDL_Window -> Ptr (Ptr SDL_GPUTexture) -> Ptr Word32 -> Ptr Word32 -> IO CBool
 
 foreign import ccall unsafe "SDL_BeginGPURenderPass" c_SDL_BeginGPURenderPass
-  :: Ptr SDL_GPUCommandBuffer -> Ptr GPUColorTargetInfo -> Word32 -> Ptr () -> IO (Ptr SDL_GPURenderPass)
+  :: Ptr SDL_GPUCommandBuffer -> Ptr GPUColorTargetInfo -> Word32 -> Ptr GPUDepthStencilTargetInfo -> IO (Ptr SDL_GPURenderPass)
 
 foreign import ccall unsafe "SDL_EndGPURenderPass" c_SDL_EndGPURenderPass
   :: Ptr SDL_GPURenderPass -> IO ()
@@ -2825,11 +2942,15 @@ sdlWaitAndAcquireGPUSwapchainTexture (GPUCommandBuffer cmd) (Window win) =
                 h <- peek hPtr
                 pure (Just (GPUTexture texPtr, w, h))
 
-sdlBeginGPURenderPass :: GPUCommandBuffer -> GPUColorTargetInfo -> IO (Maybe GPURenderPass)
-sdlBeginGPURenderPass (GPUCommandBuffer cmd) targetInfo =
-  with targetInfo $ \targetPtr -> do
-    passPtr <- c_SDL_BeginGPURenderPass cmd targetPtr 1 nullPtr
-    pure $ if passPtr == nullPtr then Nothing else Just (GPURenderPass passPtr)
+sdlBeginGPURenderPass :: GPUCommandBuffer -> GPUColorTargetInfo -> Maybe GPUDepthStencilTargetInfo -> IO (Maybe GPURenderPass)
+sdlBeginGPURenderPass (GPUCommandBuffer cmd) targetInfo depthInfo =
+  with targetInfo $ \targetPtr ->
+    withMaybe depthInfo $ \depthPtr -> do
+      passPtr <- c_SDL_BeginGPURenderPass cmd targetPtr 1 depthPtr
+      pure $ if passPtr == nullPtr then Nothing else Just (GPURenderPass passPtr)
+  where
+    withMaybe Nothing action = action nullPtr
+    withMaybe (Just value) action = with value action
 
 sdlEndGPURenderPass :: GPURenderPass -> IO ()
 sdlEndGPURenderPass (GPURenderPass pass) = c_SDL_EndGPURenderPass pass

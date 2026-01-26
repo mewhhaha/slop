@@ -1,9 +1,11 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# OPTIONS_GHC -Wno-partial-type-signatures #-}
 {-# OPTIONS_GHC -Wno-missing-signatures #-}
@@ -20,21 +22,12 @@ import Slop.Pipeline.Graph
 import Slop.SDL.Raw (GPUDevice(..), GPUSampler(..), GPUTexture(..))
 import Spirdo.Wesl
   ( CompiledShader(..)
-  , BindingPlan(..)
-  , ReflectBindings
-  , StorageAccess(..)
   , ToUniform
-  , TypeLayout(..)
-  , biType
-  , bindingInfoFor
-  , bindingPlan
   , prepareShader
-  , uniform
   , wesl
   )
 import Spirdo.Wesl.Inputs
-  ( HList(..)
-  , SamplerHandle(..)
+  ( SamplerHandle(..)
   , TextureHandle(..)
   , StorageTextureHandle(..)
   , UniformSlot(..)
@@ -42,9 +35,10 @@ import Spirdo.Wesl.Inputs
   , TextureInput(..)
   , StorageTextureInput(..)
   , ShaderInputs(..)
+  , inputsFromPrepared
   , uniformSlots
-  , inputsForPrepared
   )
+import qualified Spirdo.Wesl.Inputs as Inputs
 
 data Params = Params
   { time :: Float
@@ -127,38 +121,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 demoShaderAsset :: ShaderAsset
 demoShaderAsset =
-  case spirdoShaderCounts demoShader of
-    Left err -> error ("demoShader counts: " <> err)
-    Right counts ->
-      ShaderAsset
-        (shaderSpirv demoShader)
-        counts.shaderSamplers
-        counts.shaderStorageTextures
-        counts.shaderStorageBuffers
-        counts.shaderUniformBuffers
-
-spirdoShaderCounts :: ReflectBindings iface => CompiledShader iface -> Either String ShaderCounts
-spirdoShaderCounts shader =
-  let bindingPlanLocal = bindingPlan shader.shaderInterface
-      samplerCount = length bindingPlanLocal.bpSamplers
-      textureCount = length bindingPlanLocal.bpTextures
-  in if samplerCount /= textureCount
-      then Left ("shader has " <> show samplerCount <> " samplers but " <> show textureCount <> " textures")
-      else Right ShaderCounts
-        { shaderSamplers = fromIntegral samplerCount
-        , shaderStorageTextures = fromIntegral (length bindingPlanLocal.bpStorageTextures)
-        , shaderStorageBuffers = fromIntegral (length bindingPlanLocal.bpStorageBuffers)
-        , shaderUniformBuffers = fromIntegral (length bindingPlanLocal.bpUniforms)
-        }
-
-storageAccess :: TypeLayout -> Maybe StorageAccess
-storageAccess layout =
-  case layout of
-    TLStorageTexture1D _ access -> Just access
-    TLStorageTexture2D _ access -> Just access
-    TLStorageTexture2DArray _ access -> Just access
-    TLStorageTexture3D _ access -> Just access
-    _ -> Nothing
+  ShaderAsset
+    (shaderSpirv demoShader)
+    2
+    0
+    0
+    1
 
 textureFromHandle :: TextureHandle -> Texture
 textureFromHandle (TextureHandle value) =
@@ -182,27 +150,33 @@ samplerFromHandle :: SamplerHandle -> Sampler
 samplerFromHandle (SamplerHandle value) =
   Sampler (GPUSampler (wordPtrToPtr (fromIntegral value)))
 
-storageBindings :: ShaderInputs iface -> Either String [ComputeBinding]
-storageBindings inputs =
-  mapM (computeStorage inputs) inputs.siStorageTextures
-  where
-    computeStorage inp entry = do
-      info <- bindingInfoFor entry.storageTextureName inp.siShader.shaderInterface
-      case storageAccess (biType info) of
-        Just StorageRead ->
-          pure (ComputeStorageTexture entry.storageTextureBinding (storageTextureFromHandle entry.storageTextureHandle))
-        Just StorageWrite ->
-          pure (ComputeStorageTextureRW entry.storageTextureBinding (storageTextureFromHandle entry.storageTextureHandle))
-        Just StorageReadWrite ->
-          pure (ComputeStorageTextureRW entry.storageTextureBinding (storageTextureFromHandle entry.storageTextureHandle))
-        Nothing ->
-          Left ("compute storage texture not supported: " <> entry.storageTextureName)
+spirdoTexture :: Texture -> TextureHandle
+spirdoTexture texture =
+  let GPUTexture ptr = texture.textureHandle
+  in TextureHandle (fromIntegral (ptrToWordPtr ptr))
 
-pairSamplers :: String -> [TextureHandle] -> [SamplerHandle] -> [(Texture, Sampler)]
-pairSamplers label textures samplers =
-  if length textures /= length samplers
-    then error (label <> ": sampler/texture count mismatch")
-    else zipWith (\t s -> (textureFromHandle t, samplerFromHandle s)) textures samplers
+spirdoStorageTexture :: Texture -> StorageTextureHandle
+spirdoStorageTexture texture =
+  let GPUTexture ptr = texture.textureHandle
+  in StorageTextureHandle (fromIntegral (ptrToWordPtr ptr))
+
+spirdoSampler :: Sampler -> SamplerHandle
+spirdoSampler (Sampler (GPUSampler ptr)) =
+  SamplerHandle (fromIntegral (ptrToWordPtr ptr))
+
+storageBindings :: ShaderInputs iface -> [ComputeBinding]
+storageBindings inputs =
+  [ ComputeStorageTextureRW entry.storageTextureBinding (storageTextureFromHandle entry.storageTextureHandle)
+  | entry <- inputs.siStorageTextures
+  ]
+
+pairSamplers :: [TextureHandle] -> [SamplerHandle] -> [(Texture, Sampler)]
+pairSamplers textures samplers =
+  zipWith (\t s -> (textureFromHandle t, samplerFromHandle s)) textures samplers
+
+samplerPairs :: ShaderInputs iface -> [(Texture, Sampler)]
+samplerPairs inputs =
+  pairSamplers (map (\t -> t.textureHandle) inputs.siTextures) (map (\s -> s.samplerHandle) inputs.siSamplers)
 
 uniformsFor :: Word32 -> [UniformSlot] -> [ShaderUniform]
 uniformsFor group slots =
@@ -218,6 +192,20 @@ computeUniformsFor group slots =
   , g == group
   ]
 
+computeBindings :: ShaderInputs iface -> [ComputeBinding]
+computeBindings inputs =
+  let uniforms = computeUniformsFor 2 (uniformSlots inputs)
+      samplers = zipWith (\slot (tex, samp) -> ComputeSampler slot tex (Just samp)) [0..] (samplerPairs inputs)
+      storage = storageBindings inputs
+  in uniforms <> samplers <> storage
+
+spriteEffectFrom :: Shader -> ShaderInputs iface -> SpriteEffect
+spriteEffectFrom shader inputs =
+  let uniforms = uniformsFor 3 (uniformSlots inputs)
+      extras = drop 1 (samplerPairs inputs)
+      samplers = zipWith (\slot (tex, samp) -> ShaderSamplerWith slot tex samp) [0..] extras
+  in SpriteEffect shader (uniforms <> samplers)
+
 data ComputeDemo = ComputeDemo
   { computePipeline :: ComputePipeline
   , computeTexture :: Texture
@@ -226,24 +214,17 @@ data ComputeDemo = ComputeDemo
   , computeGroups :: (Word32, Word32, Word32)
   }
 
-createComputeDemo :: ComputePipeline -> Int -> Int -> WindowM ComputeDemo
-createComputeDemo pipeline width height = do
-  texture <- createTexture2D (textureDesc width height)
-    { texUsage = [TextureSampled, TextureStorageRead, TextureStorageWrite]
-    }
+createComputeDemo :: ComputePipeline -> Texture -> Int -> Int -> ComputeDemo
+createComputeDemo pipeline texture width height =
   let groupsX = fromIntegral ((width + 7) `div` 8) :: Word32
-  let groupsY = fromIntegral ((height + 7) `div` 8) :: Word32
-  pure ComputeDemo
-    { computePipeline = pipeline
-    , computeTexture = texture
-    , computeWidth = width
-    , computeHeight = height
-    , computeGroups = (groupsX, groupsY, 1)
-    }
-
-destroyComputeDemo :: ComputeDemo -> WindowM ()
-destroyComputeDemo demo =
-  destroyTexture demo.computeTexture
+      groupsY = fromIntegral ((height + 7) `div` 8) :: Word32
+  in ComputeDemo
+      { computePipeline = pipeline
+      , computeTexture = texture
+      , computeWidth = width
+      , computeHeight = height
+      , computeGroups = (groupsX, groupsY, 1)
+      }
 
 main :: IO ()
 main = do
@@ -256,16 +237,20 @@ main = do
           , textAtlasSize = Just 1024
           }
   runWindow cfg $ do
-    let demoPrepared =
-          case prepareShader demoShader of
-            Left err -> error ("demoShader: " <> err)
+    let unsafePrepare label shader =
+          case prepareShader shader of
+            Left err -> error (label <> ": " <> err)
             Right value -> value
-    let computePrepared =
-          case prepareShader computeShader of
-            Left err -> error ("computeShader: " <> err)
+    let unsafeInputs label prepared inputs =
+          case inputsFromPrepared prepared inputs of
+            Left err -> error (label <> ": " <> err)
             Right value -> value
+    let demoPrepared = unsafePrepare "demoShader" demoShader
+    let computePrepared = unsafePrepare "computeShader" computeShader
     let crash = either (liftIO . ioError . userError) pure
         (>==) = (>=>)
+        load :: AssetLoader spec => spec -> WindowM (AssetType spec)
+        load spec = loadAssetAsync spec >>= (awaitAsset >== crash)
     computePipelineId <- (loadAsset >== crash) (ComputePipelineAsset defaultCompute
       { computeShaderCode = shaderSpirv computeShader
       , computeReadwriteStorageTextures = 1
@@ -273,18 +258,16 @@ main = do
       , computeThreads = (8, 8, 1)
       })
     computePipe <- (awaitAsset >== crash) computePipelineId
-    computeDemo <- createComputeDemo computePipe 256 256
-    texId <- loadAssetAsync (TextureAsset "assets/sprite.bmp")
-    fontId <- loadAssetAsync (FontAsset "assets/Inter/Inter-VariableFont_opsz,wght.ttf" 28)
-    ambienceId <- loadAssetAsync (MusicAsset "assets/ambience - air conditioner.wav")
-    ambienceAltId <- loadAssetAsync (MusicAsset "assets/ambience - car sedan idling.wav")
-    sfxId <- loadAssetAsync (ChunkAsset "assets/air duster 7.wav")
-
-    texture <- (awaitAsset >== crash) texId
-    font <- (awaitAsset >== crash) fontId
-    ambience <- (awaitAsset >== crash) ambienceId
-    ambienceAlt <- (awaitAsset >== crash) ambienceAltId
-    sfx <- (awaitAsset >== crash) sfxId
+    computeTexId <- loadAssetAsync (TextureDescAsset (textureDesc 256 256)
+      { texUsage = [TextureSampled, TextureStorageRead, TextureStorageWrite]
+      })
+    computeTex <- (awaitAsset >== crash) computeTexId
+    let computeDemo = createComputeDemo computePipe computeTex 256 256
+    texture <- load (TextureAsset "assets/sprite.bmp")
+    font <- load (FontAsset "assets/Inter/Inter-VariableFont_opsz,wght.ttf" 28)
+    ambience <- load (MusicAsset "assets/ambience - air conditioner.wav")
+    ambienceAlt <- load (MusicAsset "assets/ambience - car sedan idling.wav")
+    sfx <- load (ChunkAsset "assets/air duster 7.wav")
     samplerId <- (loadAsset >== crash) (SamplerAsset defaultSamplerDesc
       { samplerAddressU = SamplerRepeat
       , samplerAddressV = SamplerRepeat
@@ -303,55 +286,49 @@ main = do
       let winW = fromIntegral winWInt
       let winH = fromIntegral winHInt
       let winRect = rect 0 0 winW winH
+      let cam2d =
+            camera2D
+              (Vec2 (winW / 2 + 40 * sin frame.time) (winH / 2 + 140))
+              1
+              (winW, winH)
       let params = Params frame.time winW winH 0
       let computeParams = Params frame.time (fromIntegral computeDemo.computeWidth) (fromIntegral computeDemo.computeHeight) 0
 
       let computeInputs =
-            case inputsForPrepared computePrepared
-              ( StorageTextureHandle (fromIntegral (ptrToWordPtr (let GPUTexture p = computeDemo.computeTexture.textureHandle in p)))
-                  :& uniform computeParams
-                  :& HNil
-              ) of
-              Left err -> error ("compute inputs: " <> err)
-              Right value -> value
-      let computeBinds =
-            case storageBindings computeInputs of
-              Left err -> error ("compute storage: " <> err)
-              Right storageBinds ->
-                let uniforms = computeUniformsFor 2 (uniformSlots computeInputs)
-                    samplerPairs = pairSamplers "compute" (map (\t -> t.textureHandle) computeInputs.siTextures) (map (\s -> s.samplerHandle) computeInputs.siSamplers)
-                    samplers = zipWith (\slot (tex, samp) -> ComputeSampler slot tex (Just samp)) [0..] samplerPairs
-                in uniforms <> samplers <> storageBinds
+            unsafeInputs "compute inputs" computePrepared
+              ( Inputs.storageTexture @"out_tex" (spirdoStorageTexture computeDemo.computeTexture)
+                  <> Inputs.uniform @"params" computeParams
+              )
+      let computeBinds = computeBindings computeInputs
 
       let effectInputs =
-            case inputsForPrepared demoPrepared
-              ( uniform params
-                  :& TextureHandle (fromIntegral (ptrToWordPtr (let GPUTexture p = texture.textureHandle in p)))
-                  :& SamplerHandle (fromIntegral (ptrToWordPtr (let GPUSampler p = case sampler of Sampler s -> s in p)))
-                  :& TextureHandle (fromIntegral (ptrToWordPtr (let GPUTexture p = computeDemo.computeTexture.textureHandle in p)))
-                  :& SamplerHandle (fromIntegral (ptrToWordPtr (let GPUSampler p = case sampler of Sampler s -> s in p)))
-                  :& HNil
-              ) of
-              Left err -> error ("effect inputs: " <> err)
-              Right value -> value
-      let effect =
-            let uniforms = uniformsFor 3 (uniformSlots effectInputs)
-                samplerPairs = pairSamplers "effect" (map (\t -> t.textureHandle) effectInputs.siTextures) (map (\s -> s.samplerHandle) effectInputs.siSamplers)
-                extraPairs = drop 1 samplerPairs
-                samplers = zipWith (\slot (tex, samp) -> ShaderSamplerWith slot tex samp) [0..] extraPairs
-            in SpriteEffect shader (uniforms <> samplers)
+            unsafeInputs "effect inputs" demoPrepared
+              ( Inputs.uniform @"params" params
+                  <> Inputs.texture @"spriteTex" (spirdoTexture texture)
+                  <> Inputs.sampler @"spriteSamp" (spirdoSampler sampler)
+                  <> Inputs.texture @"noiseTex" (spirdoTexture computeDemo.computeTexture)
+                  <> Inputs.sampler @"noiseSamp" (spirdoSampler sampler)
+              )
+      let effect = spriteEffectFrom shader effectInputs
 
       let pipeline = do
             compute computeDemo.computePipeline computeBinds computeDemo.computeGroups
             scene <- pass $ do
               clear (rgb 0.06 0.07 0.1)
-              draw as2D (Line (rgb 0.95 0.35 0.35) (point 80 90) (point 400 130))
-              draw as2D (RectOutline (rgb 0.2 0.8 0.9) (rect 80 150 200 120))
-              draw as2D (RectFill (rgba 0.25 0.25 0.8 0.9) (rect 320 150 120 120))
-              draw as2D (Sprite texture Nothing (rect 80 320 160 160) Nothing)
-              draw as2D (Sprite computeDemo.computeTexture Nothing (rect 520 70 180 180) Nothing)
-              draw as2D (Sprite texture Nothing (rect 320 320 200 160) (Just effect))
-              draw as2D (text font "Slop + SDL3.4" 80 40)
+              draw basicUI (Line (rgb 0.95 0.35 0.35) (point 80 90) (point 400 130))
+              draw basicUI (RectOutline (rgb 0.2 0.8 0.9) (rect 80 150 200 120))
+              draw basicUI (RectFill (rgba 0.25 0.25 0.8 0.9) (rect 320 150 120 120))
+              draw basicUI (Sprite texture Nothing (rect 80 320 160 160) Nothing)
+              draw basicUI (Sprite computeDemo.computeTexture Nothing (rect 520 70 180 180) Nothing)
+              draw basicUI (Sprite texture Nothing (rect 320 320 200 160) (Just effect))
+              draw basicUI (text font "Slop + SDL3.4" 80 40)
+              let sceneY = 320
+              draw (basic2D cam2d) (RectFill (rgba 0.1 0.1 0.2 0.9) (rect 60 sceneY 560 180))
+              draw (basic2D cam2d) (RectOutline (rgb 0.15 0.7 0.6) (rect 60 sceneY 560 180))
+              draw (basic2D cam2d) (Line (rgb 0.85 0.75 0.2) (point 80 (sceneY + 30)) (point 560 (sceneY + 30)))
+              draw (basic2D cam2d) (Sprite texture Nothing (rect 100 (sceneY + 60) 120 120) Nothing)
+              draw (basic2D cam2d) (Sprite computeDemo.computeTexture Nothing (rect 260 (sceneY + 60) 120 120) Nothing)
+              draw (basic2D cam2d) (Sprite texture Nothing (rect 420 (sceneY + 40) 160 140) (Just effect))
             output scene Nothing winRect
 
       active' <- if keyPressed KeyB frame.input
@@ -370,6 +347,5 @@ main = do
       render (winWInt, winHInt) pipeline
       pure (Continue active')
 
-    destroyComputeDemo computeDemo
     removeAllAssets
     pure ()

@@ -38,7 +38,10 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 - `render target (Loop ())` sets the current render target; `output` blits to the swapchain.
 - The Graph DSL (`Slop.Pipeline.Graph`) manages render targets per node and resizes them when the window size changes.
 - Custom pipelines use `Pipeline` + `Mesh` + `Binding` via `drawMesh`. `spritePipeline` + `spriteMeshTransient` are the simple path.
-- `draw` now takes a context: use `draw as2D ...` for built-in shapes/sprites/text, `draw (as2DWith shader uniforms) ...` for standard pipeline shader swaps, or `draw (asMesh pipe bindings) mesh`.
+- `draw` now takes a context: use `draw (basic2D cam) ...` for built-in shapes/sprites/text, `draw (basicUIWith shader uniforms) ...` for standard pipeline shader swaps, or `draw (asMesh pipe bindings) mesh` (`basicUI`, `basicParticle` are blend-mode variants; `basic3D` is a mesh-only 3D pipeline with `Mesh3D` + model matrix).
+- `basic2D` requires a camera (use `camera2DScreen` / `camera2DWindow`). `basicUI` stays raw screen space.
+- Depth/stencil is enabled for `basic3D` (depth test + write). The renderer allocates a depth target per swapchain/render target as needed.
+- 2D camera helpers are CPU-side transforms via `camera2DMatrix`.
 - `SpriteEffect` is a typed wrapper for per-sprite shader overrides.
 - Declarative pipeline builders: `defaultGraphics`/`graphicsPipeline` and `defaultCompute`/`computePipeline`.
 - Compute pipelines use `computePipeline` + `dispatchCompute`, or `compute` steps inside the graph DSL.
@@ -87,10 +90,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 
 ## Pause Notes (What I Need To Continue)
 
-- Finish simplifying `exe/Main.hs` to only use the standard pipeline (`as2D` / `as2DWith`), removing all custom graphics pipeline assets and any remaining `drawMesh` usage.
-- Remove now-unused Spirdo fragment/vertex binding helpers and clean up imports in `exe/Main.hs`.
-- Update README snippets to match the standard-pipeline-only demo (keep custom pipeline mention text-only if desired).
-- Run `cabal build -f demo` to verify no warnings/errors after the cleanup.
+- None.
 
 ## Refactor Phases (Requested)
 
@@ -101,3 +101,7 @@ Phase 2: Consolidate duplicate DList definitions and introduce `SpriteEffect` (t
 Phase 3: Make `AssetMain` async via a main-thread queue, add `withRenderTarget` helper, and wire updates in the loop. (done)
 
 Phase 4: Add safer uniform helpers (size-checked or bytes-first) and document new APIs in README/AGENTS. (done)
+
+Phase 5: Update Spirdo to track latest, simplify `exe/Main.hs` with the input builder, and remove boilerplate shader binding code. (done)
+
+Phase 6: Update docs for camera-required `basic2D`/`basic3D`, fix README examples, and clean up AGENTS notes. (done)

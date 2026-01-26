@@ -39,12 +39,15 @@ module Slop
   , VertexLayout(..)
   , Primitive(..)
   , Mesh(..)
+  , Mesh3D(..)
+  , mesh3D
   , Pipeline(..)
   , VertexShader(..)
   , FragmentShader
   , ShaderCounts(..)
   , TargetFormat(..)
   , BlendMode(..)
+  , DepthMode(..)
   , GraphicsDesc(..)
   , defaultGraphics
   , graphicsPipeline
@@ -56,6 +59,8 @@ module Slop
   , ComputeBinding(..)
   , createMesh
   , createTransientMesh
+  , createMesh3D
+  , createTransientMesh3D
   , destroyMesh
   , createPipeline
   , destroyPipeline
@@ -68,6 +73,7 @@ module Slop
   , destroyComputePipeline
   , dispatchCompute
   , spriteLayout
+  , mesh3DLayout
   , spritePipeline
   , spriteBindings
   , spriteMesh
@@ -135,7 +141,26 @@ module Slop
   , mouseButtonReleased
   , Color(..)
   , Vec2(..)
+  , Vec3(..)
   , Vec4(..)
+  , Mat4(..)
+  , mat4Identity
+  , mat4Mul
+  , mat4Perspective
+  , mat4Ortho
+  , mat4LookAt
+  , camera2D
+  , camera2DWindow
+  , camera2DScreen
+  , Camera2D(..)
+  , camera2DMatrix
+  , camera3D
+  , Camera3D(..)
+  , camera3DView
+  , camera3DProj
+  , camera3DViewProj
+  , camera3DMVP
+  , Vertex3D(..)
   , rect
   , point
   , rgb
@@ -165,8 +190,14 @@ module Slop
   , destroySampler
   , Draw(..)
   , As2D(..)
-  , as2D
-  , as2DWith
+  , basic2D
+  , basicUI
+  , basicUIWith
+  , basicUIWithCamera
+  , basicParticle
+  , basicParticleWith
+  , basicParticleWithCamera
+  , basic3D
   , AsMesh(..)
   , asMesh
   , DrawItem(..)
@@ -203,6 +234,7 @@ module Slop
   , AssetLoader(..)
   , AssetThread(..)
   , TextureAsset(..)
+  , TextureDescAsset(..)
   , FontAsset(..)
   , TextAsset(..)
   , MusicAsset(..)
@@ -379,6 +411,7 @@ import Slop.SDL.Raw
   , GPUTextureRegion (..)
   , GPUBufferRegion (..)
   , GPUColorTargetInfo (..)
+  , GPUDepthStencilTargetInfo (..)
   , GPUSamplerCreateInfo (..)
   , GPUShaderCreateInfo (..)
   , Text (..)
@@ -460,6 +493,8 @@ import Slop.SDL.Raw
   , sdlGPUShaderStageVertex
   , sdlGPUShaderStageFragment
   , sdlGPUCompareOpInvalid
+  , sdlGPUCompareOpLessOrEqual
+  , sdlGPUCompareOpAlways
   , sdlInit
   , sdlInitAudio
   , sdlInitVideo
@@ -472,9 +507,15 @@ import Slop.SDL.Raw
   , sdlSetWindowResizable
   , sdlPixelFormatRGBA8888
   , sdlGPUTextureFormatRGBA8
+  , sdlGPUTextureFormatD16UNORM
+  , sdlGPUTextureFormatD24UNORM
+  , sdlGPUTextureFormatD32Float
+  , sdlGPUTextureFormatD24UNORMS8UINT
+  , sdlGPUTextureFormatD32FloatS8UINT
   , sdlGPUTextureType2D
   , sdlGPUTextureUsageSampler
   , sdlGPUTextureUsageColorTarget
+  , sdlGPUTextureUsageDepthStencilTarget
   , sdlGPUTextureUsageComputeStorageRead
   , sdlGPUTextureUsageComputeStorageWrite
   , sdlGPUTextureUsageComputeStorageSimultaneousReadWrite
@@ -491,6 +532,7 @@ import Slop.SDL.Raw
   , sdlGPUVertexInputRateVertex
   , sdlGPUBlendOpAdd
   , sdlGPUBlendFactorOne
+  , sdlGPUBlendFactorZero
   , sdlGPUBlendFactorSrcAlpha
   , sdlGPUBlendFactorOneMinusSrcAlpha
   , sdlGPUColorComponentRGBA
@@ -590,6 +632,9 @@ data Window = Window
   , appMainAssetQueue :: TQueue AssetCommand
   , appTargets :: IORef (Map.Map (Ptr ()) Texture)
   , appPipelineTargets :: IORef (Map.Map Int (RenderTarget, (Int, Int)))
+  , appDepthFormat :: SDL_GPUTextureFormat
+  , appDepthTarget :: IORef (Maybe DepthTarget)
+  , appDepthTargets :: IORef (Map.Map (Ptr ()) DepthTarget)
   , appRenderState :: IORef RenderState
   , appHotReload :: IORef HotReloadConfig
   , appFrameContext :: RecordingContext
@@ -597,6 +642,7 @@ data Window = Window
   , appWindowSize :: IORef (Int, Int)
   , appWhiteTexture :: Texture
   , appVertexShader :: GPUShader
+  , appVertexShader3D :: GPUShader
   , appDefaultShader :: Shader
   , appPipelines :: IORef (Map.Map PipelineKey GPUGraphicsPipeline)
   , appDrawColor :: IORef Color
@@ -631,11 +677,18 @@ data RecordingContext = RecordingContext
 
 newtype Recording = Recording RecordingContext
 
+data Transform2D
+  = TransformMatrix Mat4
+  | TransformCamera Camera2D
+  deriving (Eq, Show)
+
 data ShaderContext = ShaderContext
   { ctxShader :: Shader
   , ctxUniforms :: [UniformBinding]
   , ctxSamplers :: [SamplerBindingSpec]
   , ctxStorage :: [StorageBinding]
+  , ctxBlend :: BlendMode
+  , ctxTransform :: Maybe Transform2D
   }
 
 data DrawShape
@@ -683,6 +736,12 @@ data Mesh = Mesh
   }
   deriving (Eq, Show)
 
+data Mesh3D = Mesh3D
+  { mesh3DMesh :: Mesh
+  , mesh3DModel :: Mat4
+  , mesh3DBindings :: [Binding]
+  }
+
 data VertexShader = VertexShader
   { vertexShaderHandle :: GPUShader
   , vertexShaderDevice :: GPUDevice
@@ -706,7 +765,9 @@ data Pipeline = Pipeline
   , pipelineLayout :: VertexLayout
   , pipelinePrimitive :: Primitive
   , pipelineTargetFormat :: SDL_GPUTextureFormat
-  , pipelineBlend :: Bool
+  , pipelineBlend :: BlendMode
+  , pipelineDepthMode :: DepthMode
+  , pipelineDepthFormat :: SDL_GPUTextureFormat
   }
   deriving (Eq, Show)
 
@@ -717,8 +778,16 @@ data TargetFormat
 
 data BlendMode
   = BlendAlpha
+  | BlendAdditive
+  | BlendPremultiplied
   | BlendNone
-  deriving (Eq, Show)
+  deriving (Eq, Show, Ord)
+
+data DepthMode
+  = DepthNone
+  | DepthTest
+  | DepthTestWrite
+  deriving (Eq, Show, Ord)
 
 data GraphicsDesc = GraphicsDesc
   { gfxVertex :: VertexShader
@@ -727,6 +796,8 @@ data GraphicsDesc = GraphicsDesc
   , gfxPrimitive :: Primitive
   , gfxTarget :: TargetFormat
   , gfxBlend :: BlendMode
+  , gfxDepth :: DepthMode
+  , gfxDepthFormat :: SDL_GPUTextureFormat
   }
 
 data BindingValue where
@@ -774,7 +845,9 @@ data PipelineKey = PipelineKey
   , pipelineLayoutKey :: VertexLayout
   , pipelinePrimitiveKey :: SDL_GPUPrimitiveType
   , pipelineFormat :: SDL_GPUTextureFormat
-  , pipelineBlendKey :: Bool
+  , pipelineBlendKey :: BlendMode
+  , pipelineDepthModeKey :: DepthMode
+  , pipelineDepthFormatKey :: SDL_GPUTextureFormat
   }
   deriving (Eq, Ord, Show)
 
@@ -787,6 +860,20 @@ data Vertex = Vertex
   , vertexG :: CFloat
   , vertexB :: CFloat
   , vertexA :: CFloat
+  }
+  deriving (Eq, Show)
+
+data Vertex3D = Vertex3D
+  { vertex3DX :: CFloat
+  , vertex3DY :: CFloat
+  , vertex3DZ :: CFloat
+  , vertex3DW :: CFloat
+  , vertex3DU :: CFloat
+  , vertex3DV :: CFloat
+  , vertex3DR :: CFloat
+  , vertex3DG :: CFloat
+  , vertex3DB :: CFloat
+  , vertex3DA :: CFloat
   }
   deriving (Eq, Show)
 
@@ -848,6 +935,9 @@ class (Typeable spec, Typeable (AssetType spec)) => AssetLoader spec where
 data TextureAsset = TextureAsset FilePath
   deriving (Eq, Show)
 
+data TextureDescAsset = TextureDescAsset TextureDesc
+  deriving (Eq, Show)
+
 data FontAsset = FontAsset FilePath Float
   deriving (Eq, Show)
 
@@ -902,6 +992,13 @@ instance AssetLoader TextureAsset where
   unloadAssetIO _ _ = destroyTextureIO
   assetLabel (TextureAsset path) = path
   assetFiles (TextureAsset path) = [path]
+  assetThread _ = AssetMain
+
+instance AssetLoader TextureDescAsset where
+  type AssetType TextureDescAsset = Texture
+  loadAssetIO app (TextureDescAsset desc) = Right <$> createTexture2DIO app desc
+  unloadAssetIO _ _ = destroyTextureIO
+  assetLabel _ = "texture-desc"
   assetThread _ = AssetMain
 
 instance AssetLoader FontAsset where
@@ -1004,17 +1101,19 @@ instance AssetLoader PipelineAsset where
           case desc.gfxTarget of
             TargetSwapchain -> app.appSwapchainFormat
             TargetFormat value -> value
-    let blendEnabled =
-          case desc.gfxBlend of
-            BlendAlpha -> True
-            BlendNone -> False
+    let depthFormat =
+          if desc.gfxDepth == DepthNone
+            then 0
+            else if desc.gfxDepthFormat == 0 then app.appDepthFormat else desc.gfxDepthFormat
     pipelineHandle <- createGraphicsPipeline app
       desc.gfxVertex.vertexShaderHandle
       desc.gfxFragment.shaderHandle
       desc.gfxLayout
       (primitiveToSDL desc.gfxPrimitive)
       fmt
-      blendEnabled
+      desc.gfxBlend
+      desc.gfxDepth
+      depthFormat
     pure (Right Pipeline
       { pipelineHandle = pipelineHandle
       , pipelineVertex = desc.gfxVertex.vertexShaderHandle
@@ -1022,7 +1121,9 @@ instance AssetLoader PipelineAsset where
       , pipelineLayout = desc.gfxLayout
       , pipelinePrimitive = desc.gfxPrimitive
       , pipelineTargetFormat = fmt
-      , pipelineBlend = blendEnabled
+      , pipelineBlend = desc.gfxBlend
+      , pipelineDepthMode = desc.gfxDepth
+      , pipelineDepthFormat = depthFormat
       })
   unloadAssetIO app _ pipeline =
     sdlReleaseGPUGraphicsPipeline app.appGPUDevice pipeline.pipelineHandle
@@ -1707,6 +1808,7 @@ data Texture = Texture
 data TextureUsage
   = TextureSampled
   | TextureColorTarget
+  | TextureDepthTarget
   | TextureStorageRead
   | TextureStorageWrite
   deriving (Eq, Show)
@@ -1737,7 +1839,222 @@ rgba = Color
 
 data Vec2 = Vec2 !Float !Float deriving (Eq, Show)
 
+data Vec3 = Vec3 !Float !Float !Float deriving (Eq, Show)
+
 data Vec4 = Vec4 !Float !Float !Float !Float deriving (Eq, Show)
+
+data Mat4
+  = Mat4 !Float !Float !Float !Float
+         !Float !Float !Float !Float
+         !Float !Float !Float !Float
+         !Float !Float !Float !Float
+  deriving (Eq, Show)
+
+mat4Identity :: Mat4
+mat4Identity =
+  Mat4 1 0 0 0
+       0 1 0 0
+       0 0 1 0
+       0 0 0 1
+
+mat4Mul :: Mat4 -> Mat4 -> Mat4
+mat4Mul (Mat4 a00 a01 a02 a03
+               a10 a11 a12 a13
+               a20 a21 a22 a23
+               a30 a31 a32 a33)
+        (Mat4 b00 b01 b02 b03
+               b10 b11 b12 b13
+               b20 b21 b22 b23
+               b30 b31 b32 b33) =
+  Mat4
+    (a00*b00 + a01*b10 + a02*b20 + a03*b30)
+    (a00*b01 + a01*b11 + a02*b21 + a03*b31)
+    (a00*b02 + a01*b12 + a02*b22 + a03*b32)
+    (a00*b03 + a01*b13 + a02*b23 + a03*b33)
+    (a10*b00 + a11*b10 + a12*b20 + a13*b30)
+    (a10*b01 + a11*b11 + a12*b21 + a13*b31)
+    (a10*b02 + a11*b12 + a12*b22 + a13*b32)
+    (a10*b03 + a11*b13 + a12*b23 + a13*b33)
+    (a20*b00 + a21*b10 + a22*b20 + a23*b30)
+    (a20*b01 + a21*b11 + a22*b21 + a23*b31)
+    (a20*b02 + a21*b12 + a22*b22 + a23*b32)
+    (a20*b03 + a21*b13 + a22*b23 + a23*b33)
+    (a30*b00 + a31*b10 + a32*b20 + a33*b30)
+    (a30*b01 + a31*b11 + a32*b21 + a33*b31)
+    (a30*b02 + a31*b12 + a32*b22 + a33*b32)
+    (a30*b03 + a31*b13 + a32*b23 + a33*b33)
+
+mat4MulVec4 :: Mat4 -> Vec4 -> Vec4
+mat4MulVec4 (Mat4 m00 m01 m02 m03
+                   m10 m11 m12 m13
+                   m20 m21 m22 m23
+                   m30 m31 m32 m33)
+            (Vec4 x y z w) =
+  Vec4
+    (m00*x + m01*y + m02*z + m03*w)
+    (m10*x + m11*y + m12*z + m13*w)
+    (m20*x + m21*y + m22*z + m23*w)
+    (m30*x + m31*y + m32*z + m33*w)
+
+mat4Ortho :: Float -> Float -> Float -> Float -> Float -> Float -> Mat4
+mat4Ortho l r b t n f =
+  let rl = r - l
+      tb = t - b
+      fn = f - n
+  in Mat4
+      (2 / rl) 0 0 (-(r + l) / rl)
+      0 (2 / tb) 0 (-(t + b) / tb)
+      0 0 (1 / fn) (-n / fn)
+      0 0 0 1
+
+mat4Perspective :: Float -> Float -> Float -> Float -> Mat4
+mat4Perspective fovY aspect n f =
+  let t = 1 / tan (fovY / 2)
+      fn = f - n
+  in Mat4
+      (t / aspect) 0 0 0
+      0 t 0 0
+      0 0 (f / fn) 1
+      0 0 ((-n * f) / fn) 0
+
+vec3Sub :: Vec3 -> Vec3 -> Vec3
+vec3Sub (Vec3 ax ay az) (Vec3 bx by bz) = Vec3 (ax - bx) (ay - by) (az - bz)
+
+vec3Dot :: Vec3 -> Vec3 -> Float
+vec3Dot (Vec3 ax ay az) (Vec3 bx by bz) = ax*bx + ay*by + az*bz
+
+vec3Cross :: Vec3 -> Vec3 -> Vec3
+vec3Cross (Vec3 ax ay az) (Vec3 bx by bz) =
+  Vec3 (ay*bz - az*by) (az*bx - ax*bz) (ax*by - ay*bx)
+
+vec3Length :: Vec3 -> Float
+vec3Length v = sqrt (vec3Dot v v)
+
+vec3Normalize :: Vec3 -> Vec3
+vec3Normalize v@(Vec3 x y z) =
+  let len = vec3Length v
+      inv = if len == 0 then 1 else 1 / len
+  in Vec3 (x*inv) (y*inv) (z*inv)
+
+mat4LookAt :: Vec3 -> Vec3 -> Vec3 -> Mat4
+mat4LookAt eye target up =
+  let f = vec3Normalize (vec3Sub target eye)
+      s = vec3Normalize (vec3Cross f up)
+      u = vec3Cross s f
+      Vec3 sx sy sz = s
+      Vec3 ux uy uz = u
+      Vec3 fx fy fz = f
+  in Mat4
+      sx ux (-fx) 0
+      sy uy (-fy) 0
+      sz uz (-fz) 0
+      (-vec3Dot s eye) (-vec3Dot u eye) (vec3Dot f eye) 1
+
+data Camera2D = Camera2D
+  { camera2DPosition :: Vec2
+  , camera2DZoom :: Float
+  , camera2DRotation :: Float
+  , camera2DViewport :: Maybe (Float, Float)
+  }
+  deriving (Eq, Show)
+
+camera2D :: Vec2 -> Float -> (Float, Float) -> Camera2D
+camera2D pos zoom viewport =
+  Camera2D
+    { camera2DPosition = pos
+    , camera2DZoom = zoom
+    , camera2DRotation = 0
+    , camera2DViewport = Just viewport
+    }
+
+camera2DWindow :: Vec2 -> Float -> Camera2D
+camera2DWindow pos zoom =
+  Camera2D
+    { camera2DPosition = pos
+    , camera2DZoom = zoom
+    , camera2DRotation = 0
+    , camera2DViewport = Nothing
+    }
+
+camera2DScreen :: (Float, Float) -> Camera2D
+camera2DScreen (vw, vh) =
+  camera2D (Vec2 (vw / 2) (vh / 2)) 1 (vw, vh)
+
+camera2DMatrix :: (Int, Int) -> Camera2D -> Mat4
+camera2DMatrix size cam =
+  let Vec2 px py = cam.camera2DPosition
+      (vw, vh) =
+        case cam.camera2DViewport of
+          Just value -> value
+          Nothing ->
+            let (w, h) = size
+            in (fromIntegral w, fromIntegral h)
+      zoom = cam.camera2DZoom
+      rot = cam.camera2DRotation
+      halfW = vw / (2 * zoom)
+      halfH = vh / (2 * zoom)
+      left = px - halfW
+      right = px + halfW
+      top = py - halfH
+      bottom = py + halfH
+      proj = mat4Ortho left right bottom top 0 1
+      c = cos (-rot)
+      s = sin (-rot)
+      rotZ =
+        Mat4 c (-s) 0 0
+             s c 0 0
+             0 0 1 0
+             0 0 0 1
+      view =
+        Mat4 1 0 0 (-px)
+             0 1 0 (-py)
+             0 0 1 0
+             0 0 0 1
+      scale =
+        Mat4 zoom 0 0 0
+             0 zoom 0 0
+             0 0 1 0
+             0 0 0 1
+  in proj `mat4Mul` (rotZ `mat4Mul` (scale `mat4Mul` view))
+
+data Camera3D = Camera3D
+  { camera3DEye :: Vec3
+  , camera3DTarget :: Vec3
+  , camera3DUp :: Vec3
+  , camera3DFovY :: Float
+  , camera3DAspect :: Float
+  , camera3DNear :: Float
+  , camera3DFar :: Float
+  }
+  deriving (Eq, Show)
+
+camera3D :: Vec3 -> Vec3 -> Vec3 -> Float -> Float -> Float -> Float -> Camera3D
+camera3D eye target up fovY aspect nearZ farZ =
+  Camera3D
+    { camera3DEye = eye
+    , camera3DTarget = target
+    , camera3DUp = up
+    , camera3DFovY = fovY
+    , camera3DAspect = aspect
+    , camera3DNear = nearZ
+    , camera3DFar = farZ
+    }
+
+camera3DView :: Camera3D -> Mat4
+camera3DView cam =
+  mat4LookAt cam.camera3DEye cam.camera3DTarget cam.camera3DUp
+
+camera3DProj :: Camera3D -> Mat4
+camera3DProj cam =
+  mat4Perspective cam.camera3DFovY cam.camera3DAspect cam.camera3DNear cam.camera3DFar
+
+camera3DViewProj :: Camera3D -> Mat4
+camera3DViewProj cam =
+  mat4Mul (camera3DProj cam) (camera3DView cam)
+
+camera3DMVP :: Camera3D -> Mat4 -> Mat4
+camera3DMVP cam model =
+  mat4Mul (camera3DViewProj cam) model
 
 instance Storable Vec2 where
   sizeOf _ = 2 * sizeOf (undefined :: CFloat)
@@ -1767,6 +2084,37 @@ instance Storable Vec4 where
     pokeByteOff ptr (2 * step) (realToFrac z :: CFloat)
     pokeByteOff ptr (3 * step) (realToFrac w :: CFloat)
 
+instance Storable Mat4 where
+  sizeOf _ = 16 * sizeOf (undefined :: CFloat)
+  alignment _ = alignment (undefined :: CFloat)
+  peek ptr = do
+    let step = sizeOf (undefined :: CFloat)
+        at n = realToFrac <$> (peekByteOff ptr (n * step) :: IO CFloat)
+    Mat4
+      <$> at 0 <*> at 1 <*> at 2 <*> at 3
+      <*> at 4 <*> at 5 <*> at 6 <*> at 7
+      <*> at 8 <*> at 9 <*> at 10 <*> at 11
+      <*> at 12 <*> at 13 <*> at 14 <*> at 15
+  poke ptr (Mat4 m00 m01 m02 m03 m10 m11 m12 m13 m20 m21 m22 m23 m30 m31 m32 m33) = do
+    let step = sizeOf (undefined :: CFloat)
+        pokeAt n value = pokeByteOff ptr (n * step) (realToFrac value :: CFloat)
+    pokeAt 0 m00
+    pokeAt 1 m01
+    pokeAt 2 m02
+    pokeAt 3 m03
+    pokeAt 4 m10
+    pokeAt 5 m11
+    pokeAt 6 m12
+    pokeAt 7 m13
+    pokeAt 8 m20
+    pokeAt 9 m21
+    pokeAt 10 m22
+    pokeAt 11 m23
+    pokeAt 12 m30
+    pokeAt 13 m31
+    pokeAt 14 m32
+    pokeAt 15 m33
+
 instance Storable Vertex where
   sizeOf _ = 8 * sizeOf (undefined :: CFloat)
   alignment _ = alignment (undefined :: CFloat)
@@ -1792,6 +2140,35 @@ instance Storable Vertex where
     pokeByteOff ptr (6 * step) b
     pokeByteOff ptr (7 * step) a
 
+instance Storable Vertex3D where
+  sizeOf _ = 10 * sizeOf (undefined :: CFloat)
+  alignment _ = alignment (undefined :: CFloat)
+  peek ptr = do
+    let step = sizeOf (undefined :: CFloat)
+    x <- peekByteOff ptr 0 :: IO CFloat
+    y <- peekByteOff ptr step :: IO CFloat
+    z <- peekByteOff ptr (2 * step) :: IO CFloat
+    w <- peekByteOff ptr (3 * step) :: IO CFloat
+    u <- peekByteOff ptr (4 * step) :: IO CFloat
+    v <- peekByteOff ptr (5 * step) :: IO CFloat
+    r <- peekByteOff ptr (6 * step) :: IO CFloat
+    g <- peekByteOff ptr (7 * step) :: IO CFloat
+    b <- peekByteOff ptr (8 * step) :: IO CFloat
+    a <- peekByteOff ptr (9 * step) :: IO CFloat
+    pure (Vertex3D x y z w u v r g b a)
+  poke ptr (Vertex3D x y z w u v r g b a) = do
+    let step = sizeOf (undefined :: CFloat)
+    pokeByteOff ptr 0 x
+    pokeByteOff ptr step y
+    pokeByteOff ptr (2 * step) z
+    pokeByteOff ptr (3 * step) w
+    pokeByteOff ptr (4 * step) u
+    pokeByteOff ptr (5 * step) v
+    pokeByteOff ptr (6 * step) r
+    pokeByteOff ptr (7 * step) g
+    pokeByteOff ptr (8 * step) b
+    pokeByteOff ptr (9 * step) a
+
 rect :: Float -> Float -> Float -> Float -> FRect
 rect x y w h = FRect (realToFrac x) (realToFrac y) (realToFrac w) (realToFrac h)
 
@@ -1799,14 +2176,44 @@ point :: Float -> Float -> FPoint
 point x y = FPoint (realToFrac x) (realToFrac y)
 
 data As2D
-  = As2D
-  | As2DWith Shader [ShaderUniform]
+  = As2DCamera Camera2D
+  | AsUI
+  | AsUIWith Shader [ShaderUniform]
+  | AsUIView Mat4
+  | AsUIWithView Shader [ShaderUniform] Mat4
+  | AsUICamera Camera2D
+  | AsUIWithCamera Shader [ShaderUniform] Camera2D
+  | AsParticle
+  | AsParticleWith Shader [ShaderUniform]
+  | AsParticleView Mat4
+  | AsParticleWithView Shader [ShaderUniform] Mat4
+  | AsParticleCamera Camera2D
+  | AsParticleWithCamera Shader [ShaderUniform] Camera2D
+  | As3DCamera Camera3D
 
-as2D :: As2D
-as2D = As2D
+basic2D :: Camera2D -> As2D
+basic2D = As2DCamera
 
-as2DWith :: Shader -> [ShaderUniform] -> As2D
-as2DWith = As2DWith
+basicUI :: As2D
+basicUI = AsUI
+
+basicUIWith :: Shader -> [ShaderUniform] -> As2D
+basicUIWith = AsUIWith
+
+basicUIWithCamera :: Camera2D -> As2D
+basicUIWithCamera = AsUICamera
+
+basicParticle :: As2D
+basicParticle = AsParticle
+
+basicParticleWith :: Shader -> [ShaderUniform] -> As2D
+basicParticleWith = AsParticleWith
+
+basicParticleWithCamera :: Camera2D -> As2D
+basicParticleWithCamera = AsParticleCamera
+
+basic3D :: Camera3D -> As2D
+basic3D = As3DCamera
 
 class Draw ctx a where
   draw :: ctx -> a -> Loop ()
@@ -1990,6 +2397,12 @@ data StorageBinding = StorageBinding !Word32 !Texture
 
 newtype RenderTarget = RenderTarget Texture
 
+data DepthTarget = DepthTarget
+  { depthTexture :: Texture
+  , depthSize :: (Int, Int)
+  , depthFormat :: SDL_GPUTextureFormat
+  }
+
 data TargetRef
   = WindowTarget
   | Target RenderTarget
@@ -2052,8 +2465,35 @@ instance Draw ctx a => Draw ctx [a] where
 withAs2D :: As2D -> Loop a -> Loop a
 withAs2D ctx action =
   case ctx of
-    As2D -> action
-    As2DWith shader uniforms -> withShaderBindings shader uniforms action
+    As2DCamera cam -> withBlendTransform BlendAlpha (Just (TransformCamera cam)) action
+    AsUI -> withBlendTransform BlendPremultiplied Nothing action
+    AsUIWith shader uniforms -> withShaderBindingsBlendTransform BlendPremultiplied shader uniforms Nothing action
+    AsUIView view -> withBlendTransform BlendPremultiplied (Just (TransformMatrix view)) action
+    AsUIWithView shader uniforms view -> withShaderBindingsBlendTransform BlendPremultiplied shader uniforms (Just (TransformMatrix view)) action
+    AsUICamera cam -> withBlendTransform BlendPremultiplied (Just (TransformCamera cam)) action
+    AsUIWithCamera shader uniforms cam -> withShaderBindingsBlendTransform BlendPremultiplied shader uniforms (Just (TransformCamera cam)) action
+    AsParticle -> withBlendTransform BlendAdditive Nothing action
+    AsParticleWith shader uniforms -> withShaderBindingsBlendTransform BlendAdditive shader uniforms Nothing action
+    AsParticleView view -> withBlendTransform BlendAdditive (Just (TransformMatrix view)) action
+    AsParticleWithView shader uniforms view -> withShaderBindingsBlendTransform BlendAdditive shader uniforms (Just (TransformMatrix view)) action
+    AsParticleCamera cam -> withBlendTransform BlendAdditive (Just (TransformCamera cam)) action
+    AsParticleWithCamera shader uniforms cam -> withShaderBindingsBlendTransform BlendAdditive shader uniforms (Just (TransformCamera cam)) action
+    As3DCamera _ -> action
+
+withBlendTransform :: BlendMode -> Maybe Transform2D -> Loop a -> Loop a
+withBlendTransform blend transform (Loop action) =
+  Loop $ do
+    window <- ask
+    merged <- liftIO (mergeUniformBindings window.appDefaultShader [])
+    let ctx = ShaderContext window.appDefaultShader merged [] [] blend transform
+    liftIO (withShaderContext window ctx (runWindowM window action))
+
+withShaderBindingsBlendTransform :: BlendMode -> Shader -> [ShaderUniform] -> Maybe Transform2D -> Loop a -> Loop a
+withShaderBindingsBlendTransform blend shader bindings transform action =
+  Loop $ do
+    collected <- liftIO (collectShaderBindings bindings)
+    runLoop (withShaderBindingsInternalBlend blend shader collected transform action)
+
 
 runWindowIO :: Config -> (Window -> IO a) -> IO a
 runWindowIO cfg action =
@@ -2074,6 +2514,7 @@ runWindowIO cfg action =
         let releaseWindow = sdlReleaseWindowFromGPUDevice dev win
         bracket_ (pure ()) releaseWindow $ do
           swapFmt <- sdlGetGPUSwapchainTextureFormat dev win
+          depthFormat <- chooseDepthFormat dev
           sampler <- require "SDL_CreateGPUSampler" (sdlCreateGPUSampler dev defaultSamplerCreateInfo)
           let defaultSampler = Sampler sampler
           bracket (pure sampler) (sdlReleaseGPUSampler dev) $ \_ -> do
@@ -2096,57 +2537,65 @@ runWindowIO cfg action =
               bracket (pure mixer) mixDestroyMixer $ \mix -> do
                 vertexShader <- require "SDL_CreateGPUShader (vertex)" (createRawShader dev defaultVertexSpirv sdlGPUShaderStageVertex 0 0 0 0)
                 bracket (pure vertexShader) (sdlReleaseGPUShader dev) $ \vertShader -> do
-                  defaultShader <- createShaderFromSpirvWithDevice dev defaultFragmentSpirv 1 0 0 0
-                  bracket (pure defaultShader) destroyShaderIO $ \defShader -> do
-                    whiteTex <- createSolidTexture dev sdlGPUTextureFormatRGBA8 1 1 255 255 255 255
-                    bracket (pure whiteTex) destroyTextureIO $ \whiteTexture -> do
-                      musicTrackRef <- newIORef Nothing
-                      blendPools <- newIORef []
-                      mainAssetQueue <- newTQueueIO
-                      targets <- newIORef Map.empty
-                      pipelineTargets <- newIORef Map.empty
-                      renderState <- newIORef (RenderState Map.empty 0)
-                      hotReload <- newIORef (HotReloadConfig True 0.5 0)
-                      frameCommands <- newIORef []
-                      frameShaders <- newIORef []
-                      recording <- newIORef Nothing
-                      winSize <- sdlGetWindowSize win
-                      windowSize <- newIORef winSize
-                      pipelines <- newIORef Map.empty
-                      drawColor <- newIORef (rgba 1 1 1 1)
-                      let frameContext = RecordingContext frameCommands frameShaders
-                      let placeholderAssets = error "AssetManager not initialized"
-                      let windowBase = Window
-                            { appWindow = win
-                            , appGPUDevice = dev
-                            , appSwapchainFormat = swapFmt
-                            , appDefaultSampler = defaultSampler
-                            , appTextEngine = engine
-                            , appMixer = mix
-                            , appMusicTrack = musicTrackRef
-                            , appBlendPools = blendPools
-                            , appAssets = placeholderAssets
-                            , appMainAssetQueue = mainAssetQueue
-                            , appTargets = targets
-                            , appPipelineTargets = pipelineTargets
-                            , appRenderState = renderState
-                            , appHotReload = hotReload
-                            , appFrameContext = frameContext
-                            , appRecording = recording
-                            , appWindowSize = windowSize
-                            , appWhiteTexture = whiteTexture
-                            , appVertexShader = vertShader
-                            , appDefaultShader = defShader
-                            , appPipelines = pipelines
-                            , appDrawColor = drawColor
-                            }
-                      workerCount <-
-                        if cfg.assetWorkers <= 0
-                          then max 1 <$> getNumCapabilities
-                          else pure cfg.assetWorkers
-                      bracket (initAssetManager windowBase workerCount) (shutdownAssetManager windowBase) $ \assets -> do
-                        let windowHandle = windowBase { appAssets = assets }
-                        action windowHandle `finally` (cleanupPipelines windowHandle >> cleanupRenderTargets windowHandle)
+                  vertexShader3D <- require "SDL_CreateGPUShader (vertex3d)" (createRawShader dev defaultVertex3DSpirv sdlGPUShaderStageVertex 0 0 0 1)
+                  bracket (pure vertexShader3D) (sdlReleaseGPUShader dev) $ \vertShader3D -> do
+                    defaultShader <- createShaderFromSpirvWithDevice dev defaultFragmentSpirv 1 0 0 0
+                    bracket (pure defaultShader) destroyShaderIO $ \defShader -> do
+                      whiteTex <- createSolidTexture dev sdlGPUTextureFormatRGBA8 1 1 255 255 255 255
+                      bracket (pure whiteTex) destroyTextureIO $ \whiteTexture -> do
+                        musicTrackRef <- newIORef Nothing
+                        blendPools <- newIORef []
+                        mainAssetQueue <- newTQueueIO
+                        targets <- newIORef Map.empty
+                        pipelineTargets <- newIORef Map.empty
+                        depthTarget <- newIORef Nothing
+                        depthTargets <- newIORef Map.empty
+                        renderState <- newIORef (RenderState Map.empty 0)
+                        hotReload <- newIORef (HotReloadConfig True 0.5 0)
+                        frameCommands <- newIORef []
+                        frameShaders <- newIORef []
+                        recording <- newIORef Nothing
+                        winSize <- sdlGetWindowSize win
+                        windowSize <- newIORef winSize
+                        pipelines <- newIORef Map.empty
+                        drawColor <- newIORef (rgba 1 1 1 1)
+                        let frameContext = RecordingContext frameCommands frameShaders
+                        let placeholderAssets = error "AssetManager not initialized"
+                        let windowBase = Window
+                              { appWindow = win
+                              , appGPUDevice = dev
+                              , appSwapchainFormat = swapFmt
+                              , appDefaultSampler = defaultSampler
+                              , appTextEngine = engine
+                              , appMixer = mix
+                              , appMusicTrack = musicTrackRef
+                              , appBlendPools = blendPools
+                              , appAssets = placeholderAssets
+                              , appMainAssetQueue = mainAssetQueue
+                              , appTargets = targets
+                              , appPipelineTargets = pipelineTargets
+                              , appDepthFormat = depthFormat
+                              , appDepthTarget = depthTarget
+                              , appDepthTargets = depthTargets
+                              , appRenderState = renderState
+                              , appHotReload = hotReload
+                              , appFrameContext = frameContext
+                              , appRecording = recording
+                              , appWindowSize = windowSize
+                              , appWhiteTexture = whiteTexture
+                              , appVertexShader = vertShader
+                              , appVertexShader3D = vertShader3D
+                              , appDefaultShader = defShader
+                              , appPipelines = pipelines
+                              , appDrawColor = drawColor
+                              }
+                        workerCount <-
+                          if cfg.assetWorkers <= 0
+                            then max 1 <$> getNumCapabilities
+                            else pure cfg.assetWorkers
+                        bracket (initAssetManager windowBase workerCount) (shutdownAssetManager windowBase) $ \assets -> do
+                          let windowHandle = windowBase { appAssets = assets }
+                          action windowHandle `finally` (cleanupPipelines windowHandle >> cleanupRenderTargets windowHandle >> cleanupDepthTargets windowHandle)
   where
     initSDL = do
       ok <- sdlInit (sdlInitVideo .|. sdlInitAudio)
@@ -2201,6 +2650,49 @@ unregisterRenderTarget window tex =
     in if Map.member key targets
          then (Map.delete key targets, True)
          else (targets, False)
+
+registerDepthTarget :: Window -> Texture -> DepthTarget -> IO ()
+registerDepthTarget window colorTex depth =
+  atomicModifyIORef' (window.appDepthTargets) $ \targets ->
+    (Map.insert (renderTargetKey colorTex) depth targets, ())
+
+unregisterDepthTarget :: Window -> Texture -> IO ()
+unregisterDepthTarget window colorTex =
+  atomicModifyIORef' (window.appDepthTargets) $ \targets ->
+    let key = renderTargetKey colorTex
+    in (Map.delete key targets, ())
+
+cleanupDepthTargets :: Window -> IO ()
+cleanupDepthTargets window = do
+  targets <- atomicModifyIORef' (window.appDepthTargets) $ \targets ->
+    (Map.empty, Map.elems targets)
+  mapM_ (\target -> destroyTextureIO target.depthTexture) targets
+
+ensureSwapchainDepthTarget :: Window -> (Int, Int) -> IO DepthTarget
+ensureSwapchainDepthTarget window size = do
+  current <- readIORef window.appDepthTarget
+  case current of
+    Just target | target.depthSize == size -> pure target
+    Just target -> do
+      destroyTextureIO target.depthTexture
+      newTarget <- createDepthTargetIO window (fst size) (snd size)
+      writeIORef window.appDepthTarget (Just newTarget)
+      pure newTarget
+    Nothing -> do
+      newTarget <- createDepthTargetIO window (fst size) (snd size)
+      writeIORef window.appDepthTarget (Just newTarget)
+      pure newTarget
+
+ensureRenderTargetDepth :: Window -> Texture -> (Int, Int) -> IO DepthTarget
+ensureRenderTargetDepth window colorTex size = do
+  targets <- readIORef window.appDepthTargets
+  case Map.lookup (renderTargetKey colorTex) targets of
+    Just target | target.depthSize == size -> pure target
+    _ -> do
+      newTarget <- createDepthTargetIO window (fst size) (snd size)
+      atomicModifyIORef' window.appDepthTargets $ \m ->
+        (Map.insert (renderTargetKey colorTex) newTarget m, ())
+      pure newTarget
 
 cleanupRenderTargets :: Window -> IO ()
 cleanupRenderTargets window = do
@@ -2422,6 +2914,51 @@ createRenderTargetTexture window width height =
     width
     height
 
+chooseDepthFormat :: GPUDevice -> IO SDL_GPUTextureFormat
+chooseDepthFormat device = do
+  let candidates =
+        [ sdlGPUTextureFormatD24UNORMS8UINT
+        , sdlGPUTextureFormatD32FloatS8UINT
+        , sdlGPUTextureFormatD24UNORM
+        , sdlGPUTextureFormatD32Float
+        , sdlGPUTextureFormatD16UNORM
+        ]
+  let tryFormat fmt = do
+        let info =
+              GPUTextureCreateInfo
+                { gpuTextureType = sdlGPUTextureType2D
+                , gpuTextureFormat = fmt
+                , gpuTextureUsage = sdlGPUTextureUsageDepthStencilTarget
+                , gpuTextureWidth = 1
+                , gpuTextureHeight = 1
+                , gpuTextureLayerCountOrDepth = 1
+                , gpuTextureNumLevels = 1
+                , gpuTextureSampleCount = sdlGPUSampleCount1
+                , gpuTextureProps = 0
+                }
+        mTex <- sdlCreateGPUTexture device info
+        case mTex of
+          Nothing -> pure Nothing
+          Just tex -> do
+            sdlReleaseGPUTexture device tex
+            pure (Just fmt)
+  let go [] = ioError (userError "No supported depth format found")
+      go (fmt:rest) = do
+        ok <- tryFormat fmt
+        maybe (go rest) pure ok
+  go candidates
+
+createDepthTargetIO :: Window -> Int -> Int -> IO DepthTarget
+createDepthTargetIO window width height = do
+  let fmt = window.appDepthFormat
+  let usage = sdlGPUTextureUsageDepthStencilTarget
+  tex <- createTexture window.appGPUDevice fmt usage width height
+  pure DepthTarget
+    { depthTexture = tex
+    , depthSize = (width, height)
+    , depthFormat = fmt
+    }
+
 peekSurfaceInfo :: Surface -> IO SurfaceInfo
 peekSurfaceInfo (Surface ptr) =
   peek (castPtr ptr :: Ptr SurfaceInfo)
@@ -2535,6 +3072,7 @@ data PreparedDraw = PreparedDraw
   , pdStorageTextures :: [GPUTexture]
   , pdVertexUniforms :: [UniformBinding]
   , pdFragmentUniforms :: [UniformBinding]
+  , pdDepthMode :: DepthMode
   }
 
 flushFrame :: Window -> IO ()
@@ -2543,23 +3081,43 @@ flushFrame window = do
   unless (null ops) $ do
     cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
     (swapTex, w, h) <- require "SDL_WaitAndAcquireGPUSwapchainTexture" (sdlWaitAndAcquireGPUSwapchainTexture cmd window.appWindow)
-    flushOps window cmd window.appSwapchainFormat swapTex (fromIntegral w, fromIntegral h) ops
+    let size = (fromIntegral w, fromIntegral h)
+    flushOps window cmd window.appSwapchainFormat swapTex size (ensureSwapchainDepthTarget window size) ops
 
 flushTarget :: Window -> RenderTarget -> [RecordedOp] -> IO ()
 flushTarget window (RenderTarget tex) ops =
   unless (null ops) $
     do
       cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
-      flushOps window cmd window.appSwapchainFormat tex.textureHandle (tex.textureWidth, tex.textureHeight) ops
+      let size = (tex.textureWidth, tex.textureHeight)
+      flushOps window cmd window.appSwapchainFormat tex.textureHandle size (ensureRenderTargetDepth window tex size) ops
 
-flushOps :: Window -> GPUCommandBuffer -> SDL_GPUTextureFormat -> GPUTexture -> (Int, Int) -> [RecordedOp] -> IO ()
-flushOps window cmd fmt targetTex (w, h) ops = do
+flushOps :: Window -> GPUCommandBuffer -> SDL_GPUTextureFormat -> GPUTexture -> (Int, Int) -> IO DepthTarget -> [RecordedOp] -> IO ()
+flushOps window cmd fmt targetTex (w, h) getDepth ops = do
   let (clearColor, drawOps) = extractClear ops
   prepared <- prepareDraws window fmt (w, h) drawOps
   unless (null prepared) $ do
     copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
     mapM_ (uploadPrepared cmd copyPass) prepared
     sdlEndGPUCopyPass copyPass
+  let needsDepth = any (\pd -> pd.pdDepthMode /= DepthNone) prepared
+  depthInfo <- if needsDepth
+    then do
+      depthTarget <- getDepth
+      let GPUTexture depthPtr = depthTarget.depthTexture.textureHandle
+      pure (Just GPUDepthStencilTargetInfo
+        { gpuDepthStencilTexture = depthPtr
+        , gpuDepthStencilClearDepth = 1
+        , gpuDepthStencilLoadOp = sdlGPULoadOpClear
+        , gpuDepthStencilStoreOp = sdlGPUStoreOpStore
+        , gpuDepthStencilStencilLoadOp = sdlGPULoadOpClear
+        , gpuDepthStencilStencilStoreOp = sdlGPUStoreOpStore
+        , gpuDepthStencilCycle = 0
+        , gpuDepthStencilClearStencil = 0
+        , gpuDepthStencilMipLevel = 0
+        , gpuDepthStencilLayer = 0
+        })
+    else pure Nothing
   let clearF = maybe (FColor 0 0 0 0) toFColor clearColor
   let loadOp = if clearColor == Nothing then sdlGPULoadOpLoad else sdlGPULoadOpClear
   let targetInfo = GPUColorTargetInfo
@@ -2577,7 +3135,7 @@ flushOps window cmd fmt targetTex (w, h) ops = do
         , gpuColorTargetPadding1 = 0
         , gpuColorTargetPadding2 = 0
         }
-  renderPass <- require "SDL_BeginGPURenderPass" (sdlBeginGPURenderPass cmd targetInfo)
+  renderPass <- require "SDL_BeginGPURenderPass" (sdlBeginGPURenderPass cmd targetInfo depthInfo)
   sdlSetGPUViewport renderPass (GPUViewport 0 0 (fromIntegral w) (fromIntegral h) 0 1)
   mapM_ (executePrepared cmd renderPass) prepared
   sdlEndGPURenderPass renderPass
@@ -2670,7 +3228,9 @@ prepareDraw window fmt size (DrawCmd shape maybeCtx) = do
             spriteLayout
             resolvedDraw.rdPrimitive
             fmt
-            True
+            resolvedDraw.rdShaderCtx.ctxBlend
+            DepthNone
+            0
           (buffer, transfer, count) <- createVertexBuffer window resolvedDraw.rdVertices
           samplers <- buildSamplerBindings window resolvedDraw.rdShaderCtx resolvedDraw.rdTexture
           storage <- buildStorageBindings resolvedDraw.rdShaderCtx
@@ -2686,6 +3246,7 @@ prepareDraw window fmt size (DrawCmd shape maybeCtx) = do
             , pdStorageTextures = storage
             , pdVertexUniforms = []
             , pdFragmentUniforms = resolvedDraw.rdShaderCtx.ctxUniforms
+            , pdDepthMode = DepthNone
             })
 
 prepareMeshDraw :: Window -> SDL_GPUTextureFormat -> Pipeline -> Mesh -> [Binding] -> IO [PreparedDraw]
@@ -2710,6 +3271,7 @@ prepareMeshDraw window fmt pipeline mesh bindings = do
         , pdStorageTextures = storage
         , pdVertexUniforms = resolved.dbVertexUniforms
         , pdFragmentUniforms = resolved.dbFragmentUniforms
+        , pdDepthMode = pipeline.pipelineDepthMode
         }
     ]
 
@@ -2731,46 +3293,48 @@ resolveShaderContext window ctx =
         , ctxUniforms = defaults
         , ctxSamplers = []
         , ctxStorage = []
+        , ctxBlend = BlendAlpha
+        , ctxTransform = Nothing
         }
 
 buildShapeDraws :: Window -> (Int, Int) -> DrawShape -> ShaderContext -> IO [ResolvedDraw]
 buildShapeDraws window size shape ctx =
   case shape of
     ShapeLine color p1 p2 ->
-      pure [ResolvedDraw sdlGPUPrimitiveTypeLineList (lineVertices size color p1 p2) (window.appWhiteTexture.textureHandle) ctx]
+      pure [ResolvedDraw sdlGPUPrimitiveTypeLineList (lineVertices size ctx.ctxTransform color p1 p2) (window.appWhiteTexture.textureHandle) ctx]
     ShapeRectOutline color rectShape ->
-      pure [ResolvedDraw sdlGPUPrimitiveTypeLineList (rectOutlineVertices size color rectShape) (window.appWhiteTexture.textureHandle) ctx]
+      pure [ResolvedDraw sdlGPUPrimitiveTypeLineList (rectOutlineVertices size ctx.ctxTransform color rectShape) (window.appWhiteTexture.textureHandle) ctx]
     ShapeRectFill color rectShape ->
-      pure [ResolvedDraw sdlGPUPrimitiveTypeTriangleList (rectFillVertices size color rectShape) (window.appWhiteTexture.textureHandle) ctx]
+      pure [ResolvedDraw sdlGPUPrimitiveTypeTriangleList (rectFillVertices size ctx.ctxTransform color rectShape) (window.appWhiteTexture.textureHandle) ctx]
     ShapeSprite tex src dst ->
-      pure [ResolvedDraw sdlGPUPrimitiveTypeTriangleList (spriteVertices size tex src dst) tex.textureHandle ctx]
+      pure [ResolvedDraw sdlGPUPrimitiveTypeTriangleList (spriteVertices size ctx.ctxTransform tex src dst) tex.textureHandle ctx]
     ShapeText textObj x y ->
       textVertices size textObj x y ctx
 
-lineVertices :: (Int, Int) -> Color -> FPoint -> FPoint -> [Vertex]
-lineVertices size color p1 p2 =
-  [ mkVertex size p1 (Vec2 0 0) color
-  , mkVertex size p2 (Vec2 0 0) color
+lineVertices :: (Int, Int) -> Maybe Transform2D -> Color -> FPoint -> FPoint -> [Vertex]
+lineVertices size transform color p1 p2 =
+  [ mkVertex size transform p1 (Vec2 0 0) color
+  , mkVertex size transform p2 (Vec2 0 0) color
   ]
 
-rectOutlineVertices :: (Int, Int) -> Color -> FRect -> [Vertex]
-rectOutlineVertices size color (FRect x y w h) =
+rectOutlineVertices :: (Int, Int) -> Maybe Transform2D -> Color -> FRect -> [Vertex]
+rectOutlineVertices size transform color (FRect x y w h) =
   let p1 = FPoint x y
       p2 = FPoint (x + w) y
       p3 = FPoint (x + w) (y + h)
       p4 = FPoint x (y + h)
-  in [ mkVertex size p1 (Vec2 0 0) color
-     , mkVertex size p2 (Vec2 0 0) color
-     , mkVertex size p2 (Vec2 0 0) color
-     , mkVertex size p3 (Vec2 0 0) color
-     , mkVertex size p3 (Vec2 0 0) color
-     , mkVertex size p4 (Vec2 0 0) color
-     , mkVertex size p4 (Vec2 0 0) color
-     , mkVertex size p1 (Vec2 0 0) color
+  in [ mkVertex size transform p1 (Vec2 0 0) color
+     , mkVertex size transform p2 (Vec2 0 0) color
+     , mkVertex size transform p2 (Vec2 0 0) color
+     , mkVertex size transform p3 (Vec2 0 0) color
+     , mkVertex size transform p3 (Vec2 0 0) color
+     , mkVertex size transform p4 (Vec2 0 0) color
+     , mkVertex size transform p4 (Vec2 0 0) color
+     , mkVertex size transform p1 (Vec2 0 0) color
      ]
 
-rectFillVertices :: (Int, Int) -> Color -> FRect -> [Vertex]
-rectFillVertices size color (FRect x y w h) =
+rectFillVertices :: (Int, Int) -> Maybe Transform2D -> Color -> FRect -> [Vertex]
+rectFillVertices size transform color (FRect x y w h) =
   let p1 = FPoint x y
       p2 = FPoint (x + w) y
       p3 = FPoint (x + w) (y + h)
@@ -2779,16 +3343,16 @@ rectFillVertices size color (FRect x y w h) =
       uv2 = Vec2 1 0
       uv3 = Vec2 1 1
       uv4 = Vec2 0 1
-  in [ mkVertex size p1 uv1 color
-     , mkVertex size p2 uv2 color
-     , mkVertex size p4 uv4 color
-     , mkVertex size p2 uv2 color
-     , mkVertex size p3 uv3 color
-     , mkVertex size p4 uv4 color
+  in [ mkVertex size transform p1 uv1 color
+     , mkVertex size transform p2 uv2 color
+     , mkVertex size transform p4 uv4 color
+     , mkVertex size transform p2 uv2 color
+     , mkVertex size transform p3 uv3 color
+     , mkVertex size transform p4 uv4 color
      ]
 
-spriteVertices :: (Int, Int) -> Texture -> Maybe FRect -> FRect -> [Vertex]
-spriteVertices size tex src dst =
+spriteVertices :: (Int, Int) -> Maybe Transform2D -> Texture -> Maybe FRect -> FRect -> [Vertex]
+spriteVertices size transform tex src dst =
   let (FRect dx dy dw dh) = dst
       (u0, v0, u1, v1) =
         case src of
@@ -2812,12 +3376,12 @@ spriteVertices size tex src dst =
       uv3 = Vec2 u1 v1
       uv4 = Vec2 u0 v1
       white = rgba 1 1 1 1
-  in [ mkVertex size p1 uv1 white
-     , mkVertex size p2 uv2 white
-     , mkVertex size p4 uv4 white
-     , mkVertex size p2 uv2 white
-     , mkVertex size p3 uv3 white
-     , mkVertex size p4 uv4 white
+  in [ mkVertex size transform p1 uv1 white
+     , mkVertex size transform p2 uv2 white
+     , mkVertex size transform p4 uv4 white
+     , mkVertex size transform p2 uv2 white
+     , mkVertex size transform p3 uv3 white
+     , mkVertex size transform p4 uv4 white
      ]
 
 textVertices :: (Int, Int) -> Text -> Float -> Float -> ShaderContext -> IO [ResolvedDraw]
@@ -2844,14 +3408,27 @@ textVertices size textObj x y ctx = do
           FPoint u v = uv !! idx
           uvVec = Vec2 (realToFrac u) (realToFrac v)
           white = rgba 1 1 1 1
-      in mkVertex size (FPoint px py) uvVec white
+      in mkVertex size ctx.ctxTransform (FPoint px py) uvVec white
 
-mkVertex :: (Int, Int) -> FPoint -> Vec2 -> Color -> Vertex
-mkVertex (w, h) (FPoint x y) (Vec2 u v) (Color r g b a) =
-  let wf = max 1 (fromIntegral w :: Float)
-      hf = max 1 (fromIntegral h :: Float)
-      nx = (realToFrac x / wf) * 2 - 1
-      ny = 1 - (realToFrac y / hf) * 2
+mkVertex :: (Int, Int) -> Maybe Transform2D -> FPoint -> Vec2 -> Color -> Vertex
+mkVertex (w, h) transform (FPoint x y) (Vec2 u v) (Color r g b a) =
+  let (nx, ny) =
+        case transform of
+          Nothing ->
+            let wf = max 1 (fromIntegral w :: Float)
+                hf = max 1 (fromIntegral h :: Float)
+            in ( (realToFrac x / wf) * 2 - 1
+               , 1 - (realToFrac y / hf) * 2
+               )
+          Just (TransformMatrix mat) ->
+            let Vec4 tx ty _ tw = mat4MulVec4 mat (Vec4 (realToFrac x) (realToFrac y) 0 1)
+                invW = if tw == 0 then 1 else 1 / tw
+            in (tx * invW, ty * invW)
+          Just (TransformCamera cam) ->
+            let mat = camera2DMatrix (w, h) cam
+                Vec4 tx ty _ tw = mat4MulVec4 mat (Vec4 (realToFrac x) (realToFrac y) 0 1)
+                invW = if tw == 0 then 1 else 1 / tw
+            in (tx * invW, ty * invW)
   in Vertex
       (realToFrac nx)
       (realToFrac ny)
@@ -2944,6 +3521,17 @@ createTransientMesh :: Storable a => VertexLayout -> [a] -> WindowM Mesh
 createTransientMesh layout vertices =
   liftWindow (\window -> createTransientMeshIO window layout vertices)
 
+createMesh3D :: [Vertex3D] -> WindowM Mesh
+createMesh3D vertices =
+  createMesh mesh3DLayout vertices
+
+createTransientMesh3D :: [Vertex3D] -> WindowM Mesh
+createTransientMesh3D vertices =
+  createTransientMesh mesh3DLayout vertices
+
+mesh3D :: Mesh -> Mat4 -> [Binding] -> Mesh3D
+mesh3D = Mesh3D
+
 destroyMesh :: Mesh -> WindowM ()
 destroyMesh mesh = do
   window <- ask
@@ -2979,21 +3567,21 @@ buildStorageBindings ctx = do
   storage <- normalizeBindings "storage texture" (map (\(StorageBinding slot tex) -> (slot, tex)) ctx.ctxStorage)
   pure (map (\tex -> tex.textureHandle) storage)
 
-getPipeline :: Window -> GPUShader -> GPUShader -> VertexLayout -> SDL_GPUPrimitiveType -> SDL_GPUTextureFormat -> Bool -> IO GPUGraphicsPipeline
-getPipeline window vertexShader fragmentShader layout primitive fmt blendEnabled = do
+getPipeline :: Window -> GPUShader -> GPUShader -> VertexLayout -> SDL_GPUPrimitiveType -> SDL_GPUTextureFormat -> BlendMode -> DepthMode -> SDL_GPUTextureFormat -> IO GPUGraphicsPipeline
+getPipeline window vertexShader fragmentShader layout primitive fmt blendEnabled depthMode depthFormat = do
   let GPUShader vsPtr = vertexShader
   let GPUShader fsPtr = fragmentShader
-  let key = PipelineKey (castPtr vsPtr) (castPtr fsPtr) layout primitive fmt blendEnabled
+  let key = PipelineKey (castPtr vsPtr) (castPtr fsPtr) layout primitive fmt blendEnabled depthMode depthFormat
   cache <- readIORef window.appPipelines
   case Map.lookup key cache of
     Just pipeline -> pure pipeline
     Nothing -> do
-      pipeline <- createGraphicsPipeline window vertexShader fragmentShader layout primitive fmt blendEnabled
+      pipeline <- createGraphicsPipeline window vertexShader fragmentShader layout primitive fmt blendEnabled depthMode depthFormat
       writeIORef window.appPipelines (Map.insert key pipeline cache)
       pure pipeline
 
-createGraphicsPipeline :: Window -> GPUShader -> GPUShader -> VertexLayout -> SDL_GPUPrimitiveType -> SDL_GPUTextureFormat -> Bool -> IO GPUGraphicsPipeline
-createGraphicsPipeline window vertexShader fragmentShader layout primitive fmt blendEnabled =
+createGraphicsPipeline :: Window -> GPUShader -> GPUShader -> VertexLayout -> SDL_GPUPrimitiveType -> SDL_GPUTextureFormat -> BlendMode -> DepthMode -> SDL_GPUTextureFormat -> IO GPUGraphicsPipeline
+createGraphicsPipeline window vertexShader fragmentShader layout primitive fmt blendEnabled depthMode depthFormat =
   withArray [vertexBufferDesc] $ \bufferPtr ->
     withArray vertexAttributes $ \attrPtr ->
       withArray [colorTargetDesc] $ \colorPtr -> do
@@ -3006,8 +3594,8 @@ createGraphicsPipeline window vertexShader fragmentShader layout primitive fmt b
         let targetInfo = GPUGraphicsPipelineTargetInfo
               { gpuPipelineColorTargetDescriptions = colorPtr
               , gpuPipelineNumColorTargets = 1
-              , gpuPipelineDepthStencilFormat = 0
-              , gpuPipelineHasDepthStencil = 0
+              , gpuPipelineDepthStencilFormat = if depthMode == DepthNone then 0 else depthFormat
+              , gpuPipelineHasDepthStencil = if depthMode == DepthNone then 0 else 1
               , gpuPipelinePadding1 = 0
               , gpuPipelinePadding2 = 0
               , gpuPipelinePadding3 = 0
@@ -3047,16 +3635,26 @@ createGraphicsPipeline window vertexShader fragmentShader layout primitive fmt b
         VertexFloat2 -> sdlGPUVertexElementFormatFloat2
         VertexFloat4 -> sdlGPUVertexElementFormatFloat4
     blendState =
-      GPUColorTargetBlendState
-        { gpuBlendSrcColor = sdlGPUBlendFactorSrcAlpha
-        , gpuBlendDstColor = sdlGPUBlendFactorOneMinusSrcAlpha
+      let (enabled, srcColor, dstColor, srcAlpha, dstAlpha) =
+            case blendEnabled of
+              BlendNone ->
+                (False, sdlGPUBlendFactorOne, sdlGPUBlendFactorZero, sdlGPUBlendFactorOne, sdlGPUBlendFactorZero)
+              BlendAdditive ->
+                (True, sdlGPUBlendFactorOne, sdlGPUBlendFactorOne, sdlGPUBlendFactorOne, sdlGPUBlendFactorOne)
+              BlendPremultiplied ->
+                (True, sdlGPUBlendFactorOne, sdlGPUBlendFactorOneMinusSrcAlpha, sdlGPUBlendFactorOne, sdlGPUBlendFactorOneMinusSrcAlpha)
+              BlendAlpha ->
+                (True, sdlGPUBlendFactorSrcAlpha, sdlGPUBlendFactorOneMinusSrcAlpha, sdlGPUBlendFactorOne, sdlGPUBlendFactorOneMinusSrcAlpha)
+      in GPUColorTargetBlendState
+        { gpuBlendSrcColor = srcColor
+        , gpuBlendDstColor = dstColor
         , gpuBlendColorOp = sdlGPUBlendOpAdd
-        , gpuBlendSrcAlpha = sdlGPUBlendFactorOne
-        , gpuBlendDstAlpha = sdlGPUBlendFactorOneMinusSrcAlpha
+        , gpuBlendSrcAlpha = srcAlpha
+        , gpuBlendDstAlpha = dstAlpha
         , gpuBlendAlphaOp = sdlGPUBlendOpAdd
         , gpuBlendColorWriteMask = sdlGPUColorComponentRGBA
-        , gpuBlendEnable = if blendEnabled then 1 else 0
-        , gpuBlendEnableColorWriteMask = if blendEnabled then 1 else 0
+        , gpuBlendEnable = if enabled then 1 else 0
+        , gpuBlendEnableColorWriteMask = if enabled then 1 else 0
         , gpuBlendPadding1 = 0
         , gpuBlendPadding2 = 0
         }
@@ -3095,14 +3693,19 @@ createGraphicsPipeline window vertexShader fragmentShader layout primitive fmt b
         , gpuStencilCompareOp = sdlGPUCompareOpInvalid
         }
     depthStencilState =
-      GPUDepthStencilState
-        { gpuDepthCompareOp = sdlGPUCompareOpInvalid
+      let (enableTest, enableWrite, cmp) =
+            case depthMode of
+              DepthNone -> (0, 0, sdlGPUCompareOpAlways)
+              DepthTest -> (1, 0, sdlGPUCompareOpLessOrEqual)
+              DepthTestWrite -> (1, 1, sdlGPUCompareOpLessOrEqual)
+      in GPUDepthStencilState
+        { gpuDepthCompareOp = cmp
         , gpuDepthBackStencilState = stencilState
         , gpuDepthFrontStencilState = stencilState
         , gpuDepthCompareMask = 0
-        , gpuDepthWriteMask = 0
-        , gpuDepthEnableDepthTest = 0
-        , gpuDepthEnableDepthWrite = 0
+        , gpuDepthWriteMask = if enableWrite == 0 then 0 else 0xFF
+        , gpuDepthEnableDepthTest = enableTest
+        , gpuDepthEnableDepthWrite = enableWrite
         , gpuDepthEnableStencilTest = 0
         , gpuDepthPadding1 = 0
         , gpuDepthPadding2 = 0
@@ -3126,6 +3729,8 @@ defaultGraphics = do
     , gfxPrimitive = PrimTriangles
     , gfxTarget = TargetSwapchain
     , gfxBlend = BlendAlpha
+    , gfxDepth = DepthNone
+    , gfxDepthFormat = 0
     }
 
 graphicsPipeline :: GraphicsDesc -> WindowM Pipeline
@@ -3135,14 +3740,14 @@ graphicsPipeline desc = do
         case desc.gfxTarget of
           TargetSwapchain -> window.appSwapchainFormat
           TargetFormat value -> value
-  let blendEnabled =
-        case desc.gfxBlend of
-          BlendAlpha -> True
-          BlendNone -> False
-  createPipeline desc.gfxVertex desc.gfxFragment desc.gfxLayout desc.gfxPrimitive fmt blendEnabled
+  let depthFormat =
+        if desc.gfxDepth == DepthNone
+          then 0
+          else if desc.gfxDepthFormat == 0 then window.appDepthFormat else desc.gfxDepthFormat
+  createPipeline desc.gfxVertex desc.gfxFragment desc.gfxLayout desc.gfxPrimitive fmt desc.gfxBlend desc.gfxDepth depthFormat
 
-createPipeline :: VertexShader -> FragmentShader -> VertexLayout -> Primitive -> SDL_GPUTextureFormat -> Bool -> WindowM Pipeline
-createPipeline vertexShader fragmentShader layout prim fmt blendEnabled = do
+createPipeline :: VertexShader -> FragmentShader -> VertexLayout -> Primitive -> SDL_GPUTextureFormat -> BlendMode -> DepthMode -> SDL_GPUTextureFormat -> WindowM Pipeline
+createPipeline vertexShader fragmentShader layout prim fmt blendEnabled depthMode depthFormat = do
   window <- ask
   pipelineHandle <- liftIO $
     createGraphicsPipeline window
@@ -3152,6 +3757,8 @@ createPipeline vertexShader fragmentShader layout prim fmt blendEnabled = do
       (primitiveToSDL prim)
       fmt
       blendEnabled
+      depthMode
+      depthFormat
   pure Pipeline
     { pipelineHandle = pipelineHandle
     , pipelineVertex = vertexShader.vertexShaderHandle
@@ -3160,6 +3767,8 @@ createPipeline vertexShader fragmentShader layout prim fmt blendEnabled = do
     , pipelinePrimitive = prim
     , pipelineTargetFormat = fmt
     , pipelineBlend = blendEnabled
+    , pipelineDepthMode = depthMode
+    , pipelineDepthFormat = depthFormat
     }
 
 destroyPipeline :: Pipeline -> WindowM ()
@@ -3187,6 +3796,21 @@ spriteLayout =
           ]
       }
 
+mesh3DLayout :: VertexLayout
+mesh3DLayout =
+  let stride = fromIntegral (sizeOf (undefined :: Vertex3D))
+      posOffset = 0
+      uvOffset = fromIntegral (4 * sizeOf (undefined :: CFloat))
+      colorOffset = fromIntegral (6 * sizeOf (undefined :: CFloat))
+  in VertexLayout
+      { layoutStride = stride
+      , layoutAttrs =
+          [ VertexAttr 0 VertexFloat4 posOffset
+          , VertexAttr 1 VertexFloat2 uvOffset
+          , VertexAttr 2 VertexFloat4 colorOffset
+          ]
+      }
+
 spritePipeline :: WindowM Pipeline
 spritePipeline = defaultGraphics >>= graphicsPipeline
 
@@ -3195,11 +3819,11 @@ spriteBindings tex = [BindFragmentSampler 0 tex Nothing]
 
 spriteMesh :: (Int, Int) -> Texture -> Maybe FRect -> FRect -> WindowM Mesh
 spriteMesh size tex src dst =
-  createMesh spriteLayout (spriteVertices size tex src dst)
+  createMesh spriteLayout (spriteVertices size Nothing tex src dst)
 
 spriteMeshTransient :: (Int, Int) -> Texture -> Maybe FRect -> FRect -> WindowM Mesh
 spriteMeshTransient size tex src dst =
-  liftWindow (\window -> createTransientMeshIO window spriteLayout (spriteVertices size tex src dst))
+  liftWindow (\window -> createTransientMeshIO window spriteLayout (spriteVertices size Nothing tex src dst))
 
 -- WindowM wrappers
 
@@ -3301,16 +3925,16 @@ textureUsageFlags usages =
       base0 = 0
       base1 = if TextureSampled `elem` usages then base0 .|. sdlGPUTextureUsageSampler else base0
       base2 = if TextureColorTarget `elem` usages then base1 .|. sdlGPUTextureUsageColorTarget else base1
+      base3 = if TextureDepthTarget `elem` usages then base2 .|. sdlGPUTextureUsageDepthStencilTarget else base2
       storage
         | hasRead && hasWrite = sdlGPUTextureUsageComputeStorageSimultaneousReadWrite
         | otherwise =
             (if hasRead then sdlGPUTextureUsageComputeStorageRead else 0)
               .|. (if hasWrite then sdlGPUTextureUsageComputeStorageWrite else 0)
-  in base2 .|. storage
+  in base3 .|. storage
 
-createTexture2D :: TextureDesc -> WindowM Texture
-createTexture2D desc = do
-  window <- ask
+createTexture2DIO :: Window -> TextureDesc -> IO Texture
+createTexture2DIO window desc = do
   let info =
         GPUTextureCreateInfo
           { gpuTextureType = sdlGPUTextureType2D
@@ -3323,7 +3947,7 @@ createTexture2D desc = do
           , gpuTextureSampleCount = sdlGPUSampleCount1
           , gpuTextureProps = 0
           }
-  tex <- liftIO (require "SDL_CreateGPUTexture" (sdlCreateGPUTexture window.appGPUDevice info))
+  tex <- require "SDL_CreateGPUTexture" (sdlCreateGPUTexture window.appGPUDevice info)
   pure Texture
     { textureHandle = tex
     , textureDevice = window.appGPUDevice
@@ -3331,18 +3955,77 @@ createTexture2D desc = do
     , textureHeight = desc.texHeight
     }
 
+createTexture2D :: TextureDesc -> WindowM Texture
+createTexture2D desc = do
+  window <- ask
+  liftIO (createTexture2DIO window desc)
+
 drawMesh :: Pipeline -> Mesh -> [Binding] -> Loop ()
 drawMesh pipeline mesh bindings =
   withWindowLoop (\window -> recordMesh window pipeline mesh bindings)
 
+drawMesh3DWith :: Shader -> [Binding] -> Mesh -> Loop ()
+drawMesh3DWith shader bindings mesh =
+  withWindowLoop $ \window -> do
+    let fmt = window.appSwapchainFormat
+    pipelineHandle <- getPipeline
+      window
+      window.appVertexShader3D
+      shader.shaderHandle
+      mesh3DLayout
+      (primitiveToSDL PrimTriangles)
+      fmt
+      BlendNone
+      DepthTestWrite
+      window.appDepthFormat
+    let pipeline = Pipeline
+          { pipelineHandle = pipelineHandle
+          , pipelineVertex = window.appVertexShader3D
+          , pipelineFragment = shader.shaderHandle
+          , pipelineLayout = mesh3DLayout
+          , pipelinePrimitive = PrimTriangles
+          , pipelineTargetFormat = fmt
+          , pipelineBlend = BlendNone
+          , pipelineDepthMode = DepthTestWrite
+          , pipelineDepthFormat = window.appDepthFormat
+          }
+    recordMesh window pipeline mesh bindings
+
 instance Draw AsMesh Mesh where
   draw (AsMesh pipeline bindings) mesh = drawMesh pipeline mesh bindings
+
+instance Draw As2D Mesh3D where
+  draw ctx (Mesh3D mesh model bindings) =
+    case ctx of
+      As3DCamera cam ->
+        Loop $ do
+          window <- ask
+          let mvp = camera3DMVP cam model
+          let mergedBindings = bindMesh3DMVP mvp bindings
+          runLoop (drawMesh3DWith window.appDefaultShader mergedBindings mesh)
+      _ ->
+        Loop (liftIO (ioError (userError "Mesh3D draw requires basic3D camera context")))
+
+bindMesh3DMVP :: Mat4 -> [Binding] -> [Binding]
+bindMesh3DMVP mvp bindings =
+  let filtered = filter (not . isSlot0Binding) bindings
+  in BindVertexUniform 0 (BindingValue mvp) : filtered
+
+isSlot0Binding :: Binding -> Bool
+isSlot0Binding binding =
+  case binding of
+    BindVertexUniform slot _ -> slot == 0
+    BindFragmentUniform {} -> False
+    BindFragmentSampler {} -> False
+    BindFragmentStorageTexture {} -> False
 
 createRenderTarget :: Int -> Int -> WindowM RenderTarget
 createRenderTarget width height = do
   window <- ask
   tex <- liftIO (createRenderTargetTexture window width height)
+  depth <- liftIO (createDepthTargetIO window width height)
   liftIO (registerRenderTarget window tex)
+  liftIO (registerDepthTarget window tex depth)
   pure (RenderTarget tex)
 
 withRenderTarget :: Int -> Int -> (RenderTarget -> WindowM a) -> WindowM a
@@ -3359,7 +4042,9 @@ destroyTarget (RenderTarget tex) = do
   window <- ask
   removed <- liftIO (unregisterRenderTarget window tex)
   if removed
-    then liftIO (destroyTextureIO tex)
+    then do
+      liftIO (unregisterDepthTarget window tex)
+      liftIO (destroyTextureIO tex)
     else pure ()
 
 render :: RenderTarget -> Loop () -> Loop ()
@@ -4059,7 +4744,7 @@ withShaderIO :: Window -> Shader -> IO a -> IO a
 withShaderIO window shader action = do
   defaults <- readIORef shader.shaderUniformDefaults
   let uniforms = map (uncurry UniformBinding) (Map.toList defaults)
-  let ctx = ShaderContext shader uniforms [] []
+  let ctx = ShaderContext shader uniforms [] [] BlendAlpha Nothing
   withShaderContext window ctx action
 
 setShaderUniformIO :: Storable a => Shader -> Word32 -> a -> IO ()
@@ -4362,13 +5047,13 @@ withShaderBindings :: Shader -> [ShaderUniform] -> Loop a -> Loop a
 withShaderBindings shader bindings action =
   Loop $ do
     collected <- liftIO (collectShaderBindings bindings)
-    runLoop (withShaderBindingsInternal shader collected action)
+    runLoop (withShaderBindingsInternalBlend BlendAlpha shader collected Nothing action)
 
 withShaderBindingsStage :: Shader -> [ShaderBinding] -> Loop a -> Loop a
 withShaderBindingsStage shader bindings action =
   Loop $ do
     collected <- liftIO (collectStageBindings bindings)
-    runLoop (withShaderBindingsInternal shader collected action)
+    runLoop (withShaderBindingsInternalBlend BlendAlpha shader collected Nothing action)
 
 withShaderBindingsNamed :: Shader -> [NamedShaderBinding] -> Loop a -> Loop a
 withShaderBindingsNamed shader bindings action =
@@ -4377,12 +5062,12 @@ withShaderBindingsNamed shader bindings action =
     resolved <- liftIO (resolveNamedBindings table bindings)
     runLoop (withShaderBindingsStage shader resolved action)
 
-withShaderBindingsInternal :: Shader -> ([UniformBinding], [SamplerBindingSpec], [StorageBinding]) -> Loop a -> Loop a
-withShaderBindingsInternal shader (uniforms, samplers, storage) (Loop action) =
+withShaderBindingsInternalBlend :: BlendMode -> Shader -> ([UniformBinding], [SamplerBindingSpec], [StorageBinding]) -> Maybe Transform2D -> Loop a -> Loop a
+withShaderBindingsInternalBlend blend shader (uniforms, samplers, storage) transform (Loop action) =
   Loop $ do
     window <- ask
     merged <- liftIO (mergeUniformBindings shader uniforms)
-    let ctx = ShaderContext shader merged samplers storage
+    let ctx = ShaderContext shader merged samplers storage blend transform
     liftIO (withShaderContext window ctx (runWindowM window action))
 
 withShader :: Shader -> Loop a -> Loop a
@@ -4390,7 +5075,7 @@ withShader shader (Loop action) =
   Loop $ do
     window <- ask
     merged <- liftIO (mergeUniformBindings shader [])
-    let ctx = ShaderContext shader merged [] []
+    let ctx = ShaderContext shader merged [] [] BlendAlpha Nothing
     liftIO (withShaderContext window ctx (runWindowM window action))
 
 withShaderUniform :: Storable a => Shader -> Word32 -> a -> Loop b -> Loop b
@@ -4454,6 +5139,93 @@ defaultVertexSpirv = BS.pack
   , 62, 0, 3, 0, 13, 0, 0, 0, 33, 0, 0, 0, 81, 0, 5, 0, 3, 0, 0, 0
   , 34, 0, 0, 0, 31, 0, 0, 0, 2, 0, 0, 0, 62, 0, 3, 0, 14, 0, 0, 0
   , 34, 0, 0, 0, 253, 0, 1, 0, 56, 0, 1, 0
+  ]
+
+defaultVertex3DSpirv :: ByteString
+defaultVertex3DSpirv = BS.pack
+  [ 3, 2, 35, 7, 0, 6, 1, 0, 0, 0, 0, 0, 62, 0, 0, 0, 0, 0, 0, 0
+  , 17, 0, 2, 0, 1, 0, 0, 0, 14, 0, 3, 0, 0, 0, 0, 0, 1, 0, 0, 0
+  , 15, 0, 12, 0, 0, 0, 0, 0, 21, 0, 0, 0, 109, 97, 105, 110, 0, 0, 0, 0
+  , 8, 0, 0, 0, 10, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 15, 0, 0, 0
+  , 17, 0, 0, 0, 18, 0, 0, 0, 5, 0, 4, 0, 1, 0, 0, 0, 86, 115, 79, 117, 116, 0, 0, 0
+  , 6, 0, 6, 0, 1, 0, 0, 0, 0, 0, 0, 0, 112, 111, 115, 105, 116, 105, 111, 110
+  , 0, 0, 0, 0, 6, 0, 4, 0, 1, 0, 0, 0, 1, 0, 0, 0, 117, 118, 0, 0
+  , 6, 0, 5, 0, 1, 0, 0, 0, 2, 0, 0, 0, 99, 111, 108, 111, 114, 0, 0, 0
+  , 5, 0, 3, 0, 2, 0, 0, 0, 77, 86, 80, 0, 6, 0, 4, 0, 2, 0, 0, 0
+  , 0, 0, 0, 0, 109, 0, 0, 0, 5, 0, 4, 0, 8, 0, 0, 0, 117, 77, 86, 80, 0, 0, 0, 0
+  , 5, 0, 4, 0, 10, 0, 0, 0, 105, 110, 95, 112, 111, 115, 0, 0, 5, 0, 4, 0
+  , 12, 0, 0, 0, 105, 110, 95, 117, 118, 0, 0, 0, 5, 0, 5, 0, 13, 0, 0, 0
+  , 105, 110, 95, 99, 111, 108, 111, 114, 0, 0, 0, 0, 5, 0, 6, 0, 15, 0, 0, 0
+  , 86, 115, 79, 117, 116, 95, 112, 111, 115, 105, 116, 105, 111, 110, 0, 0
+  , 5, 0, 5, 0, 17, 0, 0, 0, 86, 115, 79, 117, 116, 95, 117, 118, 0, 0, 0, 0
+  , 5, 0, 5, 0, 18, 0, 0, 0, 86, 115, 79, 117, 116, 95, 99, 111, 108, 111, 114, 0
+  , 5, 0, 4, 0, 21, 0, 0, 0, 109, 97, 105, 110, 0, 0, 0, 0, 72, 0, 5, 0
+  , 1, 0, 0, 0, 0, 0, 0, 0, 35, 0, 0, 0, 0, 0, 0, 0, 72, 0, 5, 0
+  , 1, 0, 0, 0, 1, 0, 0, 0, 35, 0, 0, 0, 16, 0, 0, 0, 72, 0, 5, 0
+  , 1, 0, 0, 0, 2, 0, 0, 0, 35, 0, 0, 0, 32, 0, 0, 0, 72, 0, 5, 0
+  , 2, 0, 0, 0, 0, 0, 0, 0, 35, 0, 0, 0, 0, 0, 0, 0, 71, 0, 3, 0
+  , 2, 0, 0, 0, 2, 0, 0, 0, 71, 0, 4, 0, 8, 0, 0, 0, 34, 0, 0, 0
+  , 0, 0, 0, 0, 71, 0, 4, 0, 8, 0, 0, 0, 33, 0, 0, 0, 0, 0, 0, 0
+  , 71, 0, 4, 0, 10, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 71, 0, 4, 0
+  , 12, 0, 0, 0, 30, 0, 0, 0, 1, 0, 0, 0, 71, 0, 4, 0, 13, 0, 0, 0
+  , 30, 0, 0, 0, 2, 0, 0, 0, 71, 0, 4, 0, 15, 0, 0, 0, 11, 0, 0, 0
+  , 0, 0, 0, 0, 71, 0, 4, 0, 17, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0
+  , 71, 0, 4, 0, 18, 0, 0, 0, 30, 0, 0, 0, 1, 0, 0, 0, 22, 0, 3, 0
+  , 3, 0, 0, 0, 32, 0, 0, 0, 23, 0, 4, 0, 4, 0, 0, 0, 3, 0, 0, 0
+  , 4, 0, 0, 0, 23, 0, 4, 0, 5, 0, 0, 0, 3, 0, 0, 0, 2, 0, 0, 0
+  , 30, 0, 5, 0, 1, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 4, 0, 0, 0
+  , 24, 0, 4, 0, 6, 0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0, 30, 0, 3, 0
+  , 2, 0, 0, 0, 6, 0, 0, 0, 32, 0, 4, 0, 7, 0, 0, 0, 2, 0, 0, 0
+  , 2, 0, 0, 0, 32, 0, 4, 0, 9, 0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0
+  , 32, 0, 4, 0, 11, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 32, 0, 4, 0
+  , 14, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 32, 0, 4, 0, 16, 0, 0, 0
+  , 3, 0, 0, 0, 5, 0, 0, 0, 19, 0, 2, 0, 19, 0, 0, 0, 33, 0, 3, 0
+  , 20, 0, 0, 0, 19, 0, 0, 0, 21, 0, 4, 0, 24, 0, 0, 0, 32, 0, 0, 0
+  , 0, 0, 0, 0, 32, 0, 4, 0, 25, 0, 0, 0, 2, 0, 0, 0, 6, 0, 0, 0
+  , 21, 0, 4, 0, 28, 0, 0, 0, 32, 0, 0, 0, 1, 0, 0, 0, 32, 0, 4, 0
+  , 29, 0, 0, 0, 2, 0, 0, 0, 4, 0, 0, 0, 32, 0, 4, 0, 53, 0, 0, 0
+  , 7, 0, 0, 0, 4, 0, 0, 0, 43, 0, 4, 0, 24, 0, 0, 0, 23, 0, 0, 0
+  , 0, 0, 0, 0, 43, 0, 4, 0, 28, 0, 0, 0, 27, 0, 0, 0, 0, 0, 0, 0
+  , 43, 0, 4, 0, 28, 0, 0, 0, 35, 0, 0, 0, 1, 0, 0, 0, 43, 0, 4, 0
+  , 28, 0, 0, 0, 41, 0, 0, 0, 2, 0, 0, 0, 43, 0, 4, 0, 28, 0, 0, 0
+  , 47, 0, 0, 0, 3, 0, 0, 0, 59, 0, 4, 0, 7, 0, 0, 0, 8, 0, 0, 0
+  , 2, 0, 0, 0, 59, 0, 4, 0, 9, 0, 0, 0, 10, 0, 0, 0, 1, 0, 0, 0
+  , 59, 0, 4, 0, 11, 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 59, 0, 4, 0
+  , 9, 0, 0, 0, 13, 0, 0, 0, 1, 0, 0, 0, 59, 0, 4, 0, 14, 0, 0, 0
+  , 15, 0, 0, 0, 3, 0, 0, 0, 59, 0, 4, 0, 16, 0, 0, 0, 17, 0, 0, 0
+  , 3, 0, 0, 0, 59, 0, 4, 0, 14, 0, 0, 0, 18, 0, 0, 0, 3, 0, 0, 0
+  , 54, 0, 5, 0, 19, 0, 0, 0, 21, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0
+  , 248, 0, 2, 0, 22, 0, 0, 0, 59, 0, 4, 0, 53, 0, 0, 0, 54, 0, 0, 0
+  , 7, 0, 0, 0, 65, 0, 5, 0, 25, 0, 0, 0, 26, 0, 0, 0, 8, 0, 0, 0
+  , 23, 0, 0, 0, 65, 0, 5, 0, 29, 0, 0, 0, 30, 0, 0, 0, 26, 0, 0, 0
+  , 27, 0, 0, 0, 61, 0, 4, 0, 4, 0, 0, 0, 31, 0, 0, 0, 30, 0, 0, 0
+  , 61, 0, 4, 0, 4, 0, 0, 0, 32, 0, 0, 0, 10, 0, 0, 0, 148, 0, 5, 0
+  , 3, 0, 0, 0, 33, 0, 0, 0, 31, 0, 0, 0, 32, 0, 0, 0, 65, 0, 5, 0
+  , 25, 0, 0, 0, 34, 0, 0, 0, 8, 0, 0, 0, 23, 0, 0, 0, 65, 0, 5, 0
+  , 29, 0, 0, 0, 36, 0, 0, 0, 34, 0, 0, 0, 35, 0, 0, 0, 61, 0, 4, 0
+  , 4, 0, 0, 0, 37, 0, 0, 0, 36, 0, 0, 0, 61, 0, 4, 0, 4, 0, 0, 0
+  , 38, 0, 0, 0, 10, 0, 0, 0, 148, 0, 5, 0, 3, 0, 0, 0, 39, 0, 0, 0
+  , 37, 0, 0, 0, 38, 0, 0, 0, 65, 0, 5, 0, 25, 0, 0, 0, 40, 0, 0, 0
+  , 8, 0, 0, 0, 23, 0, 0, 0, 65, 0, 5, 0, 29, 0, 0, 0, 42, 0, 0, 0
+  , 40, 0, 0, 0, 41, 0, 0, 0, 61, 0, 4, 0, 4, 0, 0, 0, 43, 0, 0, 0
+  , 42, 0, 0, 0, 61, 0, 4, 0, 4, 0, 0, 0, 44, 0, 0, 0, 10, 0, 0, 0
+  , 148, 0, 5, 0, 3, 0, 0, 0, 45, 0, 0, 0, 43, 0, 0, 0, 44, 0, 0, 0
+  , 65, 0, 5, 0, 25, 0, 0, 0, 46, 0, 0, 0, 8, 0, 0, 0, 23, 0, 0, 0
+  , 65, 0, 5, 0, 29, 0, 0, 0, 48, 0, 0, 0, 46, 0, 0, 0, 47, 0, 0, 0
+  , 61, 0, 4, 0, 4, 0, 0, 0, 49, 0, 0, 0, 48, 0, 0, 0, 61, 0, 4, 0
+  , 4, 0, 0, 0, 50, 0, 0, 0, 10, 0, 0, 0, 148, 0, 5, 0, 3, 0, 0, 0
+  , 51, 0, 0, 0, 49, 0, 0, 0, 50, 0, 0, 0, 80, 0, 7, 0, 4, 0, 0, 0
+  , 52, 0, 0, 0, 33, 0, 0, 0, 39, 0, 0, 0, 45, 0, 0, 0, 51, 0, 0, 0
+  , 62, 0, 3, 0, 54, 0, 0, 0, 52, 0, 0, 0, 61, 0, 4, 0, 4, 0, 0, 0
+  , 55, 0, 0, 0, 54, 0, 0, 0, 61, 0, 4, 0, 5, 0, 0, 0, 56, 0, 0, 0
+  , 12, 0, 0, 0, 61, 0, 4, 0, 4, 0, 0, 0, 57, 0, 0, 0, 13, 0, 0, 0
+  , 80, 0, 6, 0, 1, 0, 0, 0, 58, 0, 0, 0, 55, 0, 0, 0, 56, 0, 0, 0
+  , 57, 0, 0, 0, 81, 0, 5, 0, 4, 0, 0, 0, 59, 0, 0, 0, 58, 0, 0, 0
+  , 0, 0, 0, 0, 62, 0, 3, 0, 15, 0, 0, 0, 59, 0, 0, 0, 81, 0, 5, 0
+  , 5, 0, 0, 0, 60, 0, 0, 0, 58, 0, 0, 0, 1, 0, 0, 0, 62, 0, 3, 0
+  , 17, 0, 0, 0, 60, 0, 0, 0, 81, 0, 5, 0, 4, 0, 0, 0, 61, 0, 0, 0
+  , 58, 0, 0, 0, 2, 0, 0, 0, 62, 0, 3, 0, 18, 0, 0, 0, 61, 0, 0, 0
+  , 253, 0, 1, 0, 56, 0, 1, 0
   ]
 
 defaultFragmentSpirv :: ByteString
