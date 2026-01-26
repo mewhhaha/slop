@@ -209,7 +209,8 @@ main = do
               draw basicUI (Sprite texture Nothing (rect 80 320 160 160) Nothing)
               draw basicUI (Sprite computeTex Nothing (rect 520 70 180 180) Nothing)
               draw basicUI (Sprite texture Nothing (rect 320 320 200 160) (Just effect))
-              draw basicUI (text font "Slop + SDL3.4" 80 40)
+              let titleStyle = defaultTextStyle { textColor = rgb 0.95 0.9 0.6 }
+              draw basicUI (textWith titleStyle font "Slop + SDL3.4" 80 40)
               let sceneY = 320
               draw (basic2D cam2d) (RectFill (rgba 0.1 0.1 0.2 0.9) (rect 60 sceneY 560 180))
               draw (basic2D cam2d) (RectOutline (rgb 0.15 0.7 0.6) (rect 60 sceneY 560 180))

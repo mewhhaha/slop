@@ -119,12 +119,18 @@ module Slop
   , createText
   , destroyText
   , drawText
+  , drawTextWith
   , drawTextCached
+  , measureText
+  , TextStyle(..)
+  , defaultTextStyle
+  , textWith
   , Frame(..)
   , LoopControl(..)
   , LoopExit(..)
   , InputState(..)
   , InputFrame(..)
+  , Modifiers(..)
   , Key(..)
   , MouseButton(..)
   , mouseLeft
@@ -250,6 +256,8 @@ module Slop
   , processMainAssets
   , awaitAsset
   , getAsset
+  , getAssetReady
+  , assetReady
   , getAssetStatus
   , removeAsset
   , removeAssets
@@ -346,7 +354,7 @@ import Data.Dynamic (Dynamic, fromDynamic, toDyn)
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Monoid (Last (..))
 import qualified Data.Map.Strict as Map
 import Data.Proxy (Proxy (..))
@@ -355,7 +363,7 @@ import Data.Typeable (TypeRep, Typeable, typeOf, typeRep)
 import Data.Word (Word8, Word32, Word64)
 import GHC.Conc (getNumCapabilities)
 import Foreign (Ptr, Storable (..), alloca, castPtr, nullPtr, peek, poke, pokeByteOff)
-import Foreign.C.String (withCString)
+import Foreign.C.String (peekCString, withCString)
 import Foreign.C.Types (CFloat (..))
 import Foreign.Marshal.Array (peekArray, withArray, withArrayLen)
 import Foreign.Marshal.Utils (copyBytes)
@@ -381,6 +389,7 @@ import Slop.SDL.Raw
   , SDL_GPUTextureFormat
   , SDL_GPUTextureUsageFlags
   , SDL_GPUPrimitiveType
+  , SDL_Keymod
   , GPUDevice (..)
   , GPUCommandBuffer (..)
   , GPUComputePipeline (..)
@@ -489,6 +498,9 @@ import Slop.SDL.Raw
   , sdlSetNumberProperty
   , sdlShowWindow
   , sdlEventQuit
+  , sdlEventTextInput
+  , sdlEventMouseWheel
+  , sdlMouseWheelFlipped
   , sdlGetError
   , sdlGetKeyboardState
   , sdlGetKeyFromScancode
@@ -506,6 +518,8 @@ import Slop.SDL.Raw
   , sdlGetMouseState
   , sdlPollEvent
   , sdlPumpEvents
+  , peekTextInputEvent
+  , peekMouseWheelEvent
   , sdlQuit
   , sdlReleaseGPUShader
   , sdlSetWindowResizable
@@ -700,7 +714,7 @@ data DrawShape
   | ShapeRectOutline Color FRect
   | ShapeRectFill Color FRect
   | ShapeSprite Texture (Maybe FRect) FRect
-  | ShapeText Text Float Float
+  | ShapeText Text Float Float Color
 
 data DrawCmd = DrawCmd DrawShape (Maybe ShaderContext)
 
@@ -1460,6 +1474,12 @@ getAsset assetId = do
     Just (AssetReady value) -> pure (Just value)
     _ -> pure Nothing
 
+getAssetReady :: forall a. Typeable a => AssetId a -> WindowM (Maybe a)
+getAssetReady = getAsset
+
+assetReady :: forall a. Typeable a => AssetId a -> WindowM Bool
+assetReady assetId = isJust <$> getAsset assetId
+
 getAssetStatus :: forall a. Typeable a => AssetId a -> WindowM (Maybe (AssetStatus a))
 getAssetStatus assetId = do
   app <- ask
@@ -1682,9 +1702,24 @@ data InputState = InputState
   }
   deriving (Eq, Show)
 
+data Modifiers = Modifiers
+  { modShift :: !Bool
+  , modCtrl :: !Bool
+  , modAlt :: !Bool
+  , modGui :: !Bool
+  , modNum :: !Bool
+  , modCaps :: !Bool
+  , modMode :: !Bool
+  , modScroll :: !Bool
+  }
+  deriving (Eq, Show)
+
 data InputFrame = InputFrame
   { inputPrev :: !InputState
   , inputNow :: !InputState
+  , inputText :: !String
+  , inputWheel :: !(V2 Float)
+  , inputMods :: !Modifiers
   }
   deriving (Eq, Show)
 
@@ -1790,6 +1825,19 @@ mouseButtonPressed button InputFrame { inputPrev = prevState, inputNow = nowStat
 mouseButtonReleased :: MouseButton -> InputFrame -> Bool
 mouseButtonReleased button InputFrame { inputPrev = prevState, inputNow = nowState } =
   not (mouseButtonDown button nowState) && mouseButtonDown button prevState
+
+modifiersFromKeymod :: SDL_Keymod -> Modifiers
+modifiersFromKeymod mods =
+  Modifiers
+    { modShift = mods .&. SDL.sdlKmodShift /= 0
+    , modCtrl = mods .&. SDL.sdlKmodCtrl /= 0
+    , modAlt = mods .&. SDL.sdlKmodAlt /= 0
+    , modGui = mods .&. SDL.sdlKmodGui /= 0
+    , modNum = mods .&. SDL.sdlKmodNum /= 0
+    , modCaps = mods .&. SDL.sdlKmodCaps /= 0
+    , modMode = mods .&. SDL.sdlKmodMode /= 0
+    , modScroll = mods .&. SDL.sdlKmodScroll /= 0
+    }
 
 
 data Color = Color
@@ -2426,12 +2474,30 @@ spriteEffectNamed shader named = do
   uniforms <- liftIO (resolveNamedUniforms table named)
   pure (SpriteEffect shader uniforms)
 
-data Label = Label Text Float Float
+data TextStyle = TextStyle
+  { textColor :: Color
+  , textEffect :: Maybe SpriteEffect
+  , textBlend :: Maybe BlendMode
+  }
+  deriving (Eq, Show)
 
-data TextDraw = TextDraw Font String Float Float
+defaultTextStyle :: TextStyle
+defaultTextStyle =
+  TextStyle
+    { textColor = rgb 1 1 1
+    , textEffect = Nothing
+    , textBlend = Nothing
+    }
+
+data Label = Label Text Float Float TextStyle
+
+data TextDraw = TextDraw Font String Float Float TextStyle
 
 text :: Font -> String -> Float -> Float -> TextDraw
-text = TextDraw
+text font str x y = TextDraw font str x y defaultTextStyle
+
+textWith :: TextStyle -> Font -> String -> Float -> Float -> TextDraw
+textWith style font str x y = TextDraw font str x y style
 
 data ShaderUniform where
   ShaderUniform :: Storable a => Word32 -> a -> ShaderUniform
@@ -2626,12 +2692,12 @@ instance Draw As2D Sprite where
         withShaderBindings sh uniforms (drawTexture texture src dst)
 
 instance Draw As2D Label where
-  draw ctx (Label textObj x y) =
-    withAs2D ctx (drawText textObj x y)
+  draw ctx (Label textObj x y style) =
+    withAs2DStyle ctx style (drawTextRaw textObj x y style.textColor)
 
 instance Draw As2D TextDraw where
-  draw ctx (TextDraw font str x y) =
-    withAs2D ctx (drawTextCached font str x y)
+  draw ctx (TextDraw font str x y style) =
+    withAs2DStyle ctx style (drawTextCachedWith font str x y style.textColor)
 
 drawItem :: DrawItem -> Loop ()
 drawItem (DrawItem ctx item) = draw ctx item
@@ -2655,6 +2721,36 @@ withAs2D ctx action =
     AsParticleWithView shader uniforms view -> withShaderBindingsBlendTransform BlendAdditive shader uniforms (Just (TransformMatrix view)) action
     AsParticleCamera cam -> withBlendTransform BlendAdditive (Just (TransformCamera cam)) action
     AsParticleWithCamera shader uniforms cam -> withShaderBindingsBlendTransform BlendAdditive shader uniforms (Just (TransformCamera cam)) action
+
+as2DContext :: As2D -> (BlendMode, Maybe Transform2D, Maybe (Shader, [ShaderUniform]))
+as2DContext ctx =
+  case ctx of
+    As2DCamera cam -> (BlendAlpha, Just (TransformCamera cam), Nothing)
+    AsUI -> (BlendPremultiplied, Nothing, Nothing)
+    AsUIWith shader uniforms -> (BlendPremultiplied, Nothing, Just (shader, uniforms))
+    AsUIView view -> (BlendPremultiplied, Just (TransformMatrix view), Nothing)
+    AsUIWithView shader uniforms view -> (BlendPremultiplied, Just (TransformMatrix view), Just (shader, uniforms))
+    AsUICamera cam -> (BlendPremultiplied, Just (TransformCamera cam), Nothing)
+    AsUIWithCamera shader uniforms cam -> (BlendPremultiplied, Just (TransformCamera cam), Just (shader, uniforms))
+    AsParticle -> (BlendAdditive, Nothing, Nothing)
+    AsParticleWith shader uniforms -> (BlendAdditive, Nothing, Just (shader, uniforms))
+    AsParticleView view -> (BlendAdditive, Just (TransformMatrix view), Nothing)
+    AsParticleWithView shader uniforms view -> (BlendAdditive, Just (TransformMatrix view), Just (shader, uniforms))
+    AsParticleCamera cam -> (BlendAdditive, Just (TransformCamera cam), Nothing)
+    AsParticleWithCamera shader uniforms cam -> (BlendAdditive, Just (TransformCamera cam), Just (shader, uniforms))
+
+withAs2DStyle :: As2D -> TextStyle -> Loop a -> Loop a
+withAs2DStyle ctx style action =
+  let (baseBlend, transform, baseShader) = as2DContext ctx
+      blend = fromMaybe baseBlend style.textBlend
+      effect =
+        case style.textEffect of
+          Just custom -> Just custom
+          Nothing -> fmap (uncurry SpriteEffect) baseShader
+  in case effect of
+      Nothing -> withBlendTransform blend transform action
+      Just (SpriteEffect shader uniforms) ->
+        withShaderBindingsBlendTransform blend shader uniforms transform action
 
 withBlendTransform :: BlendMode -> Maybe Transform2D -> Loop a -> Loop a
 withBlendTransform blend transform (Loop action) =
@@ -2682,81 +2778,82 @@ runWindowIO cfg action =
       void $ sdlSetWindowResizable win (cfg.windowResizable)
       okShow <- sdlShowWindow win
       unless okShow (die "SDL_ShowWindow")
-      sdlPumpEvents
-      gpu <- require "SDL_CreateGPUDevice" (sdlCreateGPUDevice sdlGPUShaderFormatSpirv False)
-      bracket (pure gpu) sdlDestroyGPUDevice $ \dev -> do
-        okClaim <- sdlClaimWindowForGPUDevice dev win
-        unless okClaim (die "SDL_ClaimWindowForGPUDevice")
-        let releaseWindow = sdlReleaseWindowFromGPUDevice dev win
-        bracket_ (pure ()) releaseWindow $ do
-          swapFmt <- sdlGetGPUSwapchainTextureFormat dev win
-          depthFormat <- chooseDepthFormat dev
-          sampler <- require "SDL_CreateGPUSampler" (sdlCreateGPUSampler dev defaultSamplerCreateInfo)
-          let defaultSampler = Sampler sampler
-          bracket (pure sampler) (sdlReleaseGPUSampler dev) $ \_ -> do
-            textEngine <- case cfg.textAtlasSize of
-              Nothing ->
-                require "TTF_CreateGPUTextEngine" (ttfCreateGPUTextEngine dev)
-              Just size ->
-                bracket sdlCreateProperties sdlDestroyProperties $ \props -> do
-                  when (props == 0) (die "SDL_CreateProperties")
-                  let GPUDevice devPtr = dev
-                  let propDevice = "SDL_ttf.gpu_text_engine.create.device"
-                  let propAtlas = "SDL_ttf.gpu_text_engine.create.atlas_texture_size"
-                  okDev <- sdlSetPointerProperty props propDevice (castPtr devPtr)
-                  unless okDev (die "SDL_SetPointerProperty (TTF device)")
-                  okSize <- sdlSetNumberProperty props propAtlas (fromIntegral size)
-                  unless okSize (die "SDL_SetNumberProperty (TTF atlas size)")
-                  require "TTF_CreateGPUTextEngineWithProperties" (ttfCreateGPUTextEngineWithProperties props)
-            bracket (pure textEngine) ttfDestroyGPUTextEngine $ \engine -> do
-              mixer <- require "MIX_CreateMixerDevice" (mixCreateMixerDevice sdlAudioDeviceDefaultPlayback)
-              bracket (pure mixer) mixDestroyMixer $ \mix -> do
-                vertexShader <- require "SDL_CreateGPUShader (vertex)" (createRawShader dev defaultVertexSpirv sdlGPUShaderStageVertex 0 0 0 0)
-                bracket (pure vertexShader) (sdlReleaseGPUShader dev) $ \vertShader -> do
-                  vertexShader3D <- require "SDL_CreateGPUShader (vertex3d)" (createRawShader dev defaultVertex3DSpirv sdlGPUShaderStageVertex 0 0 0 1)
-                  bracket (pure vertexShader3D) (sdlReleaseGPUShader dev) $ \vertShader3D -> do
-                    defaultShader <- createShaderFromSpirvWithDevice dev defaultFragmentSpirv 1 0 0 0
-                    bracket (pure defaultShader) destroyShaderIO $ \defShader -> do
-                      whiteTex <- createSolidTexture dev sdlGPUTextureFormatRGBA8 1 1 255 255 255 255
-                      bracket (pure whiteTex) destroyTextureIO $ \whiteTexture -> do
-                        musicTrackRef <- newIORef Nothing
-                        blendPools <- newIORef []
-                        mainAssetQueue <- newTQueueIO
-                        targets <- newIORef Map.empty
-                        pipelineTargets <- newIORef Map.empty
-                        depthTarget <- newIORef Nothing
-                        depthTargets <- newIORef Map.empty
-                        renderState <- newIORef (RenderState Map.empty 0)
-                        hotReload <- newIORef (HotReloadConfig True 0.5 0)
-                        frameCommands <- newIORef []
-                        frameShaders <- newIORef []
-                        recording <- newIORef Nothing
-                        winSize <- sdlGetWindowSize win
-                        windowSize <- newIORef winSize
-                        pipelines <- newIORef Map.empty
-                        drawColor <- newIORef (rgba 1 1 1 1)
-                        let frameContext = RecordingContext frameCommands frameShaders
-                        let placeholderAssets = error "AssetManager not initialized"
-                        let windowBase = Window
-                              { appWindow = win
-                              , appGPUDevice = dev
-                              , appSwapchainFormat = swapFmt
-                              , appDefaultSampler = defaultSampler
-                              , appTextEngine = engine
-                              , appMixer = mix
-                              , appMusicTrack = musicTrackRef
-                              , appBlendPools = blendPools
-                              , appAssets = placeholderAssets
-                              , appMainAssetQueue = mainAssetQueue
-                              , appTargets = targets
-                              , appPipelineTargets = pipelineTargets
-                              , appDepthFormat = depthFormat
-                              , appDepthTarget = depthTarget
-                              , appDepthTargets = depthTargets
-                              , appRenderState = renderState
-                              , appHotReload = hotReload
-                              , appFrameContext = frameContext
-                              , appRecording = recording
+      bracket_ (void (SDL.sdlStartTextInput win)) (void (SDL.sdlStopTextInput win)) $ do
+        sdlPumpEvents
+        gpu <- require "SDL_CreateGPUDevice" (sdlCreateGPUDevice sdlGPUShaderFormatSpirv False)
+        bracket (pure gpu) sdlDestroyGPUDevice $ \dev -> do
+          okClaim <- sdlClaimWindowForGPUDevice dev win
+          unless okClaim (die "SDL_ClaimWindowForGPUDevice")
+          let releaseWindow = sdlReleaseWindowFromGPUDevice dev win
+          bracket_ (pure ()) releaseWindow $ do
+            swapFmt <- sdlGetGPUSwapchainTextureFormat dev win
+            depthFormat <- chooseDepthFormat dev
+            sampler <- require "SDL_CreateGPUSampler" (sdlCreateGPUSampler dev defaultSamplerCreateInfo)
+            let defaultSampler = Sampler sampler
+            bracket (pure sampler) (sdlReleaseGPUSampler dev) $ \_ -> do
+              textEngine <- case cfg.textAtlasSize of
+                Nothing ->
+                  require "TTF_CreateGPUTextEngine" (ttfCreateGPUTextEngine dev)
+                Just size ->
+                  bracket sdlCreateProperties sdlDestroyProperties $ \props -> do
+                    when (props == 0) (die "SDL_CreateProperties")
+                    let GPUDevice devPtr = dev
+                    let propDevice = "SDL_ttf.gpu_text_engine.create.device"
+                    let propAtlas = "SDL_ttf.gpu_text_engine.create.atlas_texture_size"
+                    okDev <- sdlSetPointerProperty props propDevice (castPtr devPtr)
+                    unless okDev (die "SDL_SetPointerProperty (TTF device)")
+                    okSize <- sdlSetNumberProperty props propAtlas (fromIntegral size)
+                    unless okSize (die "SDL_SetNumberProperty (TTF atlas size)")
+                    require "TTF_CreateGPUTextEngineWithProperties" (ttfCreateGPUTextEngineWithProperties props)
+              bracket (pure textEngine) ttfDestroyGPUTextEngine $ \engine -> do
+                mixer <- require "MIX_CreateMixerDevice" (mixCreateMixerDevice sdlAudioDeviceDefaultPlayback)
+                bracket (pure mixer) mixDestroyMixer $ \mix -> do
+                  vertexShader <- require "SDL_CreateGPUShader (vertex)" (createRawShader dev defaultVertexSpirv sdlGPUShaderStageVertex 0 0 0 0)
+                  bracket (pure vertexShader) (sdlReleaseGPUShader dev) $ \vertShader -> do
+                    vertexShader3D <- require "SDL_CreateGPUShader (vertex3d)" (createRawShader dev defaultVertex3DSpirv sdlGPUShaderStageVertex 0 0 0 1)
+                    bracket (pure vertexShader3D) (sdlReleaseGPUShader dev) $ \vertShader3D -> do
+                      defaultShader <- createShaderFromSpirvWithDevice dev defaultFragmentSpirv 1 0 0 0
+                      bracket (pure defaultShader) destroyShaderIO $ \defShader -> do
+                        whiteTex <- createSolidTexture dev sdlGPUTextureFormatRGBA8 1 1 255 255 255 255
+                        bracket (pure whiteTex) destroyTextureIO $ \whiteTexture -> do
+                          musicTrackRef <- newIORef Nothing
+                          blendPools <- newIORef []
+                          mainAssetQueue <- newTQueueIO
+                          targets <- newIORef Map.empty
+                          pipelineTargets <- newIORef Map.empty
+                          depthTarget <- newIORef Nothing
+                          depthTargets <- newIORef Map.empty
+                          renderState <- newIORef (RenderState Map.empty 0)
+                          hotReload <- newIORef (HotReloadConfig True 0.5 0)
+                          frameCommands <- newIORef []
+                          frameShaders <- newIORef []
+                          recording <- newIORef Nothing
+                          winSize <- sdlGetWindowSize win
+                          windowSize <- newIORef winSize
+                          pipelines <- newIORef Map.empty
+                          drawColor <- newIORef (rgba 1 1 1 1)
+                          let frameContext = RecordingContext frameCommands frameShaders
+                          let placeholderAssets = error "AssetManager not initialized"
+                          let windowBase = Window
+                                { appWindow = win
+                                , appGPUDevice = dev
+                                , appSwapchainFormat = swapFmt
+                                , appDefaultSampler = defaultSampler
+                                , appTextEngine = engine
+                                , appMixer = mix
+                                , appMusicTrack = musicTrackRef
+                                , appBlendPools = blendPools
+                                , appAssets = placeholderAssets
+                                , appMainAssetQueue = mainAssetQueue
+                                , appTargets = targets
+                                , appPipelineTargets = pipelineTargets
+                                , appDepthFormat = depthFormat
+                                , appDepthTarget = depthTarget
+                                , appDepthTargets = depthTargets
+                                , appRenderState = renderState
+                                , appHotReload = hotReload
+                                , appFrameContext = frameContext
+                                , appRecording = recording
                               , appWindowSize = windowSize
                               , appWhiteTexture = whiteTexture
                               , appVertexShader = vertShader
@@ -3167,9 +3264,9 @@ createTextIO window font str = require "TTF_CreateText" (ttfCreateText (window.a
 destroyTextIO :: Text -> IO ()
 destroyTextIO = ttfDestroyText
 
-drawTextIO :: Window -> Text -> Float -> Float -> IO ()
-drawTextIO window textObj x y =
-  recordDraw window (ShapeText textObj x y)
+drawTextIO :: Window -> Text -> Float -> Float -> Color -> IO ()
+drawTextIO window textObj x y color =
+  recordDraw window (ShapeText textObj x y color)
 
 setFrameId :: Window -> Word64 -> IO ()
 setFrameId window frameId =
@@ -3484,8 +3581,8 @@ buildShapeDraws window size shape ctx =
       pure [ResolvedDraw sdlGPUPrimitiveTypeTriangleList (rectFillVertices size ctx.ctxTransform color rectShape) (window.appWhiteTexture.textureHandle) ctx]
     ShapeSprite tex src dst ->
       pure [ResolvedDraw sdlGPUPrimitiveTypeTriangleList (spriteVertices size ctx.ctxTransform tex src dst) tex.textureHandle ctx]
-    ShapeText textObj x y ->
-      textVertices size textObj x y ctx
+    ShapeText textObj x y color ->
+      textVertices size textObj x y color ctx
 
 lineVertices :: (Int, Int) -> Maybe Transform2D -> Color -> FPoint -> FPoint -> [Vertex]
 lineVertices size transform color p1 p2 =
@@ -3560,8 +3657,8 @@ spriteVertices size transform tex src dst =
      , mkVertex size transform p4 uv4 white
      ]
 
-textVertices :: (Int, Int) -> Text -> Float -> Float -> ShaderContext -> IO [ResolvedDraw]
-textVertices size textObj x y ctx = do
+textVertices :: (Int, Int) -> Text -> Float -> Float -> Color -> ShaderContext -> IO [ResolvedDraw]
+textVertices size textObj x y color ctx = do
   void (ttfSetTextPosition textObj (round x) (round y))
   seqPtr <- ttfGetGPUTextDrawData textObj
   go seqPtr []
@@ -3583,8 +3680,7 @@ textVertices size textObj x y ctx = do
           FPoint px py = xy !! idx
           FPoint u v = uv !! idx
           uvVec = V2 (realToFrac u) (realToFrac v)
-          white = rgba 1 1 1 1
-      in mkVertex size ctx.ctxTransform (FPoint px py) uvVec white
+      in mkVertex size ctx.ctxTransform (FPoint px py) uvVec color
 
 mkVertex :: (Int, Int) -> Maybe Transform2D -> FPoint -> V2 Float -> Color -> Vertex
 mkVertex (w, h) transform (FPoint x y) (V2 u v) (Color r g b a) =
@@ -4012,9 +4108,10 @@ loop initialState onFrame = do
   let go previous frameId prevInput state = do
         liftIO sdlPumpEvents
         liftIO (resetRecording window.appFrameContext)
-        quitRequested <- liftIO pollQuit
+        (quitRequested, inputText, inputWheel) <- liftIO pollInputEvents
         now <- liftIO sdlGetTicks
         currentInput <- liftIO readInputState
+        inputMods <- liftIO (modifiersFromKeymod <$> SDL.sdlGetModState)
         (winW, winH) <- liftIO (sdlGetWindowSize (window.appWindow))
         liftIO (writeIORef window.appWindowSize (winW, winH))
         let dt = fromIntegral (now - previous) / 1000
@@ -4027,7 +4124,7 @@ loop initialState onFrame = do
               , ticks = now
               , quitRequested = quitRequested
               , size = (winW, winH)
-              , input = InputFrame prevInput currentInput
+              , input = InputFrame prevInput currentInput inputText inputWheel inputMods
               }
         autoUpdateBlendPools dt
         autoHotReload dt
@@ -4043,16 +4140,32 @@ loop initialState onFrame = do
               else go now nextFrame currentInput result
   go start 0 initialInput initialState
   where
-    pollQuit = allocaEvent $ \eventPtr ->
-      let step quitSeen = do
+    pollInputEvents = allocaEvent $ \eventPtr ->
+      let step quitSeen textChunks wheelAcc = do
             has <- sdlPollEvent eventPtr
             if not has
-              then pure quitSeen
+              then pure (quitSeen, concat (reverse textChunks), wheelAcc)
               else do
                 eventType <- peekEventType eventPtr
                 let quitNow = quitSeen || eventType == sdlEventQuit
-                step quitNow
-      in step False
+                if eventType == sdlEventTextInput
+                  then do
+                    ev <- peekTextInputEvent eventPtr
+                    chunk <-
+                      if ev.textInputText == nullPtr
+                        then pure ""
+                        else peekCString ev.textInputText
+                    step quitNow (chunk : textChunks) wheelAcc
+                  else if eventType == sdlEventMouseWheel
+                    then do
+                      ev <- peekMouseWheelEvent eventPtr
+                      let dx = realToFrac ev.mouseWheelX
+                      let dy = realToFrac ev.mouseWheelY
+                      let flipped = ev.mouseWheelDirection == sdlMouseWheelFlipped
+                      let delta = if flipped then V2 (-dx) (-dy) else V2 dx dy
+                      step quitNow textChunks (wheelAcc + delta)
+                    else step quitNow textChunks wheelAcc
+      in step False [] (V2 0 0)
 
 autoUpdateBlendPools :: Float -> WindowM ()
 autoUpdateBlendPools delta = do
@@ -4311,11 +4424,28 @@ createText font str = do
 destroyText :: Text -> WindowM ()
 destroyText textObj = liftIO (destroyTextIO textObj)
 
+drawTextRaw :: Text -> Float -> Float -> Color -> Loop ()
+drawTextRaw textObj x y color =
+  withWindowLoop (\window -> drawTextIO window textObj x y color)
+
 drawText :: Text -> Float -> Float -> Loop ()
-drawText textObj x y = withWindowLoop (\window -> drawTextIO window textObj x y)
+drawText textObj x y = drawTextWith defaultTextStyle textObj x y
+
+drawTextWith :: TextStyle -> Text -> Float -> Float -> Loop ()
+drawTextWith style textObj x y =
+  let action = withWindowLoop (\window -> drawTextIO window textObj x y style.textColor)
+      blend = fromMaybe BlendAlpha style.textBlend
+  in case style.textEffect of
+      Nothing -> withBlendTransform blend Nothing action
+      Just (SpriteEffect shader uniforms) ->
+        withShaderBindingsBlendTransform blend shader uniforms Nothing action
 
 drawTextCached :: Font -> String -> Float -> Float -> Loop ()
 drawTextCached font str x y =
+  drawTextCachedWith font str x y defaultTextStyle.textColor
+
+drawTextCachedWith :: Font -> String -> Float -> Float -> Color -> Loop ()
+drawTextCachedWith font str x y color =
   Loop $ do
     window <- ask
     frameId <- liftIO $ atomicModifyIORef' (window.appRenderState) (\st -> (st, st.rsFrameId))
@@ -4336,7 +4466,43 @@ drawTextCached font str x y =
           let cache' = Map.insert key (CachedText t frameId) (st.rsTextCache)
           in (st { rsTextCache = cache' }, ())
         pure t
-    liftIO (recordDraw window (ShapeText textObj x y))
+    liftIO (recordDraw window (ShapeText textObj x y color))
+
+measureText :: Font -> String -> WindowM (V2 Float)
+measureText font str = liftWindow (\window -> measureTextIO window font str)
+
+measureTextIO :: Window -> Font -> String -> IO (V2 Float)
+measureTextIO window font str = do
+  textObj <- createTextIO window font str
+  size <- measureTextObj textObj
+  destroyTextIO textObj
+  pure size
+
+measureTextObj :: Text -> IO (V2 Float)
+measureTextObj textObj = do
+  void (ttfSetTextPosition textObj 0 0)
+  seqPtr <- ttfGetGPUTextDrawData textObj
+  bounds <- go seqPtr Nothing
+  pure $ case bounds of
+    Nothing -> V2 0 0
+    Just (minX, minY, maxX, maxY) -> V2 (maxX - minX) (maxY - minY)
+  where
+    go ptr acc
+      | ptr == nullPtr = pure acc
+      | otherwise = do
+          seqInfo <- peek ptr
+          let numVerts = fromIntegral seqInfo.ttfAtlasNumVertices
+          points <- if seqInfo.ttfAtlasXY == nullPtr then pure [] else peekArray numVerts seqInfo.ttfAtlasXY
+          let acc' = foldl' updateBounds acc points
+          go seqInfo.ttfAtlasNext acc'
+    updateBounds Nothing (FPoint x y) =
+      let fx = realToFrac x
+          fy = realToFrac y
+      in Just (fx, fy, fx, fy)
+    updateBounds (Just (minX, minY, maxX, maxY)) (FPoint x y) =
+      let fx = realToFrac x
+          fy = realToFrac y
+      in Just (min minX fx, min minY fy, max maxX fx, max maxY fy)
 
 setTrackAudioSource :: Window -> Track -> Audio -> IO Bool
 setTrackAudioSource _ track source =

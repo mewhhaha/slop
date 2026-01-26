@@ -193,6 +193,22 @@ let u = shaderUniformSized 0 16 params      -- Either String ShaderUniform
 let u' = shaderUniformBytesSized 0 16 bytes -- Either String ShaderUniform
 ```
 
+## Text
+
+Use `TextStyle` to control color or override the fragment shader for text:
+
+```haskell
+let style = defaultTextStyle { textColor = rgb 1 0.6 0.2 }
+draw basicUI (textWith style font "Warm text" 40 40)
+```
+
+Measure text size for layout:
+
+```haskell
+size <- measureText font "Measure me"
+-- size :: V2 Float (width, height)
+```
+
 ## Input
 
 Input is **keycode-based** (layout-aware), not raw scancodes.
@@ -200,6 +216,14 @@ Input is **keycode-based** (layout-aware), not raw scancodes.
 ```haskell
 when (keyPressed KeySpace frame.input) ...
 when (keyReleased KeyB frame.input) ...
+```
+
+Additional per-frame input:
+
+```haskell
+let typed = frame.input.text
+let wheel = frame.input.wheel
+let mods = frame.input.mods
 ```
 
 ## Assets
@@ -216,7 +240,7 @@ If you're not using `loop`, call `processMainAssets` to progress main-thread loa
 
 ### Non-blocking asset reads in the loop
 
-Use `getAsset` to poll without blocking and render a fallback while it loads:
+Use `getAsset` (or the `getAssetReady` alias) to poll without blocking and render a fallback while it loads:
 
 ```haskell
 data DemoState = DemoState

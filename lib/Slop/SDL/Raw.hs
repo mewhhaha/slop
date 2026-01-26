@@ -38,6 +38,7 @@ module Slop.SDL.Raw
   , SDL_GPUFrontFace
   , SDL_GPUStencilOp
   , SDL_EventType
+  , SDL_MouseWheelDirection
   , SDL_PropertiesID
   , SDL_Keycode
   , SDL_Keymod
@@ -67,6 +68,8 @@ module Slop.SDL.Raw
   , Font(..)
   , Text(..)
   , SDL_Event
+  , SDL_TextInputEvent(..)
+  , SDL_MouseWheelEvent(..)
   , FColor(..)
   , FRect(..)
   , FPoint(..)
@@ -102,6 +105,10 @@ module Slop.SDL.Raw
   , sdlInitVideo
   , sdlInitAudio
   , sdlEventQuit
+  , sdlEventTextInput
+  , sdlEventMouseWheel
+  , sdlMouseWheelNormal
+  , sdlMouseWheelFlipped
   , sdlGPUShaderFormatSpirv
   , sdlGPUShaderStageVertex
   , sdlGPUShaderStageFragment
@@ -231,6 +238,9 @@ module Slop.SDL.Raw
   , sdlGetKeyboardState
   , sdlGetKeyFromScancode
   , sdlGetMouseState
+  , sdlGetModState
+  , sdlStartTextInput
+  , sdlStopTextInput
   , sdlGetWindowSize
   , allocaEvent
   , peekEventType
@@ -277,6 +287,16 @@ module Slop.SDL.Raw
   , mixTrackPlaying
   , mixPlayAudio
   , sdlIOFromFile
+  , sdlKmodShift
+  , sdlKmodCtrl
+  , sdlKmodAlt
+  , sdlKmodGui
+  , sdlKmodNum
+  , sdlKmodCaps
+  , sdlKmodMode
+  , sdlKmodScroll
+  , peekTextInputEvent
+  , peekMouseWheelEvent
   , sdlCreateGPUShader
   , sdlReleaseGPUShader
   , sdlCreateGPURenderState
@@ -352,6 +372,8 @@ type SDL_GPUStencilOp = CInt
 
 type SDL_EventType = Word32
 
+type SDL_MouseWheelDirection = CInt
+
 type SDL_PropertiesID = Word32
 
 type SDL_Keycode = Word32
@@ -370,6 +392,42 @@ sdlInitAudio = 0x00000010
 
 sdlEventQuit :: SDL_EventType
 sdlEventQuit = 0x00000100
+
+sdlEventTextInput :: SDL_EventType
+sdlEventTextInput = 0x00000303
+
+sdlEventMouseWheel :: SDL_EventType
+sdlEventMouseWheel = 0x00000403
+
+sdlMouseWheelNormal :: SDL_MouseWheelDirection
+sdlMouseWheelNormal = 0
+
+sdlMouseWheelFlipped :: SDL_MouseWheelDirection
+sdlMouseWheelFlipped = 1
+
+sdlKmodShift :: SDL_Keymod
+sdlKmodShift = 0x0003
+
+sdlKmodCtrl :: SDL_Keymod
+sdlKmodCtrl = 0x00c0
+
+sdlKmodAlt :: SDL_Keymod
+sdlKmodAlt = 0x0300
+
+sdlKmodGui :: SDL_Keymod
+sdlKmodGui = 0x0c00
+
+sdlKmodNum :: SDL_Keymod
+sdlKmodNum = 0x1000
+
+sdlKmodCaps :: SDL_Keymod
+sdlKmodCaps = 0x2000
+
+sdlKmodMode :: SDL_Keymod
+sdlKmodMode = 0x4000
+
+sdlKmodScroll :: SDL_Keymod
+sdlKmodScroll = 0x8000
 
 sdlGPUShaderFormatSpirv :: SDL_GPUShaderFormat
 sdlGPUShaderFormatSpirv = 1 `shiftL` 1
@@ -624,6 +682,162 @@ allocaEvent = allocaBytesAligned sdlEventSize sdlEventAlign
 
 peekEventType :: EventPtr -> IO SDL_EventType
 peekEventType ptr = peekByteOff (castPtr ptr) 0
+
+data SDL_TextInputEvent = SDL_TextInputEvent
+  { textInputType :: SDL_EventType
+  , textInputReserved :: Word32
+  , textInputTimestamp :: Word64
+  , textInputWindowID :: Word32
+  , textInputText :: CString
+  }
+  deriving (Eq, Show)
+
+data SDL_MouseWheelEvent = SDL_MouseWheelEvent
+  { mouseWheelType :: SDL_EventType
+  , mouseWheelReserved :: Word32
+  , mouseWheelTimestamp :: Word64
+  , mouseWheelWindowID :: Word32
+  , mouseWheelWhich :: Word32
+  , mouseWheelX :: CFloat
+  , mouseWheelY :: CFloat
+  , mouseWheelDirection :: SDL_MouseWheelDirection
+  , mouseWheelMouseX :: CFloat
+  , mouseWheelMouseY :: CFloat
+  , mouseWheelIntegerX :: CInt
+  , mouseWheelIntegerY :: CInt
+  }
+  deriving (Eq, Show)
+
+textInputEventSize :: Int
+textInputEventAlign :: Int
+textInputEventOffsets :: [Int]
+(textInputEventSize, textInputEventAlign, textInputEventOffsets) =
+  structLayout
+    [ cField (Proxy @SDL_EventType)
+    , cField (Proxy @Word32)
+    , cField (Proxy @Word64)
+    , cField (Proxy @Word32)
+    , cField (Proxy @CString)
+    ]
+
+( textInputTypeOffset
+  , textInputReservedOffset
+  , textInputTimestampOffset
+  , textInputWindowIDOffset
+  , textInputTextOffset
+  ) =
+  case textInputEventOffsets of
+    [a, b, c, d, e] -> (a, b, c, d, e)
+    _ -> error "SDL_TextInputEvent layout mismatch"
+
+instance Storable SDL_TextInputEvent where
+  sizeOf _ = textInputEventSize
+  alignment _ = textInputEventAlign
+  peek ptr = do
+    typ <- peekByteOff ptr textInputTypeOffset
+    reserved <- peekByteOff ptr textInputReservedOffset
+    ts <- peekByteOff ptr textInputTimestampOffset
+    win <- peekByteOff ptr textInputWindowIDOffset
+    txt <- peekByteOff ptr textInputTextOffset
+    pure SDL_TextInputEvent
+      { textInputType = typ
+      , textInputReserved = reserved
+      , textInputTimestamp = ts
+      , textInputWindowID = win
+      , textInputText = txt
+      }
+  poke ptr info = do
+    pokeByteOff ptr textInputTypeOffset info.textInputType
+    pokeByteOff ptr textInputReservedOffset info.textInputReserved
+    pokeByteOff ptr textInputTimestampOffset info.textInputTimestamp
+    pokeByteOff ptr textInputWindowIDOffset info.textInputWindowID
+    pokeByteOff ptr textInputTextOffset info.textInputText
+
+mouseWheelEventSize :: Int
+mouseWheelEventAlign :: Int
+mouseWheelEventOffsets :: [Int]
+(mouseWheelEventSize, mouseWheelEventAlign, mouseWheelEventOffsets) =
+  structLayout
+    [ cField (Proxy @SDL_EventType)
+    , cField (Proxy @Word32)
+    , cField (Proxy @Word64)
+    , cField (Proxy @Word32)
+    , cField (Proxy @Word32)
+    , cField (Proxy @CFloat)
+    , cField (Proxy @CFloat)
+    , cField (Proxy @SDL_MouseWheelDirection)
+    , cField (Proxy @CFloat)
+    , cField (Proxy @CFloat)
+    , cField (Proxy @CInt)
+    , cField (Proxy @CInt)
+    ]
+
+( mouseWheelTypeOffset
+  , mouseWheelReservedOffset
+  , mouseWheelTimestampOffset
+  , mouseWheelWindowIDOffset
+  , mouseWheelWhichOffset
+  , mouseWheelXOffset
+  , mouseWheelYOffset
+  , mouseWheelDirectionOffset
+  , mouseWheelMouseXOffset
+  , mouseWheelMouseYOffset
+  , mouseWheelIntegerXOffset
+  , mouseWheelIntegerYOffset
+  ) =
+  case mouseWheelEventOffsets of
+    [a, b, c, d, e, f, g, h, i, j, k, l] -> (a, b, c, d, e, f, g, h, i, j, k, l)
+    _ -> error "SDL_MouseWheelEvent layout mismatch"
+
+instance Storable SDL_MouseWheelEvent where
+  sizeOf _ = mouseWheelEventSize
+  alignment _ = mouseWheelEventAlign
+  peek ptr = do
+    typ <- peekByteOff ptr mouseWheelTypeOffset
+    reserved <- peekByteOff ptr mouseWheelReservedOffset
+    ts <- peekByteOff ptr mouseWheelTimestampOffset
+    win <- peekByteOff ptr mouseWheelWindowIDOffset
+    which <- peekByteOff ptr mouseWheelWhichOffset
+    x <- peekByteOff ptr mouseWheelXOffset
+    y <- peekByteOff ptr mouseWheelYOffset
+    dir <- peekByteOff ptr mouseWheelDirectionOffset
+    mx <- peekByteOff ptr mouseWheelMouseXOffset
+    my <- peekByteOff ptr mouseWheelMouseYOffset
+    ix <- peekByteOff ptr mouseWheelIntegerXOffset
+    iy <- peekByteOff ptr mouseWheelIntegerYOffset
+    pure SDL_MouseWheelEvent
+      { mouseWheelType = typ
+      , mouseWheelReserved = reserved
+      , mouseWheelTimestamp = ts
+      , mouseWheelWindowID = win
+      , mouseWheelWhich = which
+      , mouseWheelX = x
+      , mouseWheelY = y
+      , mouseWheelDirection = dir
+      , mouseWheelMouseX = mx
+      , mouseWheelMouseY = my
+      , mouseWheelIntegerX = ix
+      , mouseWheelIntegerY = iy
+      }
+  poke ptr info = do
+    pokeByteOff ptr mouseWheelTypeOffset info.mouseWheelType
+    pokeByteOff ptr mouseWheelReservedOffset info.mouseWheelReserved
+    pokeByteOff ptr mouseWheelTimestampOffset info.mouseWheelTimestamp
+    pokeByteOff ptr mouseWheelWindowIDOffset info.mouseWheelWindowID
+    pokeByteOff ptr mouseWheelWhichOffset info.mouseWheelWhich
+    pokeByteOff ptr mouseWheelXOffset info.mouseWheelX
+    pokeByteOff ptr mouseWheelYOffset info.mouseWheelY
+    pokeByteOff ptr mouseWheelDirectionOffset info.mouseWheelDirection
+    pokeByteOff ptr mouseWheelMouseXOffset info.mouseWheelMouseX
+    pokeByteOff ptr mouseWheelMouseYOffset info.mouseWheelMouseY
+    pokeByteOff ptr mouseWheelIntegerXOffset info.mouseWheelIntegerX
+    pokeByteOff ptr mouseWheelIntegerYOffset info.mouseWheelIntegerY
+
+peekTextInputEvent :: EventPtr -> IO SDL_TextInputEvent
+peekTextInputEvent ptr = peek (castPtr ptr)
+
+peekMouseWheelEvent :: EventPtr -> IO SDL_MouseWheelEvent
+peekMouseWheelEvent ptr = peek (castPtr ptr)
 
 -- Geometry
 
@@ -3315,6 +3529,24 @@ foreign import ccall unsafe "SDL_GetMouseState" c_SDL_GetMouseState
 
 sdlGetMouseState :: Ptr CFloat -> Ptr CFloat -> IO Word32
 sdlGetMouseState = c_SDL_GetMouseState
+
+foreign import ccall unsafe "SDL_GetModState" c_SDL_GetModState
+  :: IO SDL_Keymod
+
+sdlGetModState :: IO SDL_Keymod
+sdlGetModState = c_SDL_GetModState
+
+foreign import ccall unsafe "SDL_StartTextInput" c_SDL_StartTextInput
+  :: Ptr SDL_Window -> IO CBool
+
+sdlStartTextInput :: Window -> IO Bool
+sdlStartTextInput (Window win) = fromCBool <$> c_SDL_StartTextInput win
+
+foreign import ccall unsafe "SDL_StopTextInput" c_SDL_StopTextInput
+  :: Ptr SDL_Window -> IO CBool
+
+sdlStopTextInput :: Window -> IO Bool
+sdlStopTextInput (Window win) = fromCBool <$> c_SDL_StopTextInput win
 
 foreign import ccall unsafe "SDL_GetWindowSize" c_SDL_GetWindowSize
   :: Ptr SDL_Window -> Ptr CInt -> Ptr CInt -> IO ()
