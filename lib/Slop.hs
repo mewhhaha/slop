@@ -34,6 +34,11 @@ module Slop
   , TextureDesc(..)
   , textureDesc
   , createTexture2D
+  , NoiseType(..)
+  , NoiseSettings(..)
+  , defaultNoiseSettings
+  , createNoiseTexture2D
+  , createNoiseTexture3D
   , VertexAttrFormat(..)
   , VertexAttr(..)
   , VertexLayout(..)
@@ -297,6 +302,7 @@ module Slop
   , drawRectIO
   , fillRectIO
   , drawTextureIO
+  , createNoiseTexture2DIO
   , loadTextureIO
   , destroyTextureIO
   , loadFontIO
@@ -346,7 +352,7 @@ import Control.Concurrent.STM
 import Control.Monad.Reader (MonadReader (..), ReaderT (..))
 import Control.Monad.Writer.Strict (Writer, execWriter, runWriter, tell)
 import Control.Monad.IO.Class (MonadIO (..))
-import Data.Bits ((.&.), (.|.), shiftL)
+import Data.Bits ((.&.), (.|.), shiftL, shiftR, xor)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
@@ -532,6 +538,7 @@ import Slop.SDL.Raw
   , sdlGPUTextureFormatD24UNORMS8UINT
   , sdlGPUTextureFormatD32FloatS8UINT
   , sdlGPUTextureType2D
+  , sdlGPUTextureType3D
   , sdlGPUTextureUsageSampler
   , sdlGPUTextureUsageColorTarget
   , sdlGPUTextureUsageDepthStencilTarget
@@ -1873,6 +1880,40 @@ data TextureDesc = TextureDesc
   }
   deriving (Eq, Show)
 
+data NoiseType
+  = NoiseWhite
+  | NoiseValue
+  | NoisePerlin
+  | NoiseVoronoi
+  deriving (Eq, Show)
+
+data NoiseSettings = NoiseSettings
+  { noiseType :: NoiseType
+  , noiseSeed :: Word32
+  , noiseScale :: Float
+  , noiseOctaves :: Int
+  , noiseLacunarity :: Float
+  , noiseGain :: Float
+  , noiseVoronoiJitter :: Float
+  , noiseContrast :: Float
+  , noiseBrightness :: Float
+  }
+  deriving (Eq, Show)
+
+defaultNoiseSettings :: NoiseSettings
+defaultNoiseSettings =
+  NoiseSettings
+    { noiseType = NoiseValue
+    , noiseSeed = 1337
+    , noiseScale = 64
+    , noiseOctaves = 3
+    , noiseLacunarity = 2
+    , noiseGain = 0.5
+    , noiseVoronoiJitter = 1
+    , noiseContrast = 1
+    , noiseBrightness = 0
+    }
+
 textureDesc :: Int -> Int -> TextureDesc
 textureDesc width height =
   TextureDesc
@@ -3155,6 +3196,406 @@ createSolidTexture device fmt width height r g b a = do
     ioError (userError ("SDL_SubmitGPUCommandBuffer failed: " <> err))
   sdlReleaseGPUTransferBuffer device transfer
   pure tex
+
+createNoiseTexture2D :: Int -> Int -> NoiseSettings -> WindowM Texture
+createNoiseTexture2D width height settings =
+  liftWindow (\window -> createNoiseTexture2DIO window width height settings)
+
+createNoiseTexture2DIO :: Window -> Int -> Int -> NoiseSettings -> IO Texture
+createNoiseTexture2DIO window width height settings = do
+  let texUsage = sdlGPUTextureUsageSampler
+  tex <- createTexture window.appGPUDevice sdlGPUTextureFormatRGBA8 texUsage width height
+  let byteSize = width * height * 4
+  transfer <- require "SDL_CreateGPUTransferBuffer"
+    (sdlCreateGPUTransferBuffer window.appGPUDevice
+      GPUTransferBufferCreateInfo
+        { gpuTransferUsage = sdlGPUTransferBufferUsageUpload
+        , gpuTransferSize = fromIntegral byteSize
+        , gpuTransferProps = 0
+        })
+  ptr <- require "SDL_MapGPUTransferBuffer" (sdlMapGPUTransferBuffer window.appGPUDevice transfer False)
+  let bytes = noiseBytes width height settings
+  BS.useAsCStringLen bytes $ \(src, _) ->
+    copyBytes ptr (castPtr src) byteSize
+  sdlUnmapGPUTransferBuffer window.appGPUDevice transfer
+  cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
+  copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
+  let transferInfo = GPUTextureTransferInfo
+        { gpuTransferBuffer = transfer
+        , gpuTransferOffset = 0
+        , gpuTransferPixelsPerRow = fromIntegral width
+        , gpuTransferRowsPerLayer = fromIntegral height
+        }
+  let region = GPUTextureRegion
+        { gpuTextureRegionTexture = tex.textureHandle
+        , gpuTextureRegionMipLevel = 0
+        , gpuTextureRegionLayer = 0
+        , gpuTextureRegionX = 0
+        , gpuTextureRegionY = 0
+        , gpuTextureRegionZ = 0
+        , gpuTextureRegionW = fromIntegral width
+        , gpuTextureRegionH = fromIntegral height
+        , gpuTextureRegionD = 1
+        }
+  sdlUploadToGPUTexture copyPass transferInfo region False
+  sdlEndGPUCopyPass copyPass
+  okSubmit <- sdlSubmitGPUCommandBuffer cmd
+  unless okSubmit $ do
+    err <- sdlGetError
+    ioError (userError ("SDL_SubmitGPUCommandBuffer failed: " <> err))
+  sdlReleaseGPUTransferBuffer window.appGPUDevice transfer
+  pure tex
+
+createNoiseTexture3D :: Int -> Int -> Int -> NoiseSettings -> WindowM Texture
+createNoiseTexture3D width height depth settings =
+  liftWindow (\window -> createNoiseTexture3DIO window width height depth settings)
+
+createNoiseTexture3DIO :: Window -> Int -> Int -> Int -> NoiseSettings -> IO Texture
+createNoiseTexture3DIO window width height depth settings = do
+  let texUsage = sdlGPUTextureUsageSampler
+  tex <- createTexture3D window.appGPUDevice sdlGPUTextureFormatRGBA8 texUsage width height depth
+  let byteSize = width * height * depth * 4
+  transfer <- require "SDL_CreateGPUTransferBuffer"
+    (sdlCreateGPUTransferBuffer window.appGPUDevice
+      GPUTransferBufferCreateInfo
+        { gpuTransferUsage = sdlGPUTransferBufferUsageUpload
+        , gpuTransferSize = fromIntegral byteSize
+        , gpuTransferProps = 0
+        })
+  ptr <- require "SDL_MapGPUTransferBuffer" (sdlMapGPUTransferBuffer window.appGPUDevice transfer False)
+  let bytes = noiseBytes3D width height depth settings
+  BS.useAsCStringLen bytes $ \(src, _) ->
+    copyBytes ptr (castPtr src) byteSize
+  sdlUnmapGPUTransferBuffer window.appGPUDevice transfer
+  cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
+  copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
+  let transferInfo = GPUTextureTransferInfo
+        { gpuTransferBuffer = transfer
+        , gpuTransferOffset = 0
+        , gpuTransferPixelsPerRow = fromIntegral width
+        , gpuTransferRowsPerLayer = fromIntegral height
+        }
+  let region = GPUTextureRegion
+        { gpuTextureRegionTexture = tex.textureHandle
+        , gpuTextureRegionMipLevel = 0
+        , gpuTextureRegionLayer = 0
+        , gpuTextureRegionX = 0
+        , gpuTextureRegionY = 0
+        , gpuTextureRegionZ = 0
+        , gpuTextureRegionW = fromIntegral width
+        , gpuTextureRegionH = fromIntegral height
+        , gpuTextureRegionD = fromIntegral depth
+        }
+  sdlUploadToGPUTexture copyPass transferInfo region False
+  sdlEndGPUCopyPass copyPass
+  okSubmit <- sdlSubmitGPUCommandBuffer cmd
+  unless okSubmit $ do
+    err <- sdlGetError
+    ioError (userError ("SDL_SubmitGPUCommandBuffer failed: " <> err))
+  sdlReleaseGPUTransferBuffer window.appGPUDevice transfer
+  pure tex
+
+createTexture3D :: GPUDevice -> SDL_GPUTextureFormat -> SDL_GPUTextureUsageFlags -> Int -> Int -> Int -> IO Texture
+createTexture3D device fmt usage width height depth = do
+  gpuTex <- require "SDL_CreateGPUTexture"
+    (sdlCreateGPUTexture device
+      GPUTextureCreateInfo
+        { gpuTextureType = sdlGPUTextureType3D
+        , gpuTextureFormat = fmt
+        , gpuTextureUsage = usage
+        , gpuTextureWidth = fromIntegral width
+        , gpuTextureHeight = fromIntegral height
+        , gpuTextureLayerCountOrDepth = fromIntegral depth
+        , gpuTextureNumLevels = 1
+        , gpuTextureSampleCount = sdlGPUSampleCount1
+        , gpuTextureProps = 0
+        })
+  pure Texture
+    { textureHandle = gpuTex
+    , textureDevice = device
+    , textureWidth = width
+    , textureHeight = height
+    }
+
+noiseBytes :: Int -> Int -> NoiseSettings -> ByteString
+noiseBytes width height settings =
+  BS.pack (go 0 0)
+  where
+    go x y
+      | y >= height = []
+      | x >= width = go 0 (y + 1)
+      | otherwise =
+          let v = noiseValue2D settings (fromIntegral x) (fromIntegral y)
+              g = toByte v
+          in g : g : g : 255 : go (x + 1) y
+
+noiseBytes3D :: Int -> Int -> Int -> NoiseSettings -> ByteString
+noiseBytes3D width height depth settings =
+  BS.pack (go 0 0 0)
+  where
+    go x y z
+      | z >= depth = []
+      | y >= height = go 0 0 (z + 1)
+      | x >= width = go 0 (y + 1) z
+      | otherwise =
+          let v = noiseValue3D settings (fromIntegral x) (fromIntegral y) (fromIntegral z)
+              g = toByte v
+          in g : g : g : 255 : go (x + 1) y z
+
+noiseValue2D :: NoiseSettings -> Float -> Float -> Float
+noiseValue2D settings x y =
+  let base = case settings.noiseType of
+        NoiseWhite -> hash2D settings.noiseSeed (floor x) (floor y)
+        NoiseValue -> fractalValue2D settings valueNoise2D x y
+        NoisePerlin -> fractalValue2D settings perlin2D x y
+        NoiseVoronoi -> fractalValue2D settings (voronoi2D (clamp01 settings.noiseVoronoiJitter)) x y
+      contrasted = (base - 0.5) * settings.noiseContrast + 0.5 + settings.noiseBrightness
+  in clamp01 contrasted
+
+noiseValue3D :: NoiseSettings -> Float -> Float -> Float -> Float
+noiseValue3D settings x y z =
+  let base = case settings.noiseType of
+        NoiseWhite -> hash3D settings.noiseSeed (floor x) (floor y) (floor z)
+        NoiseValue -> fractalValue3D settings valueNoise3D x y z
+        NoisePerlin -> fractalValue3D settings perlin3D x y z
+        NoiseVoronoi -> fractalValue3D settings (voronoi3D (clamp01 settings.noiseVoronoiJitter)) x y z
+      contrasted = (base - 0.5) * settings.noiseContrast + 0.5 + settings.noiseBrightness
+  in clamp01 contrasted
+
+fractalValue2D :: NoiseSettings -> (Word32 -> Float -> Float -> Float) -> Float -> Float -> Float
+fractalValue2D settings f x y =
+  let scale = max 0.0001 settings.noiseScale
+      octs = max 1 settings.noiseOctaves
+      go idx amp freq acc norm
+        | idx >= octs = if norm == 0 then 0 else acc / norm
+        | otherwise =
+            let value = f settings.noiseSeed (x / scale * freq) (y / scale * freq)
+            in go (idx + 1) (amp * settings.noiseGain) (freq * settings.noiseLacunarity) (acc + value * amp) (norm + amp)
+  in go 0 1 1 0 0
+
+fractalValue3D :: NoiseSettings -> (Word32 -> Float -> Float -> Float -> Float) -> Float -> Float -> Float -> Float
+fractalValue3D settings f x y z =
+  let scale = max 0.0001 settings.noiseScale
+      octs = max 1 settings.noiseOctaves
+      go idx amp freq acc norm
+        | idx >= octs = if norm == 0 then 0 else acc / norm
+        | otherwise =
+            let value = f settings.noiseSeed (x / scale * freq) (y / scale * freq) (z / scale * freq)
+            in go (idx + 1) (amp * settings.noiseGain) (freq * settings.noiseLacunarity) (acc + value * amp) (norm + amp)
+  in go 0 1 1 0 0
+
+valueNoise2D :: Word32 -> Float -> Float -> Float
+valueNoise2D seed x y =
+  let x0 = floor x :: Int
+      y0 = floor y :: Int
+      x1 = x0 + 1
+      y1 = y0 + 1
+      fx = smoothstep (x - fromIntegral x0)
+      fy = smoothstep (y - fromIntegral y0)
+      n00 = hash2D seed x0 y0
+      n10 = hash2D seed x1 y0
+      n01 = hash2D seed x0 y1
+      n11 = hash2D seed x1 y1
+      nx0 = lerp n00 n10 fx
+      nx1 = lerp n01 n11 fx
+  in lerp nx0 nx1 fy
+
+valueNoise3D :: Word32 -> Float -> Float -> Float -> Float
+valueNoise3D seed x y z =
+  let x0 = floor x :: Int
+      y0 = floor y :: Int
+      z0 = floor z :: Int
+      x1 = x0 + 1
+      y1 = y0 + 1
+      z1 = z0 + 1
+      fx = smoothstep (x - fromIntegral x0)
+      fy = smoothstep (y - fromIntegral y0)
+      fz = smoothstep (z - fromIntegral z0)
+      n000 = hash3D seed x0 y0 z0
+      n100 = hash3D seed x1 y0 z0
+      n010 = hash3D seed x0 y1 z0
+      n110 = hash3D seed x1 y1 z0
+      n001 = hash3D seed x0 y0 z1
+      n101 = hash3D seed x1 y0 z1
+      n011 = hash3D seed x0 y1 z1
+      n111 = hash3D seed x1 y1 z1
+      nx00 = lerp n000 n100 fx
+      nx10 = lerp n010 n110 fx
+      nx01 = lerp n001 n101 fx
+      nx11 = lerp n011 n111 fx
+      nxy0 = lerp nx00 nx10 fy
+      nxy1 = lerp nx01 nx11 fy
+  in lerp nxy0 nxy1 fz
+
+perlin2D :: Word32 -> Float -> Float -> Float
+perlin2D seed x y =
+  let x0 = floor x :: Int
+      y0 = floor y :: Int
+      x1 = x0 + 1
+      y1 = y0 + 1
+      fx = smoothstep (x - fromIntegral x0)
+      fy = smoothstep (y - fromIntegral y0)
+      g00 = grad2D seed x0 y0
+      g10 = grad2D seed x1 y0
+      g01 = grad2D seed x0 y1
+      g11 = grad2D seed x1 y1
+      p00 = dot2 g00 (x - fromIntegral x0) (y - fromIntegral y0)
+      p10 = dot2 g10 (x - fromIntegral x1) (y - fromIntegral y0)
+      p01 = dot2 g01 (x - fromIntegral x0) (y - fromIntegral y1)
+      p11 = dot2 g11 (x - fromIntegral x1) (y - fromIntegral y1)
+      nx0 = lerp p00 p10 fx
+      nx1 = lerp p01 p11 fx
+  in clamp01 (lerp nx0 nx1 fy * 0.5 + 0.5)
+
+perlin3D :: Word32 -> Float -> Float -> Float -> Float
+perlin3D seed x y z =
+  let x0 = floor x :: Int
+      y0 = floor y :: Int
+      z0 = floor z :: Int
+      x1 = x0 + 1
+      y1 = y0 + 1
+      z1 = z0 + 1
+      fx = smoothstep (x - fromIntegral x0)
+      fy = smoothstep (y - fromIntegral y0)
+      fz = smoothstep (z - fromIntegral z0)
+      g000 = grad3D seed x0 y0 z0
+      g100 = grad3D seed x1 y0 z0
+      g010 = grad3D seed x0 y1 z0
+      g110 = grad3D seed x1 y1 z0
+      g001 = grad3D seed x0 y0 z1
+      g101 = grad3D seed x1 y0 z1
+      g011 = grad3D seed x0 y1 z1
+      g111 = grad3D seed x1 y1 z1
+      p000 = dot3 g000 (x - fromIntegral x0) (y - fromIntegral y0) (z - fromIntegral z0)
+      p100 = dot3 g100 (x - fromIntegral x1) (y - fromIntegral y0) (z - fromIntegral z0)
+      p010 = dot3 g010 (x - fromIntegral x0) (y - fromIntegral y1) (z - fromIntegral z0)
+      p110 = dot3 g110 (x - fromIntegral x1) (y - fromIntegral y1) (z - fromIntegral z0)
+      p001 = dot3 g001 (x - fromIntegral x0) (y - fromIntegral y0) (z - fromIntegral z1)
+      p101 = dot3 g101 (x - fromIntegral x1) (y - fromIntegral y0) (z - fromIntegral z1)
+      p011 = dot3 g011 (x - fromIntegral x0) (y - fromIntegral y1) (z - fromIntegral z1)
+      p111 = dot3 g111 (x - fromIntegral x1) (y - fromIntegral y1) (z - fromIntegral z1)
+      nx00 = lerp p000 p100 fx
+      nx10 = lerp p010 p110 fx
+      nx01 = lerp p001 p101 fx
+      nx11 = lerp p011 p111 fx
+      nxy0 = lerp nx00 nx10 fy
+      nxy1 = lerp nx01 nx11 fy
+  in clamp01 (lerp nxy0 nxy1 fz * 0.5 + 0.5)
+
+voronoi2D :: Float -> Word32 -> Float -> Float -> Float
+voronoi2D jitter seed x y =
+  let x0 = floor x :: Int
+      y0 = floor y :: Int
+      minDist =
+        foldl'
+          (\best (cx, cy) ->
+            let (px, py) = cellPoint2D seed jitter cx cy
+                dx = (fromIntegral cx + px) - x
+                dy = (fromIntegral cy + py) - y
+                d = dx * dx + dy * dy
+            in min best d)
+          (1 / 0)
+          [ (x0 + dx, y0 + dy)
+          | dx <- [-1 .. 1]
+          , dy <- [-1 .. 1]
+          ]
+  in clamp01 (1 - sqrt minDist / sqrt 2)
+
+voronoi3D :: Float -> Word32 -> Float -> Float -> Float -> Float
+voronoi3D jitter seed x y z =
+  let x0 = floor x :: Int
+      y0 = floor y :: Int
+      z0 = floor z :: Int
+      minDist =
+        foldl'
+          (\best (cx, cy, cz) ->
+            let (px, py, pz) = cellPoint3D seed jitter cx cy cz
+                dx = (fromIntegral cx + px) - x
+                dy = (fromIntegral cy + py) - y
+                dz = (fromIntegral cz + pz) - z
+                d = dx * dx + dy * dy + dz * dz
+            in min best d)
+          (1 / 0)
+          [ (x0 + dx, y0 + dy, z0 + dz)
+          | dx <- [-1 .. 1]
+          , dy <- [-1 .. 1]
+          , dz <- [-1 .. 1]
+          ]
+  in clamp01 (1 - sqrt minDist / sqrt 3)
+
+grad2D :: Word32 -> Int -> Int -> (Float, Float)
+grad2D seed x y =
+  let h = hash2D seed x y
+      angle = h * pi * 2
+  in (cos angle, sin angle)
+
+grad3D :: Word32 -> Int -> Int -> Int -> (Float, Float, Float)
+grad3D seed x y z =
+  let h = hash3D seed x y z
+      theta = h * pi * 2
+      zc = h * 2 - 1
+      r = sqrt (max 0 (1 - zc * zc))
+  in (r * cos theta, r * sin theta, zc)
+
+dot2 :: (Float, Float) -> Float -> Float -> Float
+dot2 (ax, ay) bx by = ax * bx + ay * by
+
+dot3 :: (Float, Float, Float) -> Float -> Float -> Float -> Float
+dot3 (ax, ay, az) bx by bz = ax * bx + ay * by + az * bz
+
+cellPoint2D :: Word32 -> Float -> Int -> Int -> (Float, Float)
+cellPoint2D seed jitter x y =
+  let hx = hash2D seed x y
+      hy = hash2D seed (x + 17) (y + 31)
+  in ((hx - 0.5) * jitter + 0.5, (hy - 0.5) * jitter + 0.5)
+
+cellPoint3D :: Word32 -> Float -> Int -> Int -> Int -> (Float, Float, Float)
+cellPoint3D seed jitter x y z =
+  let hx = hash3D seed x y z
+      hy = hash3D seed (x + 17) (y + 31) (z + 57)
+      hz = hash3D seed (x + 29) (y + 71) (z + 19)
+  in ((hx - 0.5) * jitter + 0.5, (hy - 0.5) * jitter + 0.5, (hz - 0.5) * jitter + 0.5)
+
+hash2D :: Word32 -> Int -> Int -> Float
+hash2D seed x y =
+  let h1 = mix32 (fromIntegral x * 374761393 + fromIntegral y * 668265263 + seed * 1442695041)
+      h2 = mix32 h1
+  in fromIntegral (h2 .&. 0xffff) / 65535
+
+hash3D :: Word32 -> Int -> Int -> Int -> Float
+hash3D seed x y z =
+  let h1 =
+        mix32
+          ( fromIntegral x * 374761393
+              + fromIntegral y * 668265263
+              + fromIntegral z * 2246822519
+              + seed * 3266489917
+          )
+      h2 = mix32 h1
+  in fromIntegral (h2 .&. 0xffff) / 65535
+
+mix32 :: Word32 -> Word32
+mix32 v =
+  let h1 = v `xor` (v `shiftR` 16)
+      h2 = h1 * 0x7feb352d
+      h3 = h2 `xor` (h2 `shiftR` 15)
+      h4 = h3 * 0x846ca68b
+  in h4 `xor` (h4 `shiftR` 16)
+
+lerp :: Float -> Float -> Float -> Float
+lerp a b t = a + (b - a) * t
+
+smoothstep :: Float -> Float
+smoothstep t = t * t * (3 - 2 * t)
+
+clamp01 :: Float -> Float
+clamp01 v
+  | v < 0 = 0
+  | v > 1 = 1
+  | otherwise = v
+
+toByte :: Float -> Word8
+toByte v = fromIntegral (round (clamp01 v * 255) :: Int)
 
 createTexture :: GPUDevice -> SDL_GPUTextureFormat -> SDL_GPUTextureUsageFlags -> Int -> Int -> IO Texture
 createTexture device fmt usage width height = do

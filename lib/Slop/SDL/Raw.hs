@@ -130,6 +130,7 @@ module Slop.SDL.Raw
   , sdlGPUTextureFormatD24UNORMS8UINT
   , sdlGPUTextureFormatD32FloatS8UINT
   , sdlGPUTextureType2D
+  , sdlGPUTextureType3D
   , sdlGPUTextureUsageSampler
   , sdlGPUTextureUsageColorTarget
   , sdlGPUTextureUsageDepthStencilTarget
@@ -491,6 +492,9 @@ sdlGPUTextureFormatD32FloatS8UINT = 62
 
 sdlGPUTextureType2D :: SDL_GPUTextureType
 sdlGPUTextureType2D = 0
+
+sdlGPUTextureType3D :: SDL_GPUTextureType
+sdlGPUTextureType3D = 2
 
 sdlGPUTextureUsageSampler :: SDL_GPUTextureUsageFlags
 sdlGPUTextureUsageSampler = 1 `shiftL` 0

@@ -283,6 +283,44 @@ disableHotReload
 
 Use `getAsset`/`awaitAsset` to see the refreshed values if you cached a value locally.
 
+## Noise Textures
+
+Generate procedural noise on the CPU and upload it to a GPU texture:
+
+```haskell
+let noiseSettings = defaultNoiseSettings
+      { noiseType = NoisePerlin
+      , noiseScale = 96
+      , noiseOctaves = 4
+      }
+noiseTex <- createNoiseTexture2D 512 512 noiseSettings
+```
+
+Draw it like a normal sprite:
+
+```haskell
+draw basicUI (Sprite noiseTex Nothing (rect 40 80 256 256) Nothing)
+```
+
+Noise types supported: `NoiseWhite`, `NoiseValue`, `NoisePerlin`, `NoiseVoronoi`.
+
+Examples:
+
+```haskell
+white <- createNoiseTexture2D 256 256 defaultNoiseSettings { noiseType = NoiseWhite }
+cell <- createNoiseTexture2D 256 256 defaultNoiseSettings
+  { noiseType = NoiseVoronoi
+  , noiseScale = 32
+  , noiseVoronoiJitter = 0.7
+  }
+```
+
+3D noise textures are also supported:
+
+```haskell
+volume <- createNoiseTexture3D 64 64 64 defaultNoiseSettings
+```
+
 ## Audio
 
 Slop wraps SDL3_mixer and **streams audio from disk** by default:

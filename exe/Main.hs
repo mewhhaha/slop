@@ -161,6 +161,13 @@ main = do
         })
 
     shader <- load "effect shader" demoShaderAsset
+    let noiseSettings =
+          defaultNoiseSettings
+            { noiseType = NoisePerlin
+            , noiseScale = 96
+            , noiseOctaves = 4
+            }
+    noiseTex <- createNoiseTexture2D 256 256 noiseSettings
 
     blend <- createTrackPool PoolBlend 2
     sfxPool <- createTrackPool PoolRoundRobin 8
@@ -208,6 +215,7 @@ main = do
               draw basicUI (RectFill (rgba 0.25 0.25 0.8 0.9) (rect 320 150 120 120))
               draw basicUI (Sprite texture Nothing (rect 80 320 160 160) Nothing)
               draw basicUI (Sprite computeTex Nothing (rect 520 70 180 180) Nothing)
+              draw basicUI (Sprite noiseTex Nothing (rect 720 70 180 180) Nothing)
               draw basicUI (Sprite texture Nothing (rect 320 320 200 160) (Just effect))
               let titleStyle = defaultTextStyle { textColor = rgb 0.95 0.9 0.6 }
               draw basicUI (textWith titleStyle font "Slop + SDL3.4" 80 40)
