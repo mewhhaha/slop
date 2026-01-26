@@ -214,6 +214,38 @@ texture <- awaitAsset texId >>= either (error . ("texture: " <>)) pure
 
 If you're not using `loop`, call `processMainAssets` to progress main-thread loads.
 
+### Non-blocking asset reads in the loop
+
+Use `getAsset` to poll without blocking and render a fallback while it loads:
+
+```haskell
+data DemoState = DemoState
+  { texId :: Maybe (AssetId Texture)
+  , tex   :: Maybe Texture
+  }
+
+loop (DemoState Nothing Nothing) $ \frame st -> do
+  st' <- case st.texId of
+    Nothing -> do
+      tid <- loadAssetAsync (TextureAsset "assets/sprite.bmp")
+      pure st { texId = Just tid }
+    Just _ -> pure st
+
+  tex' <- case st'.tex of
+    Just t  -> pure (Just t)
+    Nothing -> case st'.texId of
+      Nothing  -> pure Nothing
+      Just tid -> getAsset tid
+
+  let st'' = st' { tex = tex' }
+
+  case st''.tex of
+    Just t  -> draw (basic2D cam) (Sprite t Nothing dst Nothing)
+    Nothing -> draw basicUI (text font "Loading..." 40 40)
+
+  pure (Continue st'')
+```
+
 ### Hot Reload
 
 Hot reload is enabled by default. It watches file-backed assets (textures, fonts, audio)
