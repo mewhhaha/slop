@@ -1,18 +1,14 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE PartialTypeSignatures #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE QuasiQuotes #-}
-{-# OPTIONS_GHC -Wno-partial-type-signatures #-}
-{-# OPTIONS_GHC -Wno-missing-signatures #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Main (main) where
 
-import Control.Monad ((>=>))
+import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Word (Word32)
 import Foreign.Ptr (nullPtr, ptrToWordPtr, wordPtrToPtr)
@@ -28,12 +24,9 @@ import Spirdo.Wesl
   )
 import Spirdo.Wesl.Inputs
   ( SamplerHandle(..)
-  , TextureHandle(..)
   , StorageTextureHandle(..)
+  , TextureHandle(..)
   , UniformSlot(..)
-  , SamplerInput(..)
-  , TextureInput(..)
-  , StorageTextureInput(..)
   , ShaderInputs(..)
   , inputsFromPrepared
   , uniformSlots
@@ -50,6 +43,7 @@ data Params = Params
 
 instance ToUniform Params
 
+demoShader :: CompiledShader
 demoShader =
   [wesl|
 struct Params {
@@ -92,6 +86,7 @@ fn main(@location(0) uv: vec2<f32>, @location(1) inColor: vec4<f32>) -> @locatio
 }
 |]
 
+computeShader :: CompiledShader
 computeShader =
   [wesl|
 struct Params {
@@ -119,14 +114,145 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 |]
 
-demoShaderAsset :: ShaderAsset
-demoShaderAsset =
-  ShaderAsset
-    (shaderSpirv demoShader)
-    2
-    0
-    0
-    1
+main :: IO ()
+main = do
+  let cfg =
+        defaultConfig
+          { windowTitle = "Slop SDL3.4 demo"
+          , windowWidth = 960
+          , windowHeight = 540
+          , windowResizable = True
+          , textAtlasSize = Just 1024
+          }
+
+  runWindow cfg $ do
+    let orCrash label = either (liftIO . ioError . userError . (label <> ": " <>)) pure
+    let load label spec = loadAssetAsync spec >>= awaitAsset >>= orCrash label
+    let prepareOrCrash label shader = orCrash label (prepareShader shader)
+    let inputsOrCrash label prepared builder = orCrash label (inputsFromPrepared prepared builder)
+
+    demoPrepared <- prepareOrCrash "demoShader" demoShader
+    computePrepared <- prepareOrCrash "computeShader" computeShader
+
+    computePipe <-
+      load "compute pipeline" (ComputePipelineAsset defaultCompute
+        { computeShaderCode = shaderSpirv computeShader
+        , computeReadwriteStorageTextures = 1
+        , computeUniformBuffers = 1
+        , computeThreads = (8, 8, 1)
+        })
+
+    let computeSize = 256
+    computeTex <-
+      load "compute texture" (TextureDescAsset (textureDesc computeSize computeSize)
+        { texUsage = [TextureSampled, TextureStorageRead, TextureStorageWrite]
+        })
+
+    texture <- load "sprite" (TextureAsset "assets/sprite.bmp")
+    font <- load "font" (FontAsset "assets/Inter/Inter-VariableFont_opsz,wght.ttf" 28)
+    ambience <- load "ambience" (MusicAsset "assets/ambience - air conditioner.wav")
+    ambienceAlt <- load "ambience alt" (MusicAsset "assets/ambience - car sedan idling.wav")
+    sfx <- load "air duster" (ChunkAsset "assets/air duster 7.wav")
+
+    sampler <-
+      load "sampler" (SamplerAsset defaultSamplerDesc
+        { samplerAddressU = SamplerRepeat
+        , samplerAddressV = SamplerRepeat
+        })
+
+    shader <- load "effect shader" demoShaderAsset
+
+    blend <- createTrackPool PoolBlend 2
+    sfxPool <- createTrackPool PoolRoundRobin 8
+    _ <- runLoop (crossfadeToLoop blend ambience 0)
+
+    let groupsX = fromIntegral ((computeSize + 7) `div` 8) :: Word32
+    let groupsY = fromIntegral ((computeSize + 7) `div` 8) :: Word32
+    let computeGroups = (groupsX, groupsY, 1)
+
+    _ <- loop (0 :: Int) $ \frame active -> do
+      let (winWInt, winHInt) = frame.size
+      let winW = fromIntegral winWInt
+      let winH = fromIntegral winHInt
+      let winRect = rect 0 0 winW winH
+      let cam2d =
+            camera2D
+              (V2 (winW / 2 + 40 * sin frame.time) (winH / 2 + 140))
+              1
+              (winW, winH)
+      let params = Params frame.time winW winH 0
+      let computeParams = Params frame.time (fromIntegral computeSize) (fromIntegral computeSize) 0
+
+      let computeInputs =
+            inputsOrCrash "compute inputs" computePrepared
+              ( Inputs.storageTexture @"out_tex" (toStorageHandle computeTex)
+                  <> Inputs.uniform @"params" computeParams
+              )
+
+      let effectInputs =
+            inputsOrCrash "effect inputs" demoPrepared
+              ( Inputs.uniform @"params" params
+                  <> Inputs.texture @"spriteTex" (toTextureHandle texture)
+                  <> Inputs.sampler @"spriteSamp" (toSamplerHandle sampler)
+                  <> Inputs.texture @"noiseTex" (toTextureHandle computeTex)
+                  <> Inputs.sampler @"noiseSamp" (toSamplerHandle sampler)
+              )
+      let effect = spriteEffectFrom shader effectInputs
+
+      let pipeline = do
+            compute computePipe (computeBindingsFrom computeInputs) computeGroups
+            scene <- pass $ do
+              clear (rgb 0.06 0.07 0.1)
+              draw basicUI (Line (rgb 0.95 0.35 0.35) (point 80 90) (point 400 130))
+              draw basicUI (RectOutline (rgb 0.2 0.8 0.9) (rect 80 150 200 120))
+              draw basicUI (RectFill (rgba 0.25 0.25 0.8 0.9) (rect 320 150 120 120))
+              draw basicUI (Sprite texture Nothing (rect 80 320 160 160) Nothing)
+              draw basicUI (Sprite computeTex Nothing (rect 520 70 180 180) Nothing)
+              draw basicUI (Sprite texture Nothing (rect 320 320 200 160) (Just effect))
+              draw basicUI (text font "Slop + SDL3.4" 80 40)
+              let sceneY = 320
+              draw (basic2D cam2d) (RectFill (rgba 0.1 0.1 0.2 0.9) (rect 60 sceneY 560 180))
+              draw (basic2D cam2d) (RectOutline (rgb 0.15 0.7 0.6) (rect 60 sceneY 560 180))
+              draw (basic2D cam2d) (Line (rgb 0.85 0.75 0.2) (point 80 (sceneY + 30)) (point 560 (sceneY + 30)))
+              draw (basic2D cam2d) (Sprite texture Nothing (rect 100 (sceneY + 60) 120 120) Nothing)
+              draw (basic2D cam2d) (Sprite computeTex Nothing (rect 260 (sceneY + 60) 120 120) Nothing)
+              draw (basic2D cam2d) (Sprite texture Nothing (rect 420 (sceneY + 40) 160 140) (Just effect))
+            output scene Nothing winRect
+
+      active' <- if keyPressed KeyB frame.input
+        then do
+          let next = if active == 0 then 1 else 0
+          _ <- if next == 0
+            then crossfadeToLoop blend ambience 2.0
+            else crossfadeToLoop blend ambienceAlt 2.0
+          pure next
+        else pure active
+
+      _ <- if keyPressed keySpace frame.input
+        then playPool sfxPool sfx
+        else pure False
+
+      render (winWInt, winHInt) pipeline
+      pure (Continue active')
+
+    removeAllAssets
+    pure ()
+
+-- Spirdo bridge helpers (local to the demo).
+
+toTextureHandle :: Texture -> TextureHandle
+toTextureHandle texture =
+  let GPUTexture ptr = texture.textureHandle
+  in TextureHandle (fromIntegral (ptrToWordPtr ptr))
+
+toStorageHandle :: Texture -> StorageTextureHandle
+toStorageHandle texture =
+  let GPUTexture ptr = texture.textureHandle
+  in StorageTextureHandle (fromIntegral (ptrToWordPtr ptr))
+
+toSamplerHandle :: Sampler -> SamplerHandle
+toSamplerHandle (Sampler (GPUSampler ptr)) =
+  SamplerHandle (fromIntegral (ptrToWordPtr ptr))
 
 textureFromHandle :: TextureHandle -> Texture
 textureFromHandle (TextureHandle value) =
@@ -150,202 +276,40 @@ samplerFromHandle :: SamplerHandle -> Sampler
 samplerFromHandle (SamplerHandle value) =
   Sampler (GPUSampler (wordPtrToPtr (fromIntegral value)))
 
-spirdoTexture :: Texture -> TextureHandle
-spirdoTexture texture =
-  let GPUTexture ptr = texture.textureHandle
-  in TextureHandle (fromIntegral (ptrToWordPtr ptr))
-
-spirdoStorageTexture :: Texture -> StorageTextureHandle
-spirdoStorageTexture texture =
-  let GPUTexture ptr = texture.textureHandle
-  in StorageTextureHandle (fromIntegral (ptrToWordPtr ptr))
-
-spirdoSampler :: Sampler -> SamplerHandle
-spirdoSampler (Sampler (GPUSampler ptr)) =
-  SamplerHandle (fromIntegral (ptrToWordPtr ptr))
-
-storageBindings :: ShaderInputs iface -> [ComputeBinding]
-storageBindings inputs =
-  [ ComputeStorageTextureRW entry.storageTextureBinding (storageTextureFromHandle entry.storageTextureHandle)
-  | entry <- inputs.siStorageTextures
-  ]
-
-pairSamplers :: [TextureHandle] -> [SamplerHandle] -> [(Texture, Sampler)]
-pairSamplers textures samplers =
-  zipWith (\t s -> (textureFromHandle t, samplerFromHandle s)) textures samplers
-
 samplerPairs :: ShaderInputs iface -> [(Texture, Sampler)]
 samplerPairs inputs =
-  pairSamplers (map (\t -> t.textureHandle) inputs.siTextures) (map (\s -> s.samplerHandle) inputs.siSamplers)
+  zipWith
+    (\tex samp -> (textureFromHandle tex.textureHandle, samplerFromHandle samp.samplerHandle))
+    inputs.siTextures
+    inputs.siSamplers
 
-uniformsFor :: Word32 -> [UniformSlot] -> [ShaderUniform]
-uniformsFor group slots =
+uniformBytesFor :: Word32 -> [UniformSlot] -> [ShaderUniform]
+uniformBytesFor group slots =
   [ ShaderUniformBytes binding bytes
   | UniformSlot g binding bytes <- slots
   , g == group
   ]
 
-computeUniformsFor :: Word32 -> [UniformSlot] -> [ComputeBinding]
-computeUniformsFor group slots =
+computeUniformBytesFor :: Word32 -> [UniformSlot] -> [ComputeBinding]
+computeUniformBytesFor group slots =
   [ computeUniformBytes binding bytes
   | UniformSlot g binding bytes <- slots
   , g == group
   ]
 
-computeBindings :: ShaderInputs iface -> [ComputeBinding]
-computeBindings inputs =
-  let uniforms = computeUniformsFor 2 (uniformSlots inputs)
+computeBindingsFrom :: ShaderInputs iface -> [ComputeBinding]
+computeBindingsFrom inputs =
+  let uniforms = computeUniformBytesFor 2 (uniformSlots inputs)
       samplers = zipWith (\slot (tex, samp) -> ComputeSampler slot tex (Just samp)) [0..] (samplerPairs inputs)
-      storage = storageBindings inputs
+      storage =
+        [ ComputeStorageTextureRW entry.storageTextureBinding (storageTextureFromHandle entry.storageTextureHandle)
+        | entry <- inputs.siStorageTextures
+        ]
   in uniforms <> samplers <> storage
 
 spriteEffectFrom :: Shader -> ShaderInputs iface -> SpriteEffect
 spriteEffectFrom shader inputs =
-  let uniforms = uniformsFor 3 (uniformSlots inputs)
+  let uniforms = uniformBytesFor 3 (uniformSlots inputs)
       extras = drop 1 (samplerPairs inputs)
       samplers = zipWith (\slot (tex, samp) -> ShaderSamplerWith slot tex samp) [0..] extras
   in SpriteEffect shader (uniforms <> samplers)
-
-data ComputeDemo = ComputeDemo
-  { computePipeline :: ComputePipeline
-  , computeTexture :: Texture
-  , computeWidth :: Int
-  , computeHeight :: Int
-  , computeGroups :: (Word32, Word32, Word32)
-  }
-
-createComputeDemo :: ComputePipeline -> Texture -> Int -> Int -> ComputeDemo
-createComputeDemo pipeline texture width height =
-  let groupsX = fromIntegral ((width + 7) `div` 8) :: Word32
-      groupsY = fromIntegral ((height + 7) `div` 8) :: Word32
-  in ComputeDemo
-      { computePipeline = pipeline
-      , computeTexture = texture
-      , computeWidth = width
-      , computeHeight = height
-      , computeGroups = (groupsX, groupsY, 1)
-      }
-
-main :: IO ()
-main = do
-  let cfg =
-        defaultConfig
-          { windowTitle = "Slop SDL3.4 demo"
-          , windowWidth = 960
-          , windowHeight = 540
-          , windowResizable = True
-          , textAtlasSize = Just 1024
-          }
-  runWindow cfg $ do
-    let unsafePrepare label shader =
-          case prepareShader shader of
-            Left err -> error (label <> ": " <> err)
-            Right value -> value
-    let unsafeInputs label prepared inputs =
-          case inputsFromPrepared prepared inputs of
-            Left err -> error (label <> ": " <> err)
-            Right value -> value
-    let demoPrepared = unsafePrepare "demoShader" demoShader
-    let computePrepared = unsafePrepare "computeShader" computeShader
-    let crash = either (liftIO . ioError . userError) pure
-        (>==) = (>=>)
-        load :: AssetLoader spec => spec -> WindowM (AssetType spec)
-        load spec = loadAssetAsync spec >>= (awaitAsset >== crash)
-    computePipelineId <- (loadAsset >== crash) (ComputePipelineAsset defaultCompute
-      { computeShaderCode = shaderSpirv computeShader
-      , computeReadwriteStorageTextures = 1
-      , computeUniformBuffers = 1
-      , computeThreads = (8, 8, 1)
-      })
-    computePipe <- (awaitAsset >== crash) computePipelineId
-    computeTexId <- loadAssetAsync (TextureDescAsset (textureDesc 256 256)
-      { texUsage = [TextureSampled, TextureStorageRead, TextureStorageWrite]
-      })
-    computeTex <- (awaitAsset >== crash) computeTexId
-    let computeDemo = createComputeDemo computePipe computeTex 256 256
-    texture <- load (TextureAsset "assets/sprite.bmp")
-    font <- load (FontAsset "assets/Inter/Inter-VariableFont_opsz,wght.ttf" 28)
-    ambience <- load (MusicAsset "assets/ambience - air conditioner.wav")
-    ambienceAlt <- load (MusicAsset "assets/ambience - car sedan idling.wav")
-    sfx <- load (ChunkAsset "assets/air duster 7.wav")
-    samplerId <- (loadAsset >== crash) (SamplerAsset defaultSamplerDesc
-      { samplerAddressU = SamplerRepeat
-      , samplerAddressV = SamplerRepeat
-      })
-    sampler <- (awaitAsset >== crash) samplerId
-
-    shaderId <- (loadAsset >== crash) demoShaderAsset
-    shader <- (awaitAsset >== crash) shaderId
-
-    blend <- createTrackPool PoolBlend 2
-    sfxPool <- createTrackPool PoolRoundRobin 8
-    _ <- runLoop (crossfadeToLoop blend ambience 0)
-
-    _ <- loop (0 :: Int) $ \frame active -> do
-      let (winWInt, winHInt) = frame.size
-      let winW = fromIntegral winWInt
-      let winH = fromIntegral winHInt
-      let winRect = rect 0 0 winW winH
-      let cam2d =
-            camera2D
-              (V2 (winW / 2 + 40 * sin frame.time) (winH / 2 + 140))
-              1
-              (winW, winH)
-      let params = Params frame.time winW winH 0
-      let computeParams = Params frame.time (fromIntegral computeDemo.computeWidth) (fromIntegral computeDemo.computeHeight) 0
-
-      let computeInputs =
-            unsafeInputs "compute inputs" computePrepared
-              ( Inputs.storageTexture @"out_tex" (spirdoStorageTexture computeDemo.computeTexture)
-                  <> Inputs.uniform @"params" computeParams
-              )
-      let computeBinds = computeBindings computeInputs
-
-      let effectInputs =
-            unsafeInputs "effect inputs" demoPrepared
-              ( Inputs.uniform @"params" params
-                  <> Inputs.texture @"spriteTex" (spirdoTexture texture)
-                  <> Inputs.sampler @"spriteSamp" (spirdoSampler sampler)
-                  <> Inputs.texture @"noiseTex" (spirdoTexture computeDemo.computeTexture)
-                  <> Inputs.sampler @"noiseSamp" (spirdoSampler sampler)
-              )
-      let effect = spriteEffectFrom shader effectInputs
-
-      let pipeline = do
-            compute computeDemo.computePipeline computeBinds computeDemo.computeGroups
-            scene <- pass $ do
-              clear (rgb 0.06 0.07 0.1)
-              draw basicUI (Line (rgb 0.95 0.35 0.35) (point 80 90) (point 400 130))
-              draw basicUI (RectOutline (rgb 0.2 0.8 0.9) (rect 80 150 200 120))
-              draw basicUI (RectFill (rgba 0.25 0.25 0.8 0.9) (rect 320 150 120 120))
-              draw basicUI (Sprite texture Nothing (rect 80 320 160 160) Nothing)
-              draw basicUI (Sprite computeDemo.computeTexture Nothing (rect 520 70 180 180) Nothing)
-              draw basicUI (Sprite texture Nothing (rect 320 320 200 160) (Just effect))
-              draw basicUI (text font "Slop + SDL3.4" 80 40)
-              let sceneY = 320
-              draw (basic2D cam2d) (RectFill (rgba 0.1 0.1 0.2 0.9) (rect 60 sceneY 560 180))
-              draw (basic2D cam2d) (RectOutline (rgb 0.15 0.7 0.6) (rect 60 sceneY 560 180))
-              draw (basic2D cam2d) (Line (rgb 0.85 0.75 0.2) (point 80 (sceneY + 30)) (point 560 (sceneY + 30)))
-              draw (basic2D cam2d) (Sprite texture Nothing (rect 100 (sceneY + 60) 120 120) Nothing)
-              draw (basic2D cam2d) (Sprite computeDemo.computeTexture Nothing (rect 260 (sceneY + 60) 120 120) Nothing)
-              draw (basic2D cam2d) (Sprite texture Nothing (rect 420 (sceneY + 40) 160 140) (Just effect))
-            output scene Nothing winRect
-
-      active' <- if keyPressed KeyB frame.input
-        then do
-          let next = if active == 0 then 1 else 0
-          _ <- if next == 0
-            then crossfadeToLoop blend ambience 2.0
-            else crossfadeToLoop blend ambienceAlt 2.0
-          pure next
-        else pure active
-
-      _ <- if keyPressed keySpace frame.input
-        then playPool sfxPool sfx
-        else pure False
-
-      render (winWInt, winHInt) pipeline
-      pure (Continue active')
-
-    removeAllAssets
-    pure ()

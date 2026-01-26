@@ -191,6 +191,7 @@ module Slop
   , destroySampler
   , Draw(..)
   , As2D(..)
+  , As3D(..)
   , basic2D
   , basicUI
   , basicUIWith
@@ -228,6 +229,10 @@ module Slop
   , resolveNamedUniforms
   , withShaderBindingsStage
   , withShaderBindingsNamed
+  , normalizeBindings
+  , normalizeUniforms
+  , normalizeBindingsIO
+  , normalizeUniformsIO
   , AssetId(..)
   , AnyAssetId(..)
   , AssetStatus(..)
@@ -364,7 +369,6 @@ import Slop.SDL.Raw
   , FColor (..)
   , Font (..)
   , Mixer (..)
-  , Audio (..)
   , Track (..)
   , Surface (..)
   , SurfaceInfo (..)
@@ -423,13 +427,12 @@ import Slop.SDL.Raw
   , mixDestroyMixer
   , mixCreateTrack
   , mixDestroyTrack
-  , mixLoadAudio
-  , mixDestroyAudio
   , mixSetTrackAudio
+  , mixSetTrackIOStream
   , mixPlayTrack
   , mixSetTrackLoops
   , mixSetTrackGain
-  , mixPlayAudio
+  , sdlIOFromFile
   , mixStopTrack
   , mixTrackPlaying
   , sdlAudioDeviceDefaultPlayback
@@ -951,6 +954,11 @@ data MusicAsset = MusicAsset FilePath
 data ChunkAsset = ChunkAsset FilePath
   deriving (Eq, Show)
 
+data Audio
+  = AudioLoaded SDL.Audio
+  | AudioStream FilePath
+  deriving (Eq, Show)
+
 data SdfFontAsset = SdfFontAsset FilePath Float
   deriving (Eq, Show)
 
@@ -1026,23 +1034,17 @@ instance AssetLoader TextAsset where
 
 instance AssetLoader MusicAsset where
   type AssetType MusicAsset = Audio
-  loadAssetIO app (MusicAsset path) = do
-    result <- mixLoadAudio app.appMixer path False
-    case result of
-      Nothing -> Left <$> sdlGetError
-      Just audio -> pure (Right audio)
-  unloadAssetIO _ _ = mixDestroyAudio
+  loadAssetIO _ (MusicAsset path) =
+    pure (Right (AudioStream path))
+  unloadAssetIO _ _ _ = pure ()
   assetLabel (MusicAsset path) = path
   assetFiles (MusicAsset path) = [path]
 
 instance AssetLoader ChunkAsset where
   type AssetType ChunkAsset = Audio
-  loadAssetIO app (ChunkAsset path) = do
-    result <- mixLoadAudio app.appMixer path True
-    case result of
-      Nothing -> Left <$> sdlGetError
-      Just audio -> pure (Right audio)
-  unloadAssetIO _ _ = mixDestroyAudio
+  loadAssetIO _ (ChunkAsset path) =
+    pure (Right (AudioStream path))
+  unloadAssetIO _ _ _ = pure ()
   assetLabel (ChunkAsset path) = path
   assetFiles (ChunkAsset path) = [path]
 
@@ -2096,6 +2098,34 @@ instance Num a => Num (M44 a) where
            0 0 a 0
            0 0 0 a
 
+instance Fractional a => Fractional (M44 a) where
+  (/) (M44 a00 a01 a02 a03
+            a10 a11 a12 a13
+            a20 a21 a22 a23
+            a30 a31 a32 a33)
+      (M44 b00 b01 b02 b03
+            b10 b11 b12 b13
+            b20 b21 b22 b23
+            b30 b31 b32 b33) =
+    M44 (a00 / b00) (a01 / b01) (a02 / b02) (a03 / b03)
+         (a10 / b10) (a11 / b11) (a12 / b12) (a13 / b13)
+         (a20 / b20) (a21 / b21) (a22 / b22) (a23 / b23)
+         (a30 / b30) (a31 / b31) (a32 / b32) (a33 / b33)
+  recip (M44 a00 a01 a02 a03
+              a10 a11 a12 a13
+              a20 a21 a22 a23
+              a30 a31 a32 a33) =
+    M44 (recip a00) (recip a01) (recip a02) (recip a03)
+         (recip a10) (recip a11) (recip a12) (recip a13)
+         (recip a20) (recip a21) (recip a22) (recip a23)
+         (recip a30) (recip a31) (recip a32) (recip a33)
+  fromRational r =
+    let a = fromRational r
+    in M44 a 0 0 0
+           0 a 0 0
+           0 0 a 0
+           0 0 0 a
+
 instance Semigroup (M44 Float) where
   (<>) = (*)
 
@@ -2341,7 +2371,8 @@ data As2D
   | AsParticleWithView Shader [ShaderUniform] (M44 Float)
   | AsParticleCamera Camera2D
   | AsParticleWithCamera Shader [ShaderUniform] Camera2D
-  | As3DCamera Camera3D
+
+newtype As3D = As3D Camera3D
 
 basic2D :: Camera2D -> As2D
 basic2D = As2DCamera
@@ -2364,8 +2395,8 @@ basicParticleWith = AsParticleWith
 basicParticleWithCamera :: Camera2D -> As2D
 basicParticleWithCamera = AsParticleCamera
 
-basic3D :: Camera3D -> As2D
-basic3D = As3DCamera
+basic3D :: Camera3D -> As3D
+basic3D = As3D
 
 class Draw ctx a where
   draw :: ctx -> a -> Loop ()
@@ -2416,11 +2447,8 @@ shaderUniformChecked slot expectedBytes value =
       then Left ("uniform size mismatch at slot " <> show slot <> ": expected " <> show expectedBytes <> ", got " <> show actual)
       else Right (ShaderUniform slot value)
 
-shaderUniformSized :: Storable a => Word32 -> Int -> a -> ShaderUniform
-shaderUniformSized slot expectedBytes value =
-  case shaderUniformChecked slot expectedBytes value of
-    Left err -> error err
-    Right uniform -> uniform
+shaderUniformSized :: Storable a => Word32 -> Int -> a -> Either String ShaderUniform
+shaderUniformSized = shaderUniformChecked
 
 shaderUniformBytesChecked :: Word32 -> Int -> ByteString -> Either String ShaderUniform
 shaderUniformBytesChecked slot expectedBytes bytes =
@@ -2429,11 +2457,8 @@ shaderUniformBytesChecked slot expectedBytes bytes =
       then Left ("uniform byte size mismatch at slot " <> show slot <> ": expected " <> show expectedBytes <> ", got " <> show actual)
       else Right (ShaderUniformBytes slot bytes)
 
-shaderUniformBytesSized :: Word32 -> Int -> ByteString -> ShaderUniform
-shaderUniformBytesSized slot expectedBytes bytes =
-  case shaderUniformBytesChecked slot expectedBytes bytes of
-    Left err -> error err
-    Right uniform -> uniform
+shaderUniformBytesSized :: Word32 -> Int -> ByteString -> Either String ShaderUniform
+shaderUniformBytesSized = shaderUniformBytesChecked
 
 data ShaderStage
   = ShaderFragment
@@ -2630,7 +2655,6 @@ withAs2D ctx action =
     AsParticleWithView shader uniforms view -> withShaderBindingsBlendTransform BlendAdditive shader uniforms (Just (TransformMatrix view)) action
     AsParticleCamera cam -> withBlendTransform BlendAdditive (Just (TransformCamera cam)) action
     AsParticleWithCamera shader uniforms cam -> withShaderBindingsBlendTransform BlendAdditive shader uniforms (Just (TransformCamera cam)) action
-    As3DCamera _ -> action
 
 withBlendTransform :: BlendMode -> Maybe Transform2D -> Loop a -> Loop a
 withBlendTransform blend transform (Loop action) =
@@ -3691,7 +3715,7 @@ destroyMesh mesh = do
 
 buildSamplerBindings :: Window -> ShaderContext -> GPUTexture -> IO [GPUTextureSamplerBinding]
 buildSamplerBindings window ctx baseTexture = do
-  extras <- normalizeBindings "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) ctx.ctxSamplers)
+  extras <- normalizeBindingsIO "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) ctx.ctxSamplers)
   let baseSampler = window.appDefaultSampler
   let baseBinding = GPUTextureSamplerBinding baseTexture (unwrapSampler baseSampler)
   let extraBindings = map (\(tex, sampler) ->
@@ -3702,7 +3726,7 @@ buildSamplerBindings window ctx baseTexture = do
 
 buildSamplerBindingsExplicit :: Window -> [SamplerBindingSpec] -> IO [GPUTextureSamplerBinding]
 buildSamplerBindingsExplicit window specs = do
-  bindings <- normalizeBindings "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) specs)
+  bindings <- normalizeBindingsIO "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) specs)
   let baseSampler = window.appDefaultSampler
   pure (map (\(tex, sampler) ->
     GPUTextureSamplerBinding tex.textureHandle (unwrapSampler (fromMaybe baseSampler sampler))) bindings)
@@ -3711,12 +3735,12 @@ buildSamplerBindingsExplicit window specs = do
 
 buildStorageBindingsExplicit :: [StorageBinding] -> IO [GPUTexture]
 buildStorageBindingsExplicit specs = do
-  storage <- normalizeBindings "storage texture" (map (\(StorageBinding slot tex) -> (slot, tex)) specs)
+  storage <- normalizeBindingsIO "storage texture" (map (\(StorageBinding slot tex) -> (slot, tex)) specs)
   pure (map (\tex -> tex.textureHandle) storage)
 
 buildStorageBindings :: ShaderContext -> IO [GPUTexture]
 buildStorageBindings ctx = do
-  storage <- normalizeBindings "storage texture" (map (\(StorageBinding slot tex) -> (slot, tex)) ctx.ctxStorage)
+  storage <- normalizeBindingsIO "storage texture" (map (\(StorageBinding slot tex) -> (slot, tex)) ctx.ctxStorage)
   pure (map (\tex -> tex.textureHandle) storage)
 
 getPipeline :: Window -> GPUShader -> GPUShader -> VertexLayout -> SDL_GPUPrimitiveType -> SDL_GPUTextureFormat -> BlendMode -> DepthMode -> SDL_GPUTextureFormat -> IO GPUGraphicsPipeline
@@ -4146,17 +4170,13 @@ drawMesh3DWith shader bindings mesh =
 instance Draw AsMesh Mesh where
   draw (AsMesh pipeline bindings) mesh = drawMesh pipeline mesh bindings
 
-instance Draw As2D Mesh3D where
-  draw ctx (Mesh3D mesh model bindings) =
-    case ctx of
-      As3DCamera cam ->
-        Loop $ do
-          window <- ask
-          let mvp = camera3DMVP cam model
-          let mergedBindings = bindMesh3DMVP mvp bindings
-          runLoop (drawMesh3DWith window.appDefaultShader mergedBindings mesh)
-      _ ->
-        Loop (liftIO (ioError (userError "Mesh3D draw requires basic3D camera context")))
+instance Draw As3D Mesh3D where
+  draw (As3D cam) (Mesh3D mesh model bindings) =
+    Loop $ do
+      window <- ask
+      let mvp = camera3DMVP cam model
+      let mergedBindings = bindMesh3DMVP mvp bindings
+      runLoop (drawMesh3DWith window.appDefaultShader mergedBindings mesh)
 
 bindMesh3DMVP :: M44 Float -> [Binding] -> [Binding]
 bindMesh3DMVP mvp bindings =
@@ -4318,6 +4338,17 @@ drawTextCached font str x y =
         pure t
     liftIO (recordDraw window (ShapeText textObj x y))
 
+setTrackAudioSource :: Window -> Track -> Audio -> IO Bool
+setTrackAudioSource _ track source =
+  case source of
+    AudioLoaded audio ->
+      mixSetTrackAudio track audio
+    AudioStream path -> do
+      stream <- sdlIOFromFile path "rb"
+      case stream of
+        Nothing -> pure False
+        Just ioStream -> mixSetTrackIOStream track ioStream True
+
 playMusic :: Audio -> Int -> WindowM Bool
 playMusic audio loops = do
   window <- ask
@@ -4335,7 +4366,7 @@ playMusic audio loops = do
   case mTrack of
     Nothing -> pure False
     Just track -> do
-      okSet <- liftIO (mixSetTrackAudio track audio)
+      okSet <- liftIO (setTrackAudioSource window track audio)
       okPlay <- liftIO (mixPlayTrack track 0)
       okLoop <- liftIO (mixSetTrackLoops track loops)
       pure (okSet && okPlay && okLoop)
@@ -4344,8 +4375,28 @@ playMusicLoop :: Audio -> WindowM Bool
 playMusicLoop audio = playMusic audio (-1)
 
 playSound :: Audio -> Loop Bool
-playSound audio =
-  withWindowLoop (\window -> mixPlayAudio window.appMixer audio)
+playSound audio = Loop $ do
+  window <- ask
+  mTrack <- liftIO (mixCreateTrack window.appMixer)
+  case mTrack of
+    Nothing -> pure False
+    Just track -> do
+      okSet <- liftIO (setTrackAudioSource window track audio)
+      okPlay <- liftIO (mixPlayTrack track 0)
+      okLoop <- liftIO (mixSetTrackLoops track 0)
+      if okSet && okPlay && okLoop
+        then do
+          _ <- liftIO $ forkIO $ do
+            let waitDone = do
+                  playing <- mixTrackPlaying track
+                  if playing
+                    then threadDelay 10000 >> waitDone
+                    else mixDestroyTrack track
+            waitDone
+          pure True
+        else do
+          liftIO (mixDestroyTrack track)
+          pure False
 
 data PoolPolicy
   = PoolRoundRobin
@@ -4412,6 +4463,7 @@ stopPool pool = Loop $ do
 
 playPoolWith :: TrackPool -> Int -> Maybe Int -> Audio -> Loop Bool
 playPoolWith pool loops mPriority audio = Loop $ do
+  window <- ask
   let tracks = pool.poolTracks
   case tracks of
     [] -> pure False
@@ -4428,7 +4480,7 @@ playPoolWith pool loops mPriority audio = Loop $ do
         Nothing -> pure False
         Just (idx, info) -> do
           when info.tiPlaying (void (liftIO (mixStopTrack info.tiTrack 0)))
-          okSet <- liftIO (mixSetTrackAudio info.tiTrack audio)
+          okSet <- liftIO (setTrackAudioSource window info.tiTrack audio)
           okPlay <- liftIO (mixPlayTrack info.tiTrack 0)
           okLoop <- liftIO (mixSetTrackLoops info.tiTrack loops)
           let priorityValue = fromMaybe (Map.findWithDefault 0 idx state.psPriorities) mPriority
@@ -4550,11 +4602,12 @@ crossfadeToWith pool audio duration loops =
   if pool.poolPolicy /= PoolBlend
     then playPoolWith pool loops Nothing audio
     else Loop $ do
+      window <- ask
       let tracks = pool.poolTracks
       case tracks of
         [] -> pure False
         [track] -> do
-          _ <- liftIO (mixSetTrackAudio track audio)
+          _ <- liftIO (setTrackAudioSource window track audio)
           _ <- liftIO (mixPlayTrack track 0)
           _ <- liftIO (mixSetTrackLoops track loops)
           _ <- liftIO (mixSetTrackGain track 1)
@@ -4572,7 +4625,7 @@ crossfadeToWith pool audio duration loops =
             Nothing -> pure ()
           if duration <= 0 || fromTrack == toTrack
             then do
-              _ <- liftIO (mixSetTrackAudio fromTrack audio)
+              _ <- liftIO (setTrackAudioSource window fromTrack audio)
               _ <- liftIO (mixPlayTrack fromTrack 0)
               _ <- liftIO (mixSetTrackLoops fromTrack loops)
               _ <- liftIO (mixSetTrackGain fromTrack 1)
@@ -4580,7 +4633,7 @@ crossfadeToWith pool audio duration loops =
               pure True
             else do
               _ <- liftIO (mixSetTrackGain toTrack 0)
-              okSet <- liftIO (mixSetTrackAudio toTrack audio)
+              okSet <- liftIO (setTrackAudioSource window toTrack audio)
               okPlay <- liftIO (mixPlayTrack toTrack 0)
               okLoop <- liftIO (mixSetTrackLoops toTrack loops)
               _ <- liftIO (mixSetTrackGain fromTrack 1)
@@ -4613,14 +4666,16 @@ destroyTrack = liftIO . mixDestroyTrack
 
 playOn :: Track -> Audio -> Loop Bool
 playOn track audio = Loop $ do
-  okSet <- liftIO (mixSetTrackAudio track audio)
+  window <- ask
+  okSet <- liftIO (setTrackAudioSource window track audio)
   okPlay <- liftIO (mixPlayTrack track 0)
   okLoop <- liftIO (mixSetTrackLoops track 0)
   pure (okSet && okPlay && okLoop)
 
 playOnLoop :: Track -> Audio -> Loop Bool
 playOnLoop track audio = Loop $ do
-  okSet <- liftIO (mixSetTrackAudio track audio)
+  window <- ask
+  okSet <- liftIO (setTrackAudioSource window track audio)
   okPlay <- liftIO (mixPlayTrack track 0)
   okLoop <- liftIO (mixSetTrackLoops track (-1))
   pure (okSet && okPlay && okLoop)
@@ -5005,10 +5060,10 @@ collectStageBindings = foldM step ([], [], [])
 collectBindings :: [Binding] -> IO DrawBindings
 collectBindings bindings = do
   (vUniforms, fUniforms, samplers, storage) <- foldM step ([], [], [], []) bindings
-  vUniforms' <- normalizeUniforms "vertex uniform" vUniforms
-  fUniforms' <- normalizeUniforms "fragment uniform" fUniforms
-  samplerValues <- normalizeBindings "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) samplers)
-  storageValues <- normalizeBindings "storage texture" (map (\(StorageBinding slot tex) -> (slot, tex)) storage)
+  vUniforms' <- normalizeUniformsIO "vertex uniform" vUniforms
+  fUniforms' <- normalizeUniformsIO "fragment uniform" fUniforms
+  samplerValues <- normalizeBindingsIO "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) samplers)
+  storageValues <- normalizeBindingsIO "storage texture" (map (\(StorageBinding slot tex) -> (slot, tex)) storage)
   pure DrawBindings
     { dbVertexUniforms = vUniforms'
     , dbFragmentUniforms = fUniforms'
@@ -5032,10 +5087,10 @@ collectBindings bindings = do
 collectComputeBindings :: [ComputeBinding] -> IO ComputeBindings
 collectComputeBindings bindings = do
   (uniforms, samplers, readOnly, readWrite) <- foldM step ([], [], [], []) bindings
-  uniforms' <- normalizeUniforms "compute uniform" uniforms
-  samplerValues <- normalizeBindings "compute sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) samplers)
-  readOnlyValues <- normalizeBindings "compute storage texture" (map (\(slot, tex) -> (slot, tex)) readOnly)
-  readWriteValues <- normalizeBindings "compute storage texture (rw)" (map (\(slot, tex) -> (slot, tex)) readWrite)
+  uniforms' <- normalizeUniformsIO "compute uniform" uniforms
+  samplerValues <- normalizeBindingsIO "compute sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) samplers)
+  readOnlyValues <- normalizeBindingsIO "compute storage texture" (map (\(slot, tex) -> (slot, tex)) readOnly)
+  readWriteValues <- normalizeBindingsIO "compute storage texture (rw)" (map (\(slot, tex) -> (slot, tex)) readWrite)
   pure ComputeBindings
     { cbUniforms = uniforms'
     , cbSamplers = zipWith (\slot (tex, sampler) -> SamplerBindingSpec slot tex sampler) [0..] samplerValues
@@ -5071,12 +5126,8 @@ ensureFragmentStage stage =
     ShaderCompute ->
       ioError (userError "compute-stage bindings are not supported by the Slop renderer")
 
-normalizeBindings :: String -> [(Word32, a)] -> IO [a]
+normalizeBindings :: String -> [(Word32, a)] -> Either String [a]
 normalizeBindings label bindings =
-  either (ioError . userError) pure (normalizeBindingsEither label bindings)
-
-normalizeBindingsEither :: String -> [(Word32, a)] -> Either String [a]
-normalizeBindingsEither label bindings =
   case bindings of
     [] -> Right []
     _ -> do
@@ -5091,12 +5142,12 @@ normalizeBindingsEither label bindings =
         Left ("non-contiguous " <> label <> " binding slots; expected 0.." <> show maxSlot)
       pure (map snd (Map.toAscList mapSlots))
 
-normalizeUniforms :: String -> [UniformBinding] -> IO [UniformBinding]
-normalizeUniforms label bindings =
-  either (ioError . userError) pure (normalizeUniformsEither label bindings)
+normalizeBindingsIO :: String -> [(Word32, a)] -> IO [a]
+normalizeBindingsIO label bindings =
+  either (ioError . userError) pure (normalizeBindings label bindings)
 
-normalizeUniformsEither :: String -> [UniformBinding] -> Either String [UniformBinding]
-normalizeUniformsEither label bindings =
+normalizeUniforms :: String -> [UniformBinding] -> Either String [UniformBinding]
+normalizeUniforms label bindings =
   case bindings of
     [] -> Right []
     _ -> do
@@ -5105,6 +5156,10 @@ normalizeUniformsEither label bindings =
       when (Map.size mapSlots /= length pairs) $
         Left ("duplicate " <> label <> " binding slot")
       pure (map (uncurry UniformBinding) (Map.toAscList mapSlots))
+
+normalizeUniformsIO :: String -> [UniformBinding] -> IO [UniformBinding]
+normalizeUniformsIO label bindings =
+  either (ioError . userError) pure (normalizeUniforms label bindings)
 
 resolveNamedUniforms :: ShaderBindings -> [NamedUniform] -> IO [ShaderUniform]
 resolveNamedUniforms bindings =

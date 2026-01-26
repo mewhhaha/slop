@@ -49,6 +49,7 @@ module Slop.SDL.Raw
   , Mixer(..)
   , Audio(..)
   , Track(..)
+  , IOStream(..)
   , GPUDevice(..)
   , GPUCommandBuffer(..)
   , GPUComputePass(..)
@@ -267,6 +268,7 @@ module Slop.SDL.Raw
   , mixLoadAudio
   , mixDestroyAudio
   , mixSetTrackAudio
+  , mixSetTrackIOStream
   , mixPlayTrack
   , mixSetTrackLoops
   , mixSetTrackGain
@@ -274,6 +276,7 @@ module Slop.SDL.Raw
   , mixStopTrack
   , mixTrackPlaying
   , mixPlayAudio
+  , sdlIOFromFile
   , sdlCreateGPUShader
   , sdlReleaseGPUShader
   , sdlCreateGPURenderState
@@ -552,6 +555,9 @@ newtype Audio = Audio (Ptr MIX_Audio) deriving (Eq, Show)
 
 data MIX_Track
 newtype Track = Track (Ptr MIX_Track) deriving (Eq, Show)
+
+data SDL_IOStream
+newtype IOStream = IOStream (Ptr SDL_IOStream) deriving (Eq, Show)
 
 data SDL_GPUDevice
 newtype GPUDevice = GPUDevice (Ptr SDL_GPUDevice) deriving (Eq, Show)
@@ -3522,6 +3528,9 @@ foreign import ccall unsafe "MIX_DestroyAudio" c_MIX_DestroyAudio
 foreign import ccall unsafe "MIX_SetTrackAudio" c_MIX_SetTrackAudio
   :: Ptr MIX_Track -> Ptr MIX_Audio -> IO CBool
 
+foreign import ccall unsafe "MIX_SetTrackIOStream" c_MIX_SetTrackIOStream
+  :: Ptr MIX_Track -> Ptr SDL_IOStream -> CBool -> IO CBool
+
 foreign import ccall unsafe "MIX_PlayTrack" c_MIX_PlayTrack
   :: Ptr MIX_Track -> SDL_PropertiesID -> IO CBool
 
@@ -3542,6 +3551,9 @@ foreign import ccall unsafe "MIX_StopTrack" c_MIX_StopTrack
 
 foreign import ccall unsafe "MIX_TrackPlaying" c_MIX_TrackPlaying
   :: Ptr MIX_Track -> IO CBool
+
+foreign import ccall unsafe "SDL_IOFromFile" c_SDL_IOFromFile
+  :: CString -> CString -> IO (Ptr SDL_IOStream)
 
 mixCreateMixerDevice :: SDL_AudioDeviceID -> IO (Maybe Mixer)
 mixCreateMixerDevice devid = do
@@ -3578,6 +3590,10 @@ mixSetTrackAudio :: Track -> Audio -> IO Bool
 mixSetTrackAudio (Track track) (Audio audio) =
   fromCBool <$> c_MIX_SetTrackAudio track audio
 
+mixSetTrackIOStream :: Track -> IOStream -> Bool -> IO Bool
+mixSetTrackIOStream (Track track) (IOStream stream) closeOnFree =
+  fromCBool <$> c_MIX_SetTrackIOStream track stream (if closeOnFree then 1 else 0)
+
 mixPlayTrack :: Track -> SDL_PropertiesID -> IO Bool
 mixPlayTrack (Track track) options =
   fromCBool <$> c_MIX_PlayTrack track options
@@ -3605,6 +3621,13 @@ mixStopTrack (Track track) fadeFrames =
 mixTrackPlaying :: Track -> IO Bool
 mixTrackPlaying (Track track) =
   fromCBool <$> c_MIX_TrackPlaying track
+
+sdlIOFromFile :: FilePath -> String -> IO (Maybe IOStream)
+sdlIOFromFile path mode =
+  withCString path $ \cPath ->
+    withCString mode $ \cMode -> do
+      ptr <- c_SDL_IOFromFile cPath cMode
+      pure $ if ptr == nullPtr then Nothing else Just (IOStream ptr)
 
 -- GPU shaders and render state
 

@@ -1,17 +1,20 @@
 # Slop
 
-Slop is a small SDL3.4-based rendering + audio toolkit for Haskell. It focuses on textures/sprites, a declarative render pipeline, async asset loading, and SDL3_mixer audio with track pools and crossfades.
+Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell.
+It focuses on textures/sprites, declarative render pipelines, async assets,
+and SDL3_mixer audio pools + crossfades.
 
 ## Features
 
-- SDL3.4 SDL_gpu backend (`SDL_CreateGPUDevice` + swapchain) with custom graphics + compute pipelines.
-- Declarative pipeline builders (`defaultGraphics`/`graphicsPipeline`, `defaultCompute`/`computePipeline`).
-- Declarative render pipelines (graph DSL or explicit targets) with implicit render targets.
-- SDL_ttf TextEngine support + optional SDF fonts.
-- Keycode-based input with just-pressed/just-released helpers.
-- Async asset manager with background loading + typed asset IDs.
-- SDL3_mixer audio pools (round-robin, oldest, priority, blend/crossfade).
-- Spirdo shader integration for the demo/tools (WESL -> SPIR-V).
+- SDL3.4 + SDL_gpu backend (`SDL_CreateGPUDevice` + swapchain).
+- Standard 2D/3D pipelines with camera helpers (`basic2D`, `basicUI`, `basic3D`).
+- Declarative render pipeline DSL (graph or explicit targets).
+- Custom graphics + compute pipelines when you need them.
+- SDL_ttf TextEngine support + caching per frame.
+- Keycode-based input with just-pressed/just-released.
+- Async asset manager with hot reload on by default.
+- SDL3_mixer pools (round-robin, oldest, priority, blend/crossfade).
+- Spirdo demo integration (WESL -> SPIR-V). The library itself does not depend on Spirdo.
 
 ## Requirements
 
@@ -20,7 +23,7 @@ Slop is a small SDL3.4-based rendering + audio toolkit for Haskell. It focuses o
 - SDL3_ttf
 - SDL3_mixer
 
-`cabal.project` pins `spirdo` for the demo/tools; the library does not require it.
+`cabal.project` pins Spirdo only for the demo/tools; the library is Spirdo-free.
 
 ## Build / Run
 
@@ -29,33 +32,14 @@ cabal build
 cabal run -f demo slop
 ```
 
-If you only need the library (e.g. as a dependency), the demo executable stays disabled by default. You can also pin it off explicitly in your `cabal.project`:
+If you only need the library, keep the demo disabled:
 
 ```
 package slop
   flags: -demo
 ```
 
-### Asset worker threads
-
-`assetWorkers` controls how many background worker threads handle `AssetAny` loads. Set it to `0` to auto-pick based on GHC capabilities.
-
-```haskell
-let cfg = defaultConfig { assetWorkers = 4 }
-runWindow cfg ...
-```
-
-## Modules
-
-- `Slop` — public API, window/loop, rendering helpers, assets, audio pools.
-- `Slop.SDL.Raw` — raw SDL3 + SDL_gpu / SDL3_image / SDL3_ttf / SDL3_mixer FFI bindings.
-- `Slop.Pipeline` — explicit render targets + pass-based pipeline helpers.
-- `Slop.Pipeline.Graph` — graph-based pipeline DSL (implicit targets, works with `draw`).
-- `Slop.Storable.Generic` — Generic-based helpers for writing `Storable` instances.
-
-## Window + Loop
-
-The main loop runs in `WindowM` and renders via the `Loop` monad.
+## Quickstart
 
 ```haskell
 import Slop
@@ -64,24 +48,30 @@ main :: IO ()
 main = runWindow defaultConfig $ do
   texId <- loadAssetAsync (TextureAsset "assets/sprite.bmp")
   texture <- awaitAsset texId >>= either (error . ("texture: " <>)) pure
+
   loop () $ \frame _ -> do
     when (frame.quitRequested || keyPressed KeyEscape frame.input) $
       pure (Quit ())
-    let (winWInt, winHInt) = frame.size
-    let cam = camera2DScreen (fromIntegral winWInt, fromIntegral winHInt)
+
+    let (w, h) = frame.size
+    let cam = camera2DScreen (fromIntegral w, fromIntegral h)
+
     clear (rgb 0.06 0.07 0.1)
-    draw (basic2D cam) (Sprite texture Nothing (rect 80 320 160 160) Nothing)
-    draw (basic2D cam) (Sprite texture Nothing (rect 280 320 160 160) (Just (spriteEffect shader uniforms)))
+    draw (basic2D cam) (Sprite texture Nothing (rect 80 120 160 160) Nothing)
+    draw basicUI (text font "Slop" 40 40)
+
     pure (Continue ())
 ```
 
-`Frame` includes time, delta, window size, quitRequested, and `InputFrame` with key/mouse state.
+## Concepts
 
-Custom pipelines are supported, but the examples below stick to the standard 2D pipeline.
+- **WindowM**: main application monad. `runWindow` initializes SDL, GPU device, swapchain, mixer, and assets.
+- **Loop**: rendering monad used inside the frame loop.
+- **Frame**: snapshot of inputs, timing, window size, and quitRequested.
 
 ### Config patches
 
-Use `ConfigPatch` to compose overrides with a `Semigroup`/`Monoid`:
+Use `ConfigPatch` to compose config overrides with `Semigroup/Monoid`:
 
 ```haskell
 let patch =
@@ -93,47 +83,44 @@ let cfg = applyConfigPatch defaultConfig patch
 runWindow cfg ...
 ```
 
-### Reducing memory
+### Asset worker threads
 
-If you want to reduce GPU memory usage from the text atlas, set a smaller atlas size:
+`assetWorkers` controls background worker count (`0` = auto by GHC capabilities).
 
 ```haskell
-let cfg = defaultConfig { textAtlasSize = Just 1024 }
-runWindow cfg ...
+runWindow defaultConfig { assetWorkers = 4 } ...
 ```
 
-## Render Pipeline (Graph DSL)
+## Render Pipelines
 
-Build a pipeline graph and render it each frame. The graph automatically manages render targets per node and resizes them when the window size changes.
+Slop gives you two pipeline styles:
+
+- **Graph DSL** (`Slop.Pipeline.Graph`): implicit targets, auto-resize, best for most apps.
+- **Explicit targets** (`Slop.Pipeline` + `createRenderTarget`): manual but precise.
+
+### Graph DSL (recommended)
 
 ```haskell
-import Slop hiding (clear, draw, output, pass, postProcess, render, withShader)
+import Slop hiding (clear, draw, output, render)
 import Slop.Pipeline.Graph
 
 _ <- loop () $ \frame _ -> do
-  let (winWInt, winHInt) = frame.size
-  let winRect = rect 0 0 (fromIntegral winWInt) (fromIntegral winHInt)
-  let cam = camera2DScreen (fromIntegral winWInt, fromIntegral winHInt)
+  let (w, h) = frame.size
+  let winRect = rect 0 0 (fromIntegral w) (fromIntegral h)
+  let cam = camera2DScreen (fromIntegral w, fromIntegral h)
+
   let pipeline = do
         scene <- pass $ do
           clear (rgb 0.06 0.07 0.1)
-          draw (basic2D cam) (Sprite texture Nothing (rect 80 320 160 160) Nothing)
-          draw basicUI (text font "Slop + SDL3.4" 80 40)
+          draw (basic2D cam) (Sprite texture Nothing (rect 80 120 160 160) Nothing)
+          draw basicUI (text font "Slop" 40 40)
         output scene Nothing winRect
-  render (winWInt, winHInt) pipeline
+
+  render (w, h) pipeline
   pure (Continue ())
 ```
 
-If you want explicit targets instead, use `Slop.Pipeline` or `createRenderTarget` + `render`.
-
-`withRenderTarget` handles cleanup for you:
-
-```haskell
-withRenderTarget 512 512 $ \target -> do
-  render target (clear (rgb 0 0 0))
-```
-
-Compute steps can live in the graph too:
+### Compute in the graph
 
 ```haskell
 let pipeline = do
@@ -148,191 +135,180 @@ let pipeline = do
       output scene Nothing winRect
 ```
 
-## Custom pipelines
-
-Slop supports custom graphics/compute pipelines with explicit bindings (`Pipeline`, `Binding`, `ComputeBinding`), but the README and demo keep to the standard 2D pipeline. If you need custom layouts or shaders, see the public API and `exe/Main.hs` for Spirdo adapter helpers.
-
-### Standard 2D pipeline
-
-For 2D draws the pipeline is fixed (sprite layout, triangles, swapchain target). Use `SpriteEffect` to apply a fragment shader override:
+### Explicit targets
 
 ```haskell
-draw (basic2D cam) (Sprite tex Nothing dst Nothing)
-draw (basic2D cam) (Sprite tex Nothing dst (Just (spriteEffect fx uniforms)))
+withRenderTarget 512 512 $ \target -> do
+  render target (clear (rgb 0 0 0))
 ```
 
-If you want a shader on a single sprite, use `SpriteEffect`:
+## Standard Pipelines
+
+Slop ships with standard pipelines; most code should use these:
+
+- `basic2D cam` — standard alpha blending, **camera required**.
+- `basicUI` — premultiplied alpha in screen space.
+- `basicParticle` — additive blending.
+- `basic3D cam` — depth test/write on, blending off, for meshes.
+
+### 2D camera helpers
+
+```haskell
+let cam = camera2D (V2 320 180) 1 (640, 360)
+draw (basic2D cam) (RectOutline (rgb 0.2 0.8 0.9) (rect 100 100 120 80))
+```
+
+### 3D camera helpers
+
+```haskell
+let cam = camera3D (V3 0 0 5) (V3 0 0 0) (V3 0 1 0) (pi/3) (16/9) 0.1 100
+mesh <- createMesh3D vertices
+draw (basic3D cam) (mesh3D mesh identity [])
+```
+
+`Vertex3D` layout: `vec4 position`, `vec2 uv`, `vec4 color`.
+
+## Shaders
+
+Slop supports custom graphics and compute pipelines (`Pipeline`, `Binding`, `ComputeBinding`).
+The demo uses Spirdo to compile WESL -> SPIR-V. Slop itself is Spirdo-free.
+
+### Sprite shader override (fragment)
 
 ```haskell
 effect <- spriteEffectNamed fx
   [ NamedUniform "params" params
-  , NamedSamplerWith "noiseTex" noiseTexture sampler
+  , NamedSamplerWith "noiseTex" noiseTex sampler
   ]
+
 draw (basic2D cam) (Sprite tex Nothing dst (Just effect))
 ```
 
-The built-in draw contexts only differ by blend mode today:
+### Uniform safety
 
-- `basic2D`: standard alpha blending (camera required).
-- `basicUI` / `basicUIWith`: premultiplied alpha (best for UI/text atlases).
-- `basicParticle` / `basicParticleWith`: additive blending.
-- `basic3D`: 3D mesh pipeline (depth test/write on; blending off).
-
-`basic2D` uses a camera transform. `basicUI` stays in raw screen space.
-
-`basic3D` is meant for meshes, not the built-in 2D shapes. It enables depth test/write, uses a 4D position attribute, and builds the model-view-projection matrix from the camera + model:
+Size-checked helpers return `Either String` instead of crashing:
 
 ```haskell
-mesh <- createMesh3D vertices
-let cam = camera3D (V3 0 0 5) (V3 0 0 0) (V3 0 1 0) (pi/3) (16/9) 0.1 100
-draw (basic3D cam) (mesh3D mesh identity [])
+let u = shaderUniformSized 0 16 params      -- Either String ShaderUniform
+let u' = shaderUniformBytesSized 0 16 bytes -- Either String ShaderUniform
 ```
 
-`Vertex3D` packs position as `vec4` (x, y, z, w), UV as `vec2`, and color as `vec4` in that order.
+## Input
 
-For 2D, you can supply a camera transform that maps world coordinates to NDC on the CPU:
-
-```haskell
-let cam2 = camera2D (V2 320 180) 1 (640, 360)
-draw (basic2D cam2) (RectOutline (rgb 0.2 0.8 0.9) (rect 100 100 120 80))
-```
-
-If you want the camera to auto‑size from the window, use `camera2DWindow`:
+Input is **keycode-based** (layout-aware), not raw scancodes.
 
 ```haskell
-let cam2 = camera2DWindow (V2 0 0) 1
-draw (basic2D cam2) (RectOutline (rgb 0.2 0.8 0.9) (rect 0 0 120 80))
-```
-
-### Spirdo inputs builder
-
-If you use Spirdo for WESL shaders, the demo shows how to build inputs with
-the new semigroup-based builder and feed them into Slop in `exe/Main.hs`.
-It uses `prepareShader` + `inputsFromPrepared` + `uniformSlots` for fewer moving parts.
-
-### Legacy shader helpers
-
-`withShader`/`postProcess` accept `ShaderUniform` and are fragment-only. The draw texture is always bound at sampler slot 0; extra sampler slots start at 0 and map to GPU binding slot 1+.
-
-For safer uniforms, prefer the size-checked helpers:
-
-```haskell
-let u = shaderUniformChecked 0 16 params -- Either String ShaderUniform
-let u' = shaderUniformBytesChecked 0 16 paramsBytes
-```
-
-For WESL/SPIR-V with SDL_gpu, fragment resources are in set 2:
-
-- Draw texture: `@group(2) @binding(0)` (texture) and `@binding(1)` (sampler).
-- Extra sampler slot 0: `@group(2) @binding(2)` and `@binding(3)`.
-
-Uniform data is pushed via `ShaderUniform` and maps to fragment uniform buffers in set 3:
-
-- Uniform slot 0: `@group(3) @binding(0) var<uniform> ...`
-
-### Named bindings
-
-Named bindings still work with the legacy fragment helper:
-
-```haskell
-let bindings =
-      ShaderBindings
-        { shaderUniformSlots = Map.fromList [("params", 0)]
-        , shaderSamplerSlots = Map.fromList [("noiseTex", 0)]
-        , shaderStorageTextureSlots = Map.empty
-        }
-setShaderBindings shader bindings
-
-uniforms <- resolveNamedUniforms bindings
-  [ NamedUniform "params" params
-  , NamedSamplerWith "noiseTex" noiseTexture sampler
-  ]
-```
-
-### Storage textures
-
-Use `fStorageTexture` for pipeline draws, or `ShaderStorageTexture` for the legacy helper.
-
-```haskell
-let bindings =
-      [ fStorageTexture 0 storageTex
-      ]
-```
-
-### Vertex/compute stages
-
-Custom pipelines support vertex, fragment, and compute bindings via `Binding`/`ComputeBinding`. The legacy shader helpers remain fragment-only.
-
-## Input (Keycodes)
-
-Input is **keycode-based** (layout-aware), not raw scancodes. Use `KeyA`, `KeyB`, `KeySpace`, etc.
-
-```haskell
-when (keyPressed KeyB frame.input) ...
-when (keyReleased KeySpace frame.input) ...
+when (keyPressed KeySpace frame.input) ...
+when (keyReleased KeyB frame.input) ...
 ```
 
 ## Assets
 
-Assets are typed and managed in `WindowM`. Async loads run on a background thread.
-GPU-backed assets (textures, GPU text, shaders, pipelines, samplers) are loaded on the main thread even when you call `loadAssetAsync`, since SDL_gpu resource creation is not guaranteed to be thread-safe.
-
-`loadAssetAsync` for `AssetMain` specs enqueues work on the main thread. The built-in `loop` calls `processMainAssets` each frame to service this queue; if you are not using `loop`, call `processMainAssets` manually to progress main-thread loads.
+Assets are typed and managed in `WindowM`. Async loads run on background threads,
+but GPU-backed assets load on the **main thread** even when requested via `loadAssetAsync`.
 
 ```haskell
 texId <- loadAssetAsync (TextureAsset "assets/sprite.bmp")
 texture <- awaitAsset texId >>= either (error . ("texture: " <>)) pure
-
-fontId <- loadAssetAsync (FontAsset "assets/Inter/Inter-VariableFont_opsz,wght.ttf" 28)
-font <- awaitAsset fontId >>= either (error . ("font: " <>)) pure
-
-shaderId <- loadAsset (ShaderAsset (shaderSpirv frag) 1 0 0 1) >>= either (error . ("shader: " <>)) pure
-shader <- awaitAsset shaderId >>= either (error . ("shader: " <>)) pure
 ```
 
-Remove assets manually or let the window clean them up:
-
-```haskell
-removeAsset texId
-removeAllAssets
-```
-
-Custom loaders implement `AssetLoader`.
+If you're not using `loop`, call `processMainAssets` to progress main-thread loads.
 
 ### Hot Reload
 
-Hot reload is enabled by default and automatically reloads file-backed assets (textures, fonts, music, sfx) when the file timestamp changes. You can override the default interval or disable it:
+Hot reload is enabled by default. It watches file-backed assets (textures, fonts, audio)
+and updates them when timestamps change.
 
 ```haskell
-enableHotReload 0.5 -- check every 0.5s
+enableHotReload 0.5
+-- or
 disableHotReload
 ```
 
-Hot reload updates the asset manager entry. If you cache the asset value in a local variable, you should re-fetch it via `getAsset` or `awaitAsset` to pick up changes.
+Use `getAsset`/`awaitAsset` to see the refreshed values if you cached a value locally.
 
 ## Audio
 
-Slop wraps SDL3_mixer 3.x. Audio assets load as `Audio` via `MusicAsset` or `ChunkAsset` (both use `MIX_LoadAudio`).
+Slop wraps SDL3_mixer and **streams audio from disk** by default:
+
+- `MusicAsset` / `ChunkAsset` resolve to `AudioStream FilePath`.
+- Playback uses `SDL_IOFromFile` + `MIX_SetTrackIOStream`.
+- No upfront decode / RAM load.
+
+If you want fully loaded audio, create it yourself and use `AudioLoaded` (advanced).
 
 ### Pools
-
-- `createTrackPool PoolRoundRobin n` — round-robin pool for SFX.
-- `createTrackPool PoolOldest n` — reuse the oldest track.
-- `createTrackPool PoolPriority n` — priority-based stealing.
-- `createTrackPool PoolBlend 2` — crossfade pool (auto-updated each frame).
-
-Example crossfade:
 
 ```haskell
 blend <- createTrackPool PoolBlend 2
 _ <- runLoop (crossfadeToLoop blend ambience 0)
 
--- inside loop, no manual update needed (auto-updated)
 when (keyPressed KeyB frame.input) $ do
   _ <- crossfadeToLoop blend ambienceAlt 2.0
   pure ()
 ```
 
-## Example
+Pool strategies:
 
-See `exe/Main.hs` for a full demo: window, pipeline, shaders, text, audio pools, and blend crossfades.
+- `PoolRoundRobin`
+- `PoolOldest`
+- `PoolPriority`
+- `PoolBlend` (crossfade)
+
+Blend pools auto-update each frame; no manual ticking required.
+
+## Do / Don't
+
+### Rendering
+
+Do:
+- Use `basic2D` + a camera for most 2D work.
+- Keep UI/text in `basicUI` (screen-space, premultiplied alpha).
+- Use the Graph DSL for post-process chains and multi-pass effects.
+
+Don't:
+- Mix UI and world-space sprites in the same camera unless that's deliberate.
+- Create/destroy GPU textures every frame (use assets or cached render targets).
+- Assume fragment-only helpers apply to vertex/compute stages.
+
+### Assets
+
+Do:
+- Use `loadAssetAsync` and `awaitAsset` for file-backed assets.
+- Call `processMainAssets` if you bypass the built-in `loop`.
+- Let the asset manager own textures/shaders/pipelines so cleanup is automatic.
+
+Don't:
+- Create GPU resources on worker threads.
+- Cache a reloaded asset forever without re-fetching it.
+
+### Audio
+
+Do:
+- Use pools for overlapping SFX or crossfades.
+- Stream music from disk (default behavior).
+
+Don't:
+- Decode large audio blobs into RAM unless you really need it.
+
+### Input
+
+Do:
+- Use keycodes (`KeyA`, `KeySpace`) to respect keyboard layout.
+
+Don't:
+- Depend on scancode positions unless you're building a keybinding editor.
+
+### Shaders
+
+Do:
+- Keep sprite overrides fragment-only unless you define a custom pipeline.
+- Prefer `shaderUniformSized` to avoid mismatch crashes.
+
+Don't:
+- Assume the swapchain/backbuffer can be sampled directly (it can't).
+
+## Demo
+
+See `exe/Main.hs` for a single demo that combines: pipeline graph, sprites, text,
+custom shaders, compute, and audio pools.
