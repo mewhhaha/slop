@@ -4,13 +4,14 @@ Slop is a small SDL3.4-based rendering + audio toolkit for Haskell. It focuses o
 
 ## Features
 
-- SDL3.4 GPU renderer backend (`SDL_CreateGPURenderer`) with texture-first rendering.
-- Declarative render pipelines (graph DSL or explicit targets).
+- SDL3.4 SDL_gpu backend (`SDL_CreateGPUDevice` + swapchain) with custom graphics + compute pipelines.
+- Declarative pipeline builders (`defaultGraphics`/`graphicsPipeline`, `defaultCompute`/`computePipeline`).
+- Declarative render pipelines (graph DSL or explicit targets) with implicit render targets.
 - SDL_ttf TextEngine support + optional SDF fonts.
 - Keycode-based input with just-pressed/just-released helpers.
 - Async asset manager with background loading + typed asset IDs.
 - SDL3_mixer audio pools (round-robin, oldest, priority, blend/crossfade).
-- Spirdo shader integration (WESL -> SPIR-V).
+- Spirdo shader integration for the demo/tools (WESL -> SPIR-V).
 
 ## Requirements
 
@@ -19,7 +20,7 @@ Slop is a small SDL3.4-based rendering + audio toolkit for Haskell. It focuses o
 - SDL3_ttf
 - SDL3_mixer
 
-`cabal.project` pins `spirdo` as a git dependency for shader compilation.
+`cabal.project` pins `spirdo` for the demo/tools; the library does not require it.
 
 ## Build / Run
 
@@ -28,14 +29,29 @@ cabal build
 cabal run -f demo slop
 ```
 
-If you only need the library (e.g. as a dependency), the demo executable stays disabled by default.
+If you only need the library (e.g. as a dependency), the demo executable stays disabled by default. You can also pin it off explicitly in your `cabal.project`:
+
+```
+package slop
+  flags: -demo
+```
+
+### Asset worker threads
+
+`assetWorkers` controls how many background worker threads handle `AssetAny` loads. Set it to `0` to auto-pick based on GHC capabilities.
+
+```haskell
+let cfg = defaultConfig { assetWorkers = 4 }
+runWindow cfg ...
+```
 
 ## Modules
 
 - `Slop` — public API, window/loop, rendering helpers, assets, audio pools.
-- `Slop.SDL.Raw` — raw SDL3 / SDL3_image / SDL3_ttf / SDL3_mixer FFI bindings.
+- `Slop.SDL.Raw` — raw SDL3 + SDL_gpu / SDL3_image / SDL3_ttf / SDL3_mixer FFI bindings.
 - `Slop.Pipeline` — explicit render targets + pass-based pipeline helpers.
-- `Slop.Pipeline.Graph` — graph-based pipeline DSL (implicit targets).
+- `Slop.Pipeline.Graph` — graph-based pipeline DSL (implicit targets, works with `draw`).
+- `Slop.Storable.Generic` — Generic-based helpers for writing `Storable` instances.
 
 ## Window + Loop
 
@@ -52,11 +68,37 @@ main = runWindow defaultConfig $ do
     when (frame.quitRequested || keyPressed KeyEscape frame.input) $
       pure (Quit ())
     clear (rgb 0.06 0.07 0.1)
-    draw (Sprite texture Nothing (rect 80 320 160 160) Nothing)
+    draw as2D (Sprite texture Nothing (rect 80 320 160 160) Nothing)
+    draw (as2DWith shader uniforms) (Sprite texture Nothing (rect 280 320 160 160) Nothing)
     pure (Continue ())
 ```
 
 `Frame` includes time, delta, window size, quitRequested, and `InputFrame` with key/mouse state.
+
+Custom pipelines are supported, but the examples below stick to the standard 2D pipeline.
+
+### Config patches
+
+Use `ConfigPatch` to compose overrides with a `Semigroup`/`Monoid`:
+
+```haskell
+let patch =
+      mconcat
+        [ mempty { patchWindowTitle = Last (Just "Slop demo") }
+        , mempty { patchAssetWorkers = Last (Just 4) }
+        ]
+let cfg = applyConfigPatch defaultConfig patch
+runWindow cfg ...
+```
+
+### Reducing memory
+
+If you want to reduce GPU memory usage from the text atlas, set a smaller atlas size:
+
+```haskell
+let cfg = defaultConfig { textAtlasSize = Just 1024 }
+runWindow cfg ...
+```
 
 ## Render Pipeline (Graph DSL)
 
@@ -66,41 +108,95 @@ Build a pipeline graph and render it each frame. The graph automatically manages
 import Slop hiding (clear, draw, output, pass, postProcess, render, withShader)
 import Slop.Pipeline.Graph
 
-let (winWInt, winHInt) = frame.size
-let winRect = rect 0 0 (fromIntegral winWInt) (fromIntegral winHInt)
-let pipeline = do
-      scene <- pass $ do
-        clear (rgb 0.06 0.07 0.1)
-        draw (Sprite texture Nothing (rect 80 320 160 160) Nothing)
-        draw (text font "Slop + SDL3.4" 80 40)
-      post <- postProcess scene shader uniforms Nothing winRect
-      output post Nothing winRect
-render (winWInt, winHInt) pipeline
+_ <- loop () $ \frame _ -> do
+  let (winWInt, winHInt) = frame.size
+  let winRect = rect 0 0 (fromIntegral winWInt) (fromIntegral winHInt)
+  let pipeline = do
+        scene <- pass $ do
+          clear (rgb 0.06 0.07 0.1)
+          draw as2D (Sprite texture Nothing (rect 80 320 160 160) Nothing)
+          draw as2D (text font "Slop + SDL3.4" 80 40)
+        output scene Nothing winRect
+  render (winWInt, winHInt) pipeline
+  pure (Continue ())
 ```
 
 If you want explicit targets instead, use `Slop.Pipeline` or `createRenderTarget` + `render`.
 
-## Shaders + Extra Samplers
-
-`ShaderUniform` now also supports extra sampler bindings. You can use the default sampler or create a custom one:
+`withRenderTarget` handles cleanup for you:
 
 ```haskell
-sampler <- createSampler defaultSamplerDesc
-  { samplerAddressU = SamplerRepeat
-  , samplerAddressV = SamplerRepeat
-  }
-
-let bindings =
-      [ ShaderUniform 0 params
-      , ShaderSamplerWith 0 noiseTexture sampler
-      ]
+withRenderTarget 512 512 $ \target -> do
+  render target (clear (rgb 0 0 0))
 ```
 
-Additional samplers are bound in order. For WESL/SPIR-V, the first extra sampler uses `@group(2) @binding(2)` for the texture and `@binding(3)` for the sampler (the main render texture is at bindings 0/1).
+Compute steps can live in the graph too:
+
+```haskell
+let pipeline = do
+      compute computePipe
+        [ computeStorageTextureRW 0 outTex
+        , computeUniformBytes 0 paramsBytes
+        ]
+        (groupsX, groupsY, 1)
+      scene <- pass $ do
+        clear (rgb 0 0 0)
+        draw as2D (Sprite outTex Nothing (rect 0 0 256 256) Nothing)
+      output scene Nothing winRect
+```
+
+## Custom pipelines
+
+Slop supports custom graphics/compute pipelines with explicit bindings (`Pipeline`, `Binding`, `ComputeBinding`), but the README and demo keep to the standard 2D pipeline. If you need custom layouts or shaders, see the public API and `exe/Main.hs` for Spirdo adapter helpers.
+
+### Standard 2D pipeline
+
+For 2D draws the pipeline is fixed (sprite layout, triangles, alpha blend, swapchain target). You can swap the fragment shader while keeping the rest the same via `as2DWith`:
+
+```haskell
+draw as2D (Sprite tex Nothing dst Nothing)
+draw (as2DWith fx uniforms) (Sprite tex Nothing dst Nothing)
+```
+
+If you want a shader on a single sprite (instead of the whole `as2DWith` context), use `SpriteEffect`:
+
+```haskell
+effect <- spriteEffectNamed fx
+  [ NamedUniform "params" params
+  , NamedSamplerWith "noiseTex" noiseTexture sampler
+  ]
+draw as2D (Sprite tex Nothing dst (Just effect))
+```
+
+### Spirdo HList inputs
+
+If you use Spirdo for WESL shaders, the demo shows how to turn Spirdo's typed `HList`
+inputs into Slop bindings directly in `exe/Main.hs`. The demo now uses
+`prepareShader` + `inputsForPrepared` + `orderedUniforms` for fewer moving parts.
+
+### Legacy shader helpers
+
+`withShader`/`postProcess` accept `ShaderUniform` and are fragment-only. The draw texture is always bound at sampler slot 0; extra sampler slots start at 0 and map to GPU binding slot 1+.
+
+For safer uniforms, prefer the size-checked helpers:
+
+```haskell
+let u = shaderUniformChecked 0 16 params -- Either String ShaderUniform
+let u' = shaderUniformBytesChecked 0 16 paramsBytes
+```
+
+For WESL/SPIR-V with SDL_gpu, fragment resources are in set 2:
+
+- Draw texture: `@group(2) @binding(0)` (texture) and `@binding(1)` (sampler).
+- Extra sampler slot 0: `@group(2) @binding(2)` and `@binding(3)`.
+
+Uniform data is pushed via `ShaderUniform` and maps to fragment uniform buffers in set 3:
+
+- Uniform slot 0: `@group(3) @binding(0) var<uniform> ...`
 
 ### Named bindings
 
-If you prefer names over slots, register a binding table and resolve per-frame:
+Named bindings still work with the legacy fragment helper:
 
 ```haskell
 let bindings =
@@ -117,9 +213,19 @@ uniforms <- resolveNamedUniforms bindings
   ]
 ```
 
+### Storage textures
+
+Use `fStorageTexture` for pipeline draws, or `ShaderStorageTexture` for the legacy helper.
+
+```haskell
+let bindings =
+      [ fStorageTexture 0 storageTex
+      ]
+```
+
 ### Vertex/compute stages
 
-The renderer backend only supports fragment bindings today. The stage-aware API (`withShaderBindingsStage` / `ShaderBinding`) will throw if you try to bind vertex or compute stages.
+Custom pipelines support vertex, fragment, and compute bindings via `Binding`/`ComputeBinding`. The legacy shader helpers remain fragment-only.
 
 ## Input (Keycodes)
 
@@ -133,6 +239,9 @@ when (keyReleased KeySpace frame.input) ...
 ## Assets
 
 Assets are typed and managed in `WindowM`. Async loads run on a background thread.
+GPU-backed assets (textures, GPU text, shaders, pipelines, samplers) are loaded on the main thread even when you call `loadAssetAsync`, since SDL_gpu resource creation is not guaranteed to be thread-safe.
+
+`loadAssetAsync` for `AssetMain` specs enqueues work on the main thread. The built-in `loop` calls `processMainAssets` each frame to service this queue; if you are not using `loop`, call `processMainAssets` manually to progress main-thread loads.
 
 ```haskell
 texId <- loadAssetAsync (TextureAsset "assets/sprite.bmp")
@@ -140,6 +249,9 @@ texture <- awaitAsset texId >>= either (error . ("texture: " <>)) pure
 
 fontId <- loadAssetAsync (FontAsset "assets/Inter/Inter-VariableFont_opsz,wght.ttf" 28)
 font <- awaitAsset fontId >>= either (error . ("font: " <>)) pure
+
+shaderId <- loadAsset (ShaderAsset (shaderSpirv frag) 1 0 0 1) >>= either (error . ("shader: " <>)) pure
+shader <- awaitAsset shaderId >>= either (error . ("shader: " <>)) pure
 ```
 
 Remove assets manually or let the window clean them up:

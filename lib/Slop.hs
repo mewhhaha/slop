@@ -10,6 +10,8 @@
 module Slop
   ( Config(..)
   , defaultConfig
+  , ConfigPatch(..)
+  , applyConfigPatch
   , WindowM
   , Window(..)
   , Loop
@@ -27,8 +29,65 @@ module Slop
   , drawRect
   , fillRect
   , drawTexture
+  , drawMesh
+  , TextureUsage(..)
+  , TextureDesc(..)
+  , textureDesc
+  , createTexture2D
+  , VertexAttrFormat(..)
+  , VertexAttr(..)
+  , VertexLayout(..)
+  , Primitive(..)
+  , Mesh(..)
+  , Pipeline(..)
+  , VertexShader(..)
+  , FragmentShader
+  , ShaderCounts(..)
+  , TargetFormat(..)
+  , BlendMode(..)
+  , GraphicsDesc(..)
+  , defaultGraphics
+  , graphicsPipeline
+  , defaultCompute
+  , computePipeline
+  , Binding(..)
+  , ComputePipeline(..)
+  , ComputeDesc(..)
+  , ComputeBinding(..)
+  , createMesh
+  , createTransientMesh
+  , destroyMesh
+  , createPipeline
+  , destroyPipeline
+  , swapchainFormat
+  , createVertexShader
+  , destroyVertexShader
+  , createFragmentShader
+  , destroyFragmentShader
+  , createComputePipeline
+  , destroyComputePipeline
+  , dispatchCompute
+  , spriteLayout
+  , spritePipeline
+  , spriteBindings
+  , spriteMesh
+  , spriteMeshTransient
+  , vUniform
+  , vUniformBytes
+  , fUniform
+  , fUniformBytes
+  , fSampler
+  , fSamplerWith
+  , fStorageTexture
+  , computeUniform
+  , computeUniformBytes
+  , computeSampler
+  , computeSamplerWith
+  , computeStorageTexture
+  , computeStorageTextureRW
   , RenderTarget
   , createRenderTarget
+  , withRenderTarget
   , destroyTarget
   , render
   , drawRender
@@ -85,6 +144,10 @@ module Slop
   , Font (..)
   , Track(..)
   , ShaderAsset(..)
+  , VertexShaderAsset(..)
+  , ComputePipelineAsset(..)
+  , PipelineAsset(..)
+  , SamplerAsset(..)
   , SdfFontAsset(..)
   , setFontSDF
   , getFontSDF
@@ -100,16 +163,28 @@ module Slop
   , defaultSamplerDesc
   , createSampler
   , destroySampler
-  , Drawable(..)
+  , Draw(..)
+  , As2D(..)
+  , as2D
+  , as2DWith
+  , AsMesh(..)
+  , asMesh
   , DrawItem(..)
   , Line(..)
   , RectOutline(..)
   , RectFill(..)
   , Sprite(..)
+  , SpriteEffect(..)
+  , spriteEffect
+  , spriteEffectNamed
   , Label(..)
   , TextDraw(..)
   , text
   , ShaderUniform(..)
+  , shaderUniformChecked
+  , shaderUniformSized
+  , shaderUniformBytesChecked
+  , shaderUniformBytesSized
   , ShaderStage(..)
   , ShaderBinding(..)
   , NamedShaderBinding(..)
@@ -126,6 +201,7 @@ module Slop
   , AssetStatus(..)
   , AssetUpdate
   , AssetLoader(..)
+  , AssetThread(..)
   , TextureAsset(..)
   , FontAsset(..)
   , TextAsset(..)
@@ -133,6 +209,7 @@ module Slop
   , ChunkAsset(..)
   , loadAsset
   , loadAssetAsync
+  , processMainAssets
   , awaitAsset
   , getAsset
   , getAssetStatus
@@ -199,8 +276,8 @@ module Slop
   ) where
 
 import Control.Exception (SomeException, bracket, bracket_, finally, try)
-import Control.Monad (foldM, forM, replicateM, unless, void, when)
-import Control.Concurrent (ThreadId, forkIO)
+import Control.Monad (foldM, forM, forM_, replicateM, unless, void, when)
+import Control.Concurrent (ThreadId, forkIO, threadDelay)
 import Control.Concurrent.STM
   ( TMVar
   , TQueue
@@ -212,8 +289,10 @@ import Control.Concurrent.STM
   , modifyTVar'
   , putTMVar
   , readTMVar
+  , tryReadTMVar
   , readTQueue
   , readTVar
+  , tryReadTQueue
   , tryPutTMVar
   , writeTQueue
   , writeTVar
@@ -230,42 +309,80 @@ import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (catMaybes, fromMaybe)
+import Data.Monoid (Last (..))
 import qualified Data.Map.Strict as Map
 import Data.Proxy (Proxy (..))
 import Data.Time.Clock (UTCTime)
 import Data.Typeable (TypeRep, Typeable, typeOf, typeRep)
 import Data.Word (Word8, Word32, Word64)
-import Foreign (Ptr, Storable (..), alloca, castPtr, nullPtr, peek, poke, pokeByteOff, with, withArrayLen)
+import GHC.Conc (getNumCapabilities)
+import Foreign (Ptr, Storable (..), alloca, castPtr, nullPtr, peek, poke, pokeByteOff)
 import Foreign.C.String (withCString)
 import Foreign.C.Types (CFloat (..))
+import Foreign.Marshal.Array (peekArray, withArray, withArrayLen)
+import Foreign.Marshal.Utils (copyBytes)
 import System.Directory (getModificationTime)
 
+import Slop.Internal.DList (DList, singleton, toList)
 import qualified Slop.SDL.Raw as SDL
 import Slop.SDL.Raw
   ( FPoint (..)
   , FRect (..)
+  , FColor (..)
   , Font (..)
-  , Mixer(..)
-  , Audio(..)
-  , Track(..)
+  , Mixer (..)
+  , Audio (..)
+  , Track (..)
+  , Surface (..)
+  , SurfaceInfo (..)
+  , TTF_GPUAtlasDrawSequence (..)
   , SDL_GPUFilter
   , SDL_GPUSamplerMipmapMode
   , SDL_GPUSamplerAddressMode
   , SDL_GPUCompareOp
+  , SDL_GPUShaderStage
+  , SDL_GPUTextureFormat
+  , SDL_GPUTextureUsageFlags
+  , SDL_GPUPrimitiveType
   , GPUDevice (..)
+  , GPUCommandBuffer (..)
+  , GPUComputePipeline (..)
+  , GPURenderPass (..)
+  , GPUGraphicsPipeline (..)
   , GPUTexture (..)
   , GPUShader (..)
-  , GPURenderState (..)
+  , GPUBuffer (..)
+  , GPUTransferBuffer (..)
+  , GPUCopyPass (..)
   , GPUSampler (..)
   , GPUTextureSamplerBinding (..)
+  , GPUStorageTextureReadWriteBinding (..)
+  , GPUBufferBinding (..)
+  , GPUViewport (..)
+  , GPUVertexBufferDescription (..)
+  , GPUVertexAttribute (..)
+  , GPUVertexInputState (..)
+  , GPUColorTargetBlendState (..)
+  , GPUColorTargetDescription (..)
+  , GPUGraphicsPipelineTargetInfo (..)
+  , GPURasterizerState (..)
+  , GPUMultisampleState (..)
+  , GPUStencilOpState (..)
+  , GPUDepthStencilState (..)
+  , GPUGraphicsPipelineCreateInfo (..)
+  , GPUComputePipelineCreateInfo (..)
+  , GPUTextureCreateInfo (..)
+  , GPUBufferCreateInfo (..)
+  , GPUTransferBufferCreateInfo (..)
+  , GPUTextureTransferInfo (..)
+  , GPUTransferBufferLocation (..)
+  , GPUTextureRegion (..)
+  , GPUBufferRegion (..)
+  , GPUColorTargetInfo (..)
   , GPUSamplerCreateInfo (..)
-  , GPURenderStateCreateInfo (..)
   , GPUShaderCreateInfo (..)
-  , Renderer (..)
-  , Text
+  , Text (..)
   , TextEngine (..)
-  , Texture(..)
-  , imgLoadTexture
   , mixCreateMixerDevice
   , mixInit
   , mixQuit
@@ -282,25 +399,67 @@ import Slop.SDL.Raw
   , mixStopTrack
   , mixTrackPlaying
   , sdlAudioDeviceDefaultPlayback
-  , sdlCreateTexture
-  , sdlCreateGPURenderer
-  , sdlCreateGPUSampler
+  , sdlCreateGPUDevice
+  , sdlDestroyGPUDevice
+  , sdlClaimWindowForGPUDevice
+  , sdlReleaseWindowFromGPUDevice
+  , sdlGetGPUSwapchainTextureFormat
+  , sdlWaitAndAcquireGPUSwapchainTexture
+  , sdlAcquireGPUCommandBuffer
+  , sdlSubmitGPUCommandBuffer
+  , sdlBeginGPURenderPass
+  , sdlEndGPURenderPass
+  , sdlBindGPUGraphicsPipeline
+  , sdlSetGPUViewport
+  , sdlBindGPUVertexBuffers
+  , sdlBindGPUFragmentSamplers
+  , sdlBindGPUFragmentStorageTextures
+  , sdlDrawGPUPrimitives
+  , sdlPushGPUVertexUniformData
+  , sdlPushGPUFragmentUniformData
+  , sdlBeginGPUComputePass
+  , sdlEndGPUComputePass
+  , sdlBindGPUComputePipeline
+  , sdlBindGPUComputeSamplers
+  , sdlBindGPUComputeStorageTextures
+  , sdlPushGPUComputeUniformData
+  , sdlDispatchGPUCompute
+  , sdlCreateGPUGraphicsPipeline
+  , sdlReleaseGPUGraphicsPipeline
+  , sdlCreateGPUComputePipeline
+  , sdlReleaseGPUComputePipeline
+  , sdlCreateGPUTexture
+  , sdlReleaseGPUTexture
+  , sdlCreateGPUBuffer
+  , sdlReleaseGPUBuffer
+  , sdlCreateGPUTransferBuffer
+  , sdlReleaseGPUTransferBuffer
+  , sdlMapGPUTransferBuffer
+  , sdlUnmapGPUTransferBuffer
+  , sdlBeginGPUCopyPass
+  , sdlEndGPUCopyPass
+  , sdlUploadToGPUTexture
+  , sdlUploadToGPUBuffer
+  , sdlGetGPUTextureFormatFromPixelFormat
   , sdlCreateGPUShader
-  , sdlCreateGPURenderState
+  , sdlCreateGPUSampler
+  , sdlCreateProperties
   , sdlCreateWindow
-  , sdlDestroyGPURenderState
+  , sdlDestroyProperties
   , sdlReleaseGPUSampler
-  , sdlDestroyRenderer
-  , sdlDestroyTexture
   , sdlDestroyWindow
+  , sdlSetPointerProperty
+  , sdlSetNumberProperty
+  , sdlShowWindow
   , sdlEventQuit
   , sdlGetError
-  , sdlGetGPURendererDevice
   , sdlGetKeyboardState
   , sdlGetKeyFromScancode
   , sdlGetTicks
   , sdlGPUShaderFormatSpirv
+  , sdlGPUShaderStageVertex
   , sdlGPUShaderStageFragment
+  , sdlGPUCompareOpInvalid
   , sdlInit
   , sdlInitAudio
   , sdlInitVideo
@@ -310,34 +469,53 @@ import Slop.SDL.Raw
   , sdlPumpEvents
   , sdlQuit
   , sdlReleaseGPUShader
-  , sdlRenderClear
-  , sdlRenderFillRect
-  , sdlRenderLine
-  , sdlRenderPresent
-  , sdlRenderRect
-  , sdlRenderTexture
-  , sdlGetRenderTarget
-  , sdlGetTextureProperties
-  , sdlGetPointerProperty
-  , sdlPropTextureGpuTexturePointer
   , sdlSetWindowResizable
-  , sdlSetGPURenderStateFragmentUniforms
-  , sdlSetRenderDrawColorFloat
-  , sdlSetRenderTarget
-  , sdlSetGPURenderState
-  , sdlTextureAccessTarget
   , sdlPixelFormatRGBA8888
-  , ttfCreateRendererTextEngine
+  , sdlGPUTextureFormatRGBA8
+  , sdlGPUTextureType2D
+  , sdlGPUTextureUsageSampler
+  , sdlGPUTextureUsageColorTarget
+  , sdlGPUTextureUsageComputeStorageRead
+  , sdlGPUTextureUsageComputeStorageWrite
+  , sdlGPUTextureUsageComputeStorageSimultaneousReadWrite
+  , sdlGPUBufferUsageVertex
+  , sdlGPUTransferBufferUsageUpload
+  , sdlGPUPrimitiveTypeTriangleList
+  , sdlGPUPrimitiveTypeLineList
+  , sdlGPULoadOpLoad
+  , sdlGPULoadOpClear
+  , sdlGPUStoreOpStore
+  , sdlGPUSampleCount1
+  , sdlGPUVertexElementFormatFloat2
+  , sdlGPUVertexElementFormatFloat4
+  , sdlGPUVertexInputRateVertex
+  , sdlGPUBlendOpAdd
+  , sdlGPUBlendFactorOne
+  , sdlGPUBlendFactorSrcAlpha
+  , sdlGPUBlendFactorOneMinusSrcAlpha
+  , sdlGPUColorComponentRGBA
+  , sdlGPUFillModeFill
+  , sdlGPUCullModeNone
+  , sdlGPUFrontFaceCounterClockwise
+  , sdlGPUStencilOpKeep
+  , imgLoadSurface
+  , sdlDestroySurface
+  , sdlLockSurface
+  , sdlUnlockSurface
+  , sdlConvertSurface
+  , ttfCreateGPUTextEngine
+  , ttfCreateGPUTextEngineWithProperties
+  , ttfDestroyGPUTextEngine
   , ttfCreateText
-  , ttfDestroyRendererTextEngine
   , ttfDestroyText
-  , ttfDrawRendererText
+  , ttfGetGPUTextDrawData
   , ttfInit
   , ttfGetFontSDF
   , ttfOpenFont
   , ttfQuit
   , ttfCloseFont
   , ttfSetFontSDF
+  , ttfSetTextPosition
   , allocaEvent
   , peekEventType
   )
@@ -347,8 +525,40 @@ data Config = Config
   , windowWidth :: Int
   , windowHeight :: Int
   , windowResizable :: Bool
+  , textAtlasSize :: Maybe Int
+  , assetWorkers :: Int
   }
   deriving (Eq, Show)
+
+data ConfigPatch = ConfigPatch
+  { patchWindowTitle :: Last String
+  , patchWindowWidth :: Last Int
+  , patchWindowHeight :: Last Int
+  , patchWindowResizable :: Last Bool
+  , patchTextAtlasSize :: Last (Maybe Int)
+  , patchAssetWorkers :: Last Int
+  }
+  deriving (Eq, Show)
+
+instance Semigroup ConfigPatch where
+  ConfigPatch a b c d e f <> ConfigPatch a' b' c' d' e' f' =
+    ConfigPatch (a <> a') (b <> b') (c <> c') (d <> d') (e <> e') (f <> f')
+
+instance Monoid ConfigPatch where
+  mempty = ConfigPatch mempty mempty mempty mempty mempty mempty
+
+applyConfigPatch :: Config -> ConfigPatch -> Config
+applyConfigPatch cfg patch =
+  cfg
+    { windowTitle = pick cfg.windowTitle patch.patchWindowTitle
+    , windowWidth = pick cfg.windowWidth patch.patchWindowWidth
+    , windowHeight = pick cfg.windowHeight patch.patchWindowHeight
+    , windowResizable = pick cfg.windowResizable patch.patchWindowResizable
+    , textAtlasSize = pick cfg.textAtlasSize patch.patchTextAtlasSize
+    , assetWorkers = pick cfg.assetWorkers patch.patchAssetWorkers
+    }
+  where
+    pick def (Last value) = fromMaybe def value
 
 defaultConfig :: Config
 defaultConfig = Config
@@ -356,6 +566,8 @@ defaultConfig = Config
   , windowWidth = 1280
   , windowHeight = 720
   , windowResizable = True
+  , textAtlasSize = Nothing
+  , assetWorkers = 0
   }
 
 data HotReloadConfig = HotReloadConfig
@@ -367,18 +579,27 @@ data HotReloadConfig = HotReloadConfig
 
 data Window = Window
   { appWindow :: SDL.Window
-  , appRenderer :: Renderer
   , appGPUDevice :: GPUDevice
+  , appSwapchainFormat :: SDL_GPUTextureFormat
   , appDefaultSampler :: Sampler
   , appTextEngine :: TextEngine
   , appMixer :: Mixer
   , appMusicTrack :: IORef (Maybe Track)
   , appBlendPools :: IORef [TrackPool]
   , appAssets :: AssetManager
+  , appMainAssetQueue :: TQueue AssetCommand
   , appTargets :: IORef (Map.Map (Ptr ()) Texture)
   , appPipelineTargets :: IORef (Map.Map Int (RenderTarget, (Int, Int)))
   , appRenderState :: IORef RenderState
   , appHotReload :: IORef HotReloadConfig
+  , appFrameContext :: RecordingContext
+  , appRecording :: IORef (Maybe Recording)
+  , appWindowSize :: IORef (Int, Int)
+  , appWhiteTexture :: Texture
+  , appVertexShader :: GPUShader
+  , appDefaultShader :: Shader
+  , appPipelines :: IORef (Map.Map PipelineKey GPUGraphicsPipeline)
+  , appDrawColor :: IORef Color
   }
 
 newtype WindowM a = WindowM (ReaderT Window IO a)
@@ -387,13 +608,14 @@ newtype WindowM a = WindowM (ReaderT Window IO a)
 newtype Loop a = Loop (WindowM a)
   deriving (Functor, Applicative, Monad, MonadIO)
 
+instance MonadReader Window Loop where
+  ask = Loop ask
+  local f (Loop action) = Loop (local f action)
+
 data RenderState = RenderState
-  { rsUniformCache :: !(Map.Map UniformKey ByteString)
-  , rsTextCache :: !(Map.Map TextCacheKey CachedText)
+  { rsTextCache :: !(Map.Map TextCacheKey CachedText)
   , rsFrameId :: !Word64
   }
-
-type UniformKey = (Ptr (), Word32)
 
 type TextCacheKey = (Ptr (), String)
 
@@ -402,34 +624,171 @@ data CachedText = CachedText
   , ctLastUsed :: !Word64
   }
 
-newtype PtrKey = PtrKey (Ptr ())
+data RecordingContext = RecordingContext
+  { rcCommands :: IORef [RecordedOp]
+  , rcShaderStack :: IORef [ShaderContext]
+  }
+
+newtype Recording = Recording RecordingContext
+
+data ShaderContext = ShaderContext
+  { ctxShader :: Shader
+  , ctxUniforms :: [UniformBinding]
+  , ctxSamplers :: [SamplerBindingSpec]
+  , ctxStorage :: [StorageBinding]
+  }
+
+data DrawShape
+  = ShapeLine Color FPoint FPoint
+  | ShapeRectOutline Color FRect
+  | ShapeRectFill Color FRect
+  | ShapeSprite Texture (Maybe FRect) FRect
+  | ShapeText Text Float Float
+
+data DrawCmd = DrawCmd DrawShape (Maybe ShaderContext)
+
+data RecordedOp
+  = RecordedClear Color
+  | RecordedDraw DrawCmd
+  | RecordedMesh Pipeline Mesh [Binding]
+
+data VertexAttrFormat
+  = VertexFloat2
+  | VertexFloat4
   deriving (Eq, Ord, Show)
 
-data SamplerKey = SamplerKey
-  { samplerTextureKey :: !PtrKey
-  , samplerSamplerKey :: !PtrKey
+data VertexAttr = VertexAttr
+  { attrLocation :: Word32
+  , attrFormat :: VertexAttrFormat
+  , attrOffset :: Word32
   }
   deriving (Eq, Ord, Show)
 
-data BindingKey = BindingKey
-  { bindingSamplers :: ![SamplerKey]
-  , bindingStorageTextures :: ![PtrKey]
+data VertexLayout = VertexLayout
+  { layoutStride :: Word32
+  , layoutAttrs :: [VertexAttr]
   }
   deriving (Eq, Ord, Show)
 
-newtype DList a = DList ([a] -> [a])
+data Primitive
+  = PrimTriangles
+  | PrimLines
+  deriving (Eq, Ord, Show)
 
-instance Semigroup (DList a) where
-  DList f <> DList g = DList (f . g)
+data Mesh = Mesh
+  { meshBuffer :: GPUBuffer
+  , meshVertexCount :: Word32
+  , meshLayout :: VertexLayout
+  , meshReleaseOnDraw :: Bool
+  }
+  deriving (Eq, Show)
 
-instance Monoid (DList a) where
-  mempty = DList id
+data VertexShader = VertexShader
+  { vertexShaderHandle :: GPUShader
+  , vertexShaderDevice :: GPUDevice
+  }
+  deriving (Eq, Show)
 
-singleton :: a -> DList a
-singleton x = DList (x :)
+type FragmentShader = Shader
 
-toList :: DList a -> [a]
-toList (DList f) = f []
+data ShaderCounts = ShaderCounts
+  { shaderSamplers :: Word32
+  , shaderStorageTextures :: Word32
+  , shaderStorageBuffers :: Word32
+  , shaderUniformBuffers :: Word32
+  }
+  deriving (Eq, Show)
+
+data Pipeline = Pipeline
+  { pipelineHandle :: GPUGraphicsPipeline
+  , pipelineVertex :: GPUShader
+  , pipelineFragment :: GPUShader
+  , pipelineLayout :: VertexLayout
+  , pipelinePrimitive :: Primitive
+  , pipelineTargetFormat :: SDL_GPUTextureFormat
+  , pipelineBlend :: Bool
+  }
+  deriving (Eq, Show)
+
+data TargetFormat
+  = TargetSwapchain
+  | TargetFormat SDL_GPUTextureFormat
+  deriving (Eq, Show)
+
+data BlendMode
+  = BlendAlpha
+  | BlendNone
+  deriving (Eq, Show)
+
+data GraphicsDesc = GraphicsDesc
+  { gfxVertex :: VertexShader
+  , gfxFragment :: FragmentShader
+  , gfxLayout :: VertexLayout
+  , gfxPrimitive :: Primitive
+  , gfxTarget :: TargetFormat
+  , gfxBlend :: BlendMode
+  }
+
+data BindingValue where
+  BindingValue :: Storable a => a -> BindingValue
+  BindingBytes :: ByteString -> BindingValue
+
+data Binding
+  = BindVertexUniform Word32 BindingValue
+  | BindFragmentUniform Word32 BindingValue
+  | BindFragmentSampler Word32 Texture (Maybe Sampler)
+  | BindFragmentStorageTexture Word32 Texture
+
+data AsMesh = AsMesh Pipeline [Binding]
+
+asMesh :: Pipeline -> [Binding] -> AsMesh
+asMesh = AsMesh
+
+data ComputePipeline = ComputePipeline
+  { computeHandle :: GPUComputePipeline
+  , computeDevice :: GPUDevice
+  }
+  deriving (Eq, Show)
+
+data ComputeDesc = ComputeDesc
+  { computeShaderCode :: ByteString
+  , computeSamplers :: Word32
+  , computeReadonlyStorageTextures :: Word32
+  , computeReadonlyStorageBuffers :: Word32
+  , computeReadwriteStorageTextures :: Word32
+  , computeReadwriteStorageBuffers :: Word32
+  , computeUniformBuffers :: Word32
+  , computeThreads :: (Word32, Word32, Word32)
+  }
+  deriving (Eq, Show)
+
+data ComputeBinding
+  = ComputeUniform Word32 BindingValue
+  | ComputeSampler Word32 Texture (Maybe Sampler)
+  | ComputeStorageTexture Word32 Texture
+  | ComputeStorageTextureRW Word32 Texture
+
+data PipelineKey = PipelineKey
+  { pipelineVertexShader :: Ptr ()
+  , pipelineFragmentShader :: Ptr ()
+  , pipelineLayoutKey :: VertexLayout
+  , pipelinePrimitiveKey :: SDL_GPUPrimitiveType
+  , pipelineFormat :: SDL_GPUTextureFormat
+  , pipelineBlendKey :: Bool
+  }
+  deriving (Eq, Ord, Show)
+
+data Vertex = Vertex
+  { vertexX :: CFloat
+  , vertexY :: CFloat
+  , vertexU :: CFloat
+  , vertexV :: CFloat
+  , vertexR :: CFloat
+  , vertexG :: CFloat
+  , vertexB :: CFloat
+  , vertexA :: CFloat
+  }
+  deriving (Eq, Show)
 
 runWindowM :: Window -> WindowM a -> IO a
 runWindowM window (WindowM action) =
@@ -471,6 +830,11 @@ data AssetStatus a
 
 newtype AssetUpdate = AssetUpdate (TMVar (Either String ()))
 
+data AssetThread
+  = AssetAny
+  | AssetMain
+  deriving (Eq, Show)
+
 class (Typeable spec, Typeable (AssetType spec)) => AssetLoader spec where
   type AssetType spec
   loadAssetIO :: Window -> spec -> IO (Either String (AssetType spec))
@@ -478,6 +842,8 @@ class (Typeable spec, Typeable (AssetType spec)) => AssetLoader spec where
   assetLabel :: spec -> String
   assetFiles :: spec -> [FilePath]
   assetFiles _ = []
+  assetThread :: spec -> AssetThread
+  assetThread _ = AssetAny
 
 data TextureAsset = TextureAsset FilePath
   deriving (Eq, Show)
@@ -506,16 +872,37 @@ data ShaderAsset = ShaderAsset
   }
   deriving (Eq, Show)
 
+data VertexShaderAsset = VertexShaderAsset
+  { vertexShaderSpirvBytes :: !ByteString
+  , vertexShaderCounts :: !ShaderCounts
+  }
+  deriving (Eq, Show)
+
+data ComputePipelineAsset = ComputePipelineAsset
+  { computePipelineDesc :: !ComputeDesc
+  }
+  deriving (Eq, Show)
+
+data PipelineAsset = PipelineAsset
+  { pipelineDesc :: !GraphicsDesc
+  }
+
+data SamplerAsset = SamplerAsset
+  { samplerDesc :: !SamplerDesc
+  }
+  deriving (Eq, Show)
+
 instance AssetLoader TextureAsset where
   type AssetType TextureAsset = Texture
   loadAssetIO app (TextureAsset path) = do
-    result <- imgLoadTexture (app.appRenderer) path
+    result <- try (loadTextureIO app path)
     case result of
-      Nothing -> Left <$> sdlGetError
-      Just tex -> pure (Right tex)
-  unloadAssetIO _ _ = sdlDestroyTexture
+      Right tex -> pure (Right tex)
+      Left (err :: SomeException) -> pure (Left (show err))
+  unloadAssetIO _ _ = destroyTextureIO
   assetLabel (TextureAsset path) = path
   assetFiles (TextureAsset path) = [path]
+  assetThread _ = AssetMain
 
 instance AssetLoader FontAsset where
   type AssetType FontAsset = Font
@@ -537,6 +924,7 @@ instance AssetLoader TextAsset where
       Just textObj -> pure (Right textObj)
   unloadAssetIO _ _ = ttfDestroyText
   assetLabel (TextAsset _ str) = str
+  assetThread _ = AssetMain
 
 instance AssetLoader MusicAsset where
   type AssetType MusicAsset = Audio
@@ -588,11 +976,74 @@ instance AssetLoader ShaderAsset where
     Right <$> createShaderFromSpirvWithIO app bytes samplers storageTextures storageBuffers uniformBuffers
   unloadAssetIO _ _ = destroyShaderIO
   assetLabel _ = "shader"
+  assetThread _ = AssetMain
+
+instance AssetLoader VertexShaderAsset where
+  type AssetType VertexShaderAsset = VertexShader
+  loadAssetIO app spec =
+    Right <$> createVertexShaderIO app spec.vertexShaderSpirvBytes spec.vertexShaderCounts
+  unloadAssetIO _ _ shader =
+    sdlReleaseGPUShader shader.vertexShaderDevice shader.vertexShaderHandle
+  assetLabel _ = "vertex-shader"
+  assetThread _ = AssetMain
+
+instance AssetLoader ComputePipelineAsset where
+  type AssetType ComputePipelineAsset = ComputePipeline
+  loadAssetIO app spec =
+    Right <$> createComputePipelineIO app spec.computePipelineDesc
+  unloadAssetIO _ _ pipeline =
+    sdlReleaseGPUComputePipeline pipeline.computeDevice pipeline.computeHandle
+  assetLabel _ = "compute-pipeline"
+  assetThread _ = AssetMain
+
+instance AssetLoader PipelineAsset where
+  type AssetType PipelineAsset = Pipeline
+  loadAssetIO app spec = do
+    let desc = spec.pipelineDesc
+    let fmt =
+          case desc.gfxTarget of
+            TargetSwapchain -> app.appSwapchainFormat
+            TargetFormat value -> value
+    let blendEnabled =
+          case desc.gfxBlend of
+            BlendAlpha -> True
+            BlendNone -> False
+    pipelineHandle <- createGraphicsPipeline app
+      desc.gfxVertex.vertexShaderHandle
+      desc.gfxFragment.shaderHandle
+      desc.gfxLayout
+      (primitiveToSDL desc.gfxPrimitive)
+      fmt
+      blendEnabled
+    pure (Right Pipeline
+      { pipelineHandle = pipelineHandle
+      , pipelineVertex = desc.gfxVertex.vertexShaderHandle
+      , pipelineFragment = desc.gfxFragment.shaderHandle
+      , pipelineLayout = desc.gfxLayout
+      , pipelinePrimitive = desc.gfxPrimitive
+      , pipelineTargetFormat = fmt
+      , pipelineBlend = blendEnabled
+      })
+  unloadAssetIO app _ pipeline =
+    sdlReleaseGPUGraphicsPipeline app.appGPUDevice pipeline.pipelineHandle
+  assetLabel _ = "graphics-pipeline"
+  assetThread _ = AssetMain
+
+instance AssetLoader SamplerAsset where
+  type AssetType SamplerAsset = Sampler
+  loadAssetIO app spec = do
+    sampler <- require "SDL_CreateGPUSampler"
+      (sdlCreateGPUSampler app.appGPUDevice (samplerDescToCreateInfo spec.samplerDesc))
+    pure (Right (Sampler sampler))
+  unloadAssetIO app _ (Sampler sampler) =
+    sdlReleaseGPUSampler app.appGPUDevice sampler
+  assetLabel _ = "sampler"
+  assetThread _ = AssetMain
 
 data AssetManager = AssetManager
   { amState :: !(TVar ManagerState)
   , amQueue :: !(TQueue AssetCommand)
-  , amThread :: !ThreadId
+  , amThreads :: ![ThreadId]
   }
 
 data ManagerState = ManagerState
@@ -623,22 +1074,24 @@ data AssetCommand where
   AssetCommand :: AssetLoader spec => Int -> spec -> RequestMode -> Maybe (TMVar (Either String ())) -> AssetCommand
   StopCommand :: TMVar () -> AssetCommand
 
-initAssetManager :: Window -> IO AssetManager
-initAssetManager app = do
+initAssetManager :: Window -> Int -> IO AssetManager
+initAssetManager app workerCount = do
   stateVar <- newTVarIO ManagerState { msNextId = 0, msAssets = Map.empty }
   queue <- newTQueueIO
-  tid <- forkIO (assetWorker app stateVar queue)
+  let count = max 1 workerCount
+  tids <- replicateM count (forkIO (assetWorker app stateVar queue))
   pure AssetManager
     { amState = stateVar
     , amQueue = queue
-    , amThread = tid
+    , amThreads = tids
     }
 
 shutdownAssetManager :: Window -> AssetManager -> IO ()
 shutdownAssetManager app mgr = do
-  stopVar <- atomically newEmptyTMVar
-  atomically (writeTQueue (mgr.amQueue) (StopCommand stopVar))
-  atomically (readTMVar stopVar)
+  let workerCount = length mgr.amThreads
+  stopVars <- replicateM workerCount (atomically newEmptyTMVar)
+  atomically $ forM_ stopVars (\var -> writeTQueue (mgr.amQueue) (StopCommand var))
+  mapM_ (atomically . readTMVar) stopVars
   cleanupAssets app mgr
 
 cleanupAssets :: Window -> AssetManager -> IO ()
@@ -656,9 +1109,6 @@ removeAllAssetsIO app mgr = do
     finalizeEntry _ (AssetSlot _ (SlotLoading var) _) =
       void (atomically (tryPutTMVar var (Left "asset removed")))
     finalizeEntry app' (AssetSlot _ (SlotReady dyn finalizer) _) = do
-      case fromDynamic dyn :: Maybe Shader of
-        Just shader -> evictShaderCacheIO app' shader
-        Nothing -> pure ()
       case fromDynamic dyn :: Maybe Font of
         Just font -> evictTextCacheForFontIO app' font
         Nothing -> pure ()
@@ -669,83 +1119,90 @@ assetWorker app stateVar queue = go
   where
     go = do
       cmd <- atomically (readTQueue queue)
-      case cmd of
-        StopCommand done -> atomically (putTMVar done ())
-        AssetCommand assetId spec mode notify -> do
-          result <- try @SomeException (loadAssetIO app spec)
-          let resolved = case result of
-                Left ex -> Left (show ex)
-                Right ok -> ok
-          case mode of
-            RequestLoad -> finishLoad assetId spec resolved notify
-            RequestReload -> finishReload assetId spec resolved notify
-          go
+      continue <- handleAssetCommand app stateVar cmd
+      when continue go
 
-    finishLoad :: forall spec. AssetLoader spec => Int -> spec -> Either String (AssetType spec) -> Maybe (TMVar (Either String ())) -> IO ()
-    finishLoad assetId spec result _ = case result of
-      Left err -> do
-        atomically $ do
-          st <- readTVar stateVar
-          case Map.lookup assetId (st.msAssets) of
-            Just slot@AssetSlot { slotState = SlotLoading var } -> do
-              let slot' = slot { slotState = SlotFailed err }
-              writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
-              void (tryPutTMVar var (Left err))
-            _ -> pure ()
-      Right asset -> do
-        let dyn = toDyn asset
-        let finalizer = unloadAssetIO app spec asset
-        let typ = typeOf asset
-        cancelled <- atomically $ do
-          st <- readTVar stateVar
-          case Map.lookup assetId (st.msAssets) of
-            Just slot@AssetSlot { slotState = SlotLoading var } -> do
-              let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
-              writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
-              void (tryPutTMVar var (Right ()))
-              pure False
-            Nothing -> pure True
-            _ -> pure False
-        if cancelled then finalizer else pure ()
+handleAssetCommand :: Window -> TVar ManagerState -> AssetCommand -> IO Bool
+handleAssetCommand app stateVar cmd =
+  case cmd of
+    StopCommand done -> do
+      atomically (putTMVar done ())
+      pure False
+    AssetCommand assetId spec mode notify -> do
+      result <- try @SomeException (loadAssetIO app spec)
+      let resolved = case result of
+            Left ex -> Left (show ex)
+            Right ok -> ok
+      case mode of
+        RequestLoad -> finishLoad app stateVar assetId spec resolved notify
+        RequestReload -> finishReload app stateVar assetId spec resolved notify
+      pure True
 
-    finishReload :: forall spec. AssetLoader spec => Int -> spec -> Either String (AssetType spec) -> Maybe (TMVar (Either String ())) -> IO ()
-    finishReload assetId spec result notify = case result of
-      Left err -> do
-        atomically $ do
-          case notify of
-            Nothing -> pure ()
-            Just var -> void (tryPutTMVar var (Left err))
-      Right asset -> do
-        let dyn = toDyn asset
-        let finalizer = unloadAssetIO app spec asset
-        let typ = typeOf asset
-        (_replaced, oldFinalizer, missing) <- atomically $ do
-          st <- readTVar stateVar
-          case Map.lookup assetId (st.msAssets) of
-            Nothing -> pure (False, Nothing, True)
-            Just slot@AssetSlot { slotState = SlotReady _ oldFin } -> do
-              let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
-              writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
-              pure (True, Just oldFin, False)
-            Just slot@AssetSlot { slotState = SlotFailed _ } -> do
-              let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
-              writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
-              pure (True, Nothing, False)
-            Just slot@AssetSlot { slotState = SlotLoading _ } -> do
-              let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
-              writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
-              pure (True, Nothing, False)
-        if missing
-          then do
-            finalizer
-            atomically $ case notify of
-              Nothing -> pure ()
-              Just var -> void (tryPutTMVar var (Left "asset not found"))
-          else do
-            maybe (pure ()) id oldFinalizer
-            atomically $ case notify of
-              Nothing -> pure ()
-              Just var -> void (tryPutTMVar var (Right ()))
+finishLoad :: forall spec. AssetLoader spec => Window -> TVar ManagerState -> Int -> spec -> Either String (AssetType spec) -> Maybe (TMVar (Either String ())) -> IO ()
+finishLoad app stateVar assetId spec result _ = case result of
+  Left err -> do
+    atomically $ do
+      st <- readTVar stateVar
+      case Map.lookup assetId (st.msAssets) of
+        Just slot@AssetSlot { slotState = SlotLoading var } -> do
+          let slot' = slot { slotState = SlotFailed err }
+          writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
+          void (tryPutTMVar var (Left err))
+        _ -> pure ()
+  Right asset -> do
+    let dyn = toDyn asset
+    let finalizer = unloadAssetIO app spec asset
+    let typ = typeOf asset
+    cancelled <- atomically $ do
+      st <- readTVar stateVar
+      case Map.lookup assetId (st.msAssets) of
+        Just slot@AssetSlot { slotState = SlotLoading var } -> do
+          let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
+          writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
+          void (tryPutTMVar var (Right ()))
+          pure False
+        Nothing -> pure True
+        _ -> pure False
+    if cancelled then finalizer else pure ()
+
+finishReload :: forall spec. AssetLoader spec => Window -> TVar ManagerState -> Int -> spec -> Either String (AssetType spec) -> Maybe (TMVar (Either String ())) -> IO ()
+finishReload app stateVar assetId spec result notify = case result of
+  Left err -> do
+    atomically $ do
+      case notify of
+        Nothing -> pure ()
+        Just var -> void (tryPutTMVar var (Left err))
+  Right asset -> do
+    let dyn = toDyn asset
+    let finalizer = unloadAssetIO app spec asset
+    let typ = typeOf asset
+    (_replaced, oldFinalizer, missing) <- atomically $ do
+      st <- readTVar stateVar
+      case Map.lookup assetId (st.msAssets) of
+        Nothing -> pure (False, Nothing, True)
+        Just slot@AssetSlot { slotState = SlotReady _ oldFin } -> do
+          let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
+          writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
+          pure (True, Just oldFin, False)
+        Just slot@AssetSlot { slotState = SlotFailed _ } -> do
+          let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
+          writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
+          pure (True, Nothing, False)
+        Just slot@AssetSlot { slotState = SlotLoading _ } -> do
+          let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
+          writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
+          pure (True, Nothing, False)
+    if missing
+      then do
+        finalizer
+        atomically $ case notify of
+          Nothing -> pure ()
+          Just var -> void (tryPutTMVar var (Left "asset not found"))
+      else do
+        maybe (pure ()) id oldFinalizer
+        atomically $ case notify of
+          Nothing -> pure ()
+          Just var -> void (tryPutTMVar var (Right ()))
 
 registerLoading :: forall a. Typeable a => AssetManager -> IO (AssetId a, TMVar (Either String ()))
 registerLoading mgr = atomically $ do
@@ -795,13 +1252,40 @@ loadAsset spec = do
 
 loadAssetAsync :: forall spec. AssetLoader spec => spec -> WindowM (AssetId (AssetType spec))
 loadAssetAsync spec = do
+  case assetThread spec of
+    AssetMain -> do
+      app <- ask
+      let mgr = app.appAssets
+      (assetId, _) <- liftIO (registerLoading @(AssetType spec) mgr)
+      liftIO (installHotReloadInfo app assetId spec)
+      liftIO $ atomically $
+        writeTQueue (app.appMainAssetQueue) (AssetCommand (assetId.unAssetId) spec RequestLoad Nothing)
+      pure assetId
+    AssetAny -> do
+      app <- ask
+      let mgr = app.appAssets
+      (assetId, _) <- liftIO (registerLoading @(AssetType spec) mgr)
+      liftIO (installHotReloadInfo app assetId spec)
+      liftIO $ atomically $
+        writeTQueue (mgr.amQueue) (AssetCommand (assetId.unAssetId) spec RequestLoad Nothing)
+      pure assetId
+
+processMainAssets :: WindowM ()
+processMainAssets = do
   app <- ask
-  let mgr = app.appAssets
-  (assetId, _) <- liftIO (registerLoading @(AssetType spec) mgr)
-  liftIO (installHotReloadInfo app assetId spec)
-  liftIO $ atomically $
-    writeTQueue (mgr.amQueue) (AssetCommand (assetId.unAssetId) spec RequestLoad Nothing)
-  pure assetId
+  let queue = app.appMainAssetQueue
+  let stateVar = app.appAssets.amState
+  liftIO (drain app stateVar queue)
+  where
+    drain app stateVar queue = do
+      mCmd <- atomically (tryReadTQueue queue)
+      case mCmd of
+        Nothing -> pure ()
+        Just cmd -> do
+          case cmd of
+            StopCommand _ -> pure ()
+            _ -> void (handleAssetCommand app stateVar cmd)
+          drain app stateVar queue
 
 reloadAssetAsync :: forall spec. AssetLoader spec => AssetId (AssetType spec) -> spec -> WindowM AssetUpdate
 reloadAssetAsync assetId spec = do
@@ -815,14 +1299,25 @@ reloadAssetAsync assetId spec = do
     then do
       liftIO (installHotReloadInfo app assetId spec)
       liftIO $ atomically $
-        writeTQueue (mgr.amQueue) (AssetCommand (assetId.unAssetId) spec RequestReload (Just notify))
+        case assetThread spec of
+          AssetMain -> writeTQueue (app.appMainAssetQueue) (AssetCommand (assetId.unAssetId) spec RequestReload (Just notify))
+          AssetAny -> writeTQueue (mgr.amQueue) (AssetCommand (assetId.unAssetId) spec RequestReload (Just notify))
       pure (AssetUpdate notify)
     else do
       liftIO $ atomically (putTMVar notify (Left "asset not found"))
       pure (AssetUpdate notify)
 
 awaitAssetUpdate :: AssetUpdate -> WindowM (Either String ())
-awaitAssetUpdate (AssetUpdate var) = liftIO (atomically (readTMVar var))
+awaitAssetUpdate (AssetUpdate var) = do
+  let step = do
+        mValue <- liftIO (atomically (tryReadTMVar var))
+        case mValue of
+          Just value -> pure value
+          Nothing -> do
+            processMainAssets
+            liftIO (threadDelay 1000)
+            step
+  step
 
 awaitAsset :: forall a. Typeable a => AssetId a -> WindowM (Either String a)
 awaitAsset assetId = do
@@ -835,8 +1330,15 @@ awaitAsset assetId = do
       _ -> pure Nothing
   case mWait of
     Just var -> do
-      _ <- liftIO (atomically (readTMVar var))
-      getAfterWait
+      let step = do
+            mValue <- liftIO (atomically (tryReadTMVar var))
+            case mValue of
+              Just _ -> getAfterWait
+              Nothing -> do
+                processMainAssets
+                liftIO (threadDelay 1000)
+                step
+      step
     Nothing -> getAfterWait
   where
     getAfterWait = do
@@ -890,9 +1392,6 @@ removeAsset assetId = do
   case toFinalize of
     Left ok -> pure ok
     Right (dyn, finalizer) -> do
-      case fromDynamic dyn :: Maybe Shader of
-        Just shader -> liftIO (evictShaderCacheIO app shader)
-        Nothing -> pure ()
       case fromDynamic dyn :: Maybe Font of
         Just font -> liftIO (evictTextCacheForFontIO app font)
         Nothing -> pure ()
@@ -931,8 +1430,9 @@ installHotReloadInfo app assetId spec = do
     [] -> pure Nothing
     _ -> do
       times <- loadHotReloadTimes files
-      let reloadAction = atomically $
-            writeTQueue (mgr.amQueue) (AssetCommand (assetId.unAssetId) spec RequestReload Nothing)
+      let reloadAction = atomically $ case assetThread spec of
+            AssetMain -> writeTQueue (app.appMainAssetQueue) (AssetCommand (assetId.unAssetId) spec RequestReload Nothing)
+            AssetAny -> writeTQueue (mgr.amQueue) (AssetCommand (assetId.unAssetId) spec RequestReload Nothing)
       pure (Just HotReloadInfo
         { hrFiles = files
         , hrTimes = times
@@ -1196,6 +1696,38 @@ data Color = Color
   }
   deriving (Eq, Show)
 
+data Texture = Texture
+  { textureHandle :: GPUTexture
+  , textureDevice :: GPUDevice
+  , textureWidth :: Int
+  , textureHeight :: Int
+  }
+  deriving (Eq, Show)
+
+data TextureUsage
+  = TextureSampled
+  | TextureColorTarget
+  | TextureStorageRead
+  | TextureStorageWrite
+  deriving (Eq, Show)
+
+data TextureDesc = TextureDesc
+  { texWidth :: Int
+  , texHeight :: Int
+  , texFormat :: SDL_GPUTextureFormat
+  , texUsage :: [TextureUsage]
+  }
+  deriving (Eq, Show)
+
+textureDesc :: Int -> Int -> TextureDesc
+textureDesc width height =
+  TextureDesc
+    { texWidth = width
+    , texHeight = height
+    , texFormat = sdlGPUTextureFormatRGBA8
+    , texUsage = [TextureSampled]
+    }
+
 rgb :: Float -> Float -> Float -> Color
 rgb r g b = Color r g b 1
 
@@ -1235,17 +1767,52 @@ instance Storable Vec4 where
     pokeByteOff ptr (2 * step) (realToFrac z :: CFloat)
     pokeByteOff ptr (3 * step) (realToFrac w :: CFloat)
 
+instance Storable Vertex where
+  sizeOf _ = 8 * sizeOf (undefined :: CFloat)
+  alignment _ = alignment (undefined :: CFloat)
+  peek ptr = do
+    let step = sizeOf (undefined :: CFloat)
+    x <- peekByteOff ptr 0 :: IO CFloat
+    y <- peekByteOff ptr step :: IO CFloat
+    u <- peekByteOff ptr (2 * step) :: IO CFloat
+    v <- peekByteOff ptr (3 * step) :: IO CFloat
+    r <- peekByteOff ptr (4 * step) :: IO CFloat
+    g <- peekByteOff ptr (5 * step) :: IO CFloat
+    b <- peekByteOff ptr (6 * step) :: IO CFloat
+    a <- peekByteOff ptr (7 * step) :: IO CFloat
+    pure (Vertex x y u v r g b a)
+  poke ptr (Vertex x y u v r g b a) = do
+    let step = sizeOf (undefined :: CFloat)
+    pokeByteOff ptr 0 x
+    pokeByteOff ptr step y
+    pokeByteOff ptr (2 * step) u
+    pokeByteOff ptr (3 * step) v
+    pokeByteOff ptr (4 * step) r
+    pokeByteOff ptr (5 * step) g
+    pokeByteOff ptr (6 * step) b
+    pokeByteOff ptr (7 * step) a
+
 rect :: Float -> Float -> Float -> Float -> FRect
 rect x y w h = FRect (realToFrac x) (realToFrac y) (realToFrac w) (realToFrac h)
 
 point :: Float -> Float -> FPoint
 point x y = FPoint (realToFrac x) (realToFrac y)
 
-class Drawable a where
-  draw :: a -> Loop ()
+data As2D
+  = As2D
+  | As2DWith Shader [ShaderUniform]
+
+as2D :: As2D
+as2D = As2D
+
+as2DWith :: Shader -> [ShaderUniform] -> As2D
+as2DWith = As2DWith
+
+class Draw ctx a where
+  draw :: ctx -> a -> Loop ()
 
 data DrawItem where
-  DrawItem :: Drawable a => a -> DrawItem
+  DrawItem :: Draw ctx a => ctx -> a -> DrawItem
 
 data Line = Line Color FPoint FPoint
   deriving (Eq, Show)
@@ -1256,7 +1823,18 @@ data RectOutline = RectOutline Color FRect
 data RectFill = RectFill Color FRect
   deriving (Eq, Show)
 
-data Sprite = Sprite Texture (Maybe FRect) FRect (Maybe (Shader, [ShaderUniform]))
+data Sprite = Sprite Texture (Maybe FRect) FRect (Maybe SpriteEffect)
+
+data SpriteEffect = SpriteEffect Shader [ShaderUniform]
+
+spriteEffect :: Shader -> [ShaderUniform] -> SpriteEffect
+spriteEffect = SpriteEffect
+
+spriteEffectNamed :: Shader -> [NamedUniform] -> WindowM SpriteEffect
+spriteEffectNamed shader named = do
+  table <- getShaderBindings shader
+  uniforms <- liftIO (resolveNamedUniforms table named)
+  pure (SpriteEffect shader uniforms)
 
 data Label = Label Text Float Float
 
@@ -1271,6 +1849,32 @@ data ShaderUniform where
   ShaderSampler :: Word32 -> Texture -> ShaderUniform
   ShaderSamplerWith :: Word32 -> Texture -> Sampler -> ShaderUniform
   ShaderStorageTexture :: Word32 -> Texture -> ShaderUniform
+
+shaderUniformChecked :: Storable a => Word32 -> Int -> a -> Either String ShaderUniform
+shaderUniformChecked slot expectedBytes value =
+  let actual = sizeOf value
+  in if actual /= expectedBytes
+      then Left ("uniform size mismatch at slot " <> show slot <> ": expected " <> show expectedBytes <> ", got " <> show actual)
+      else Right (ShaderUniform slot value)
+
+shaderUniformSized :: Storable a => Word32 -> Int -> a -> ShaderUniform
+shaderUniformSized slot expectedBytes value =
+  case shaderUniformChecked slot expectedBytes value of
+    Left err -> error err
+    Right uniform -> uniform
+
+shaderUniformBytesChecked :: Word32 -> Int -> ByteString -> Either String ShaderUniform
+shaderUniformBytesChecked slot expectedBytes bytes =
+  let actual = BS.length bytes
+  in if actual /= expectedBytes
+      then Left ("uniform byte size mismatch at slot " <> show slot <> ": expected " <> show expectedBytes <> ", got " <> show actual)
+      else Right (ShaderUniformBytes slot bytes)
+
+shaderUniformBytesSized :: Word32 -> Int -> ByteString -> ShaderUniform
+shaderUniformBytesSized slot expectedBytes bytes =
+  case shaderUniformBytesChecked slot expectedBytes bytes of
+    Left err -> error err
+    Right uniform -> uniform
 
 data ShaderStage
   = ShaderFragment
@@ -1299,6 +1903,13 @@ data ShaderBindings = ShaderBindings
   }
   deriving (Eq, Show)
 
+instance Semigroup ShaderBindings where
+  ShaderBindings u s st <> ShaderBindings u' s' st' =
+    ShaderBindings (Map.union u' u) (Map.union s' s) (Map.union st' st)
+
+instance Monoid ShaderBindings where
+  mempty = emptyShaderBindings
+
 emptyShaderBindings :: ShaderBindings
 emptyShaderBindings = ShaderBindings Map.empty Map.empty Map.empty
 
@@ -1310,6 +1921,20 @@ data NamedUniform where
   NamedStorageTexture :: String -> Texture -> NamedUniform
 
 data UniformBinding = UniformBinding !Word32 !ByteString
+
+data DrawBindings = DrawBindings
+  { dbVertexUniforms :: [UniformBinding]
+  , dbFragmentUniforms :: [UniformBinding]
+  , dbSamplers :: [SamplerBindingSpec]
+  , dbStorageTextures :: [StorageBinding]
+  }
+
+data ComputeBindings = ComputeBindings
+  { cbUniforms :: [UniformBinding]
+  , cbSamplers :: [SamplerBindingSpec]
+  , cbReadOnlyTextures :: [Texture]
+  , cbReadWriteTextures :: [Texture]
+  }
 
 newtype Sampler = Sampler GPUSampler
   deriving (Eq, Show)
@@ -1361,8 +1986,6 @@ data SamplerDesc = SamplerDesc
 
 data SamplerBindingSpec = SamplerBindingSpec !Word32 !Texture !(Maybe Sampler)
 
-data SamplerBinding = SamplerBinding !Texture !Sampler
-
 data StorageBinding = StorageBinding !Word32 !Texture
 
 newtype RenderTarget = RenderTarget Texture
@@ -1381,39 +2004,56 @@ data Pass = Pass TargetRef [Op]
 
 newtype RenderPlan = RenderPlan [Pass]
 
+instance Semigroup RenderPlan where
+  RenderPlan a <> RenderPlan b = RenderPlan (a <> b)
+
+instance Monoid RenderPlan where
+  mempty = RenderPlan []
+
 newtype PassM a = PassM (Writer (DList Op) a)
   deriving (Functor, Applicative, Monad)
 
 newtype PlanM a = PlanM (Writer (DList Pass) a)
   deriving (Functor, Applicative, Monad)
 
-instance Drawable Line where
-  draw (Line color p1 p2) = drawLine color p1 p2
+instance Draw As2D Line where
+  draw ctx (Line color p1 p2) =
+    withAs2D ctx (drawLine color p1 p2)
 
-instance Drawable RectOutline where
-  draw (RectOutline color rectShape) = drawRect color rectShape
+instance Draw As2D RectOutline where
+  draw ctx (RectOutline color rectShape) =
+    withAs2D ctx (drawRect color rectShape)
 
-instance Drawable RectFill where
-  draw (RectFill color rectShape) = fillRect color rectShape
+instance Draw As2D RectFill where
+  draw ctx (RectFill color rectShape) =
+    withAs2D ctx (fillRect color rectShape)
 
-instance Drawable Sprite where
-  draw (Sprite texture src dst shaderSpec) =
-    case shaderSpec of
-      Nothing -> drawTexture texture src dst
-      Just (sh, uniforms) ->
+instance Draw As2D Sprite where
+  draw ctx (Sprite texture src dst effect) =
+    case effect of
+      Nothing -> withAs2D ctx (drawTexture texture src dst)
+      Just (SpriteEffect sh uniforms) ->
         withShaderBindings sh uniforms (drawTexture texture src dst)
 
-instance Drawable Label where
-  draw (Label textObj x y) = drawText textObj x y
+instance Draw As2D Label where
+  draw ctx (Label textObj x y) =
+    withAs2D ctx (drawText textObj x y)
 
-instance Drawable TextDraw where
-  draw (TextDraw font str x y) = drawTextCached font str x y
+instance Draw As2D TextDraw where
+  draw ctx (TextDraw font str x y) =
+    withAs2D ctx (drawTextCached font str x y)
 
-instance Drawable DrawItem where
-  draw (DrawItem item) = draw item
+drawItem :: DrawItem -> Loop ()
+drawItem (DrawItem ctx item) = draw ctx item
 
-instance Drawable a => Drawable [a] where
-  draw = mapM_ draw
+instance Draw ctx a => Draw ctx [a] where
+  draw ctx = mapM_ (draw ctx)
+
+withAs2D :: As2D -> Loop a -> Loop a
+withAs2D ctx action =
+  case ctx of
+    As2D -> action
+    As2DWith shader uniforms -> withShaderBindings shader uniforms action
 
 runWindowIO :: Config -> (Window -> IO a) -> IO a
 runWindowIO cfg action =
@@ -1424,41 +2064,89 @@ runWindowIO cfg action =
     window <- require "SDL_CreateWindow" (sdlCreateWindow title width height 0)
     bracket (pure window) sdlDestroyWindow $ \win -> do
       void $ sdlSetWindowResizable win (cfg.windowResizable)
-      renderer <- require "SDL_CreateGPURenderer" (sdlCreateGPURenderer Nothing (Just win))
-      bracket (pure renderer) sdlDestroyRenderer $ \ren -> do
-        gpu <- require "SDL_GetGPURendererDevice" (sdlGetGPURendererDevice ren)
-        sampler <- require "SDL_CreateGPUSampler" (sdlCreateGPUSampler gpu defaultSamplerCreateInfo)
-        let defaultSampler = Sampler sampler
-        bracket (pure sampler) (sdlReleaseGPUSampler gpu) $ \_ -> do
-          textEngine <- require "TTF_CreateRendererTextEngine" (ttfCreateRendererTextEngine ren)
-          bracket (pure textEngine) ttfDestroyRendererTextEngine $ \engine -> do
-            mixer <- require "MIX_CreateMixerDevice" (mixCreateMixerDevice sdlAudioDeviceDefaultPlayback)
-            bracket (pure mixer) mixDestroyMixer $ \mix -> do
-              musicTrackRef <- newIORef Nothing
-              blendPools <- newIORef []
-              targets <- newIORef Map.empty
-              pipelineTargets <- newIORef Map.empty
-              renderState <- newIORef (RenderState Map.empty Map.empty 0)
-              hotReload <- newIORef (HotReloadConfig True 0.5 0)
-              let placeholderAssets = error "AssetManager not initialized"
-              let windowBase = Window
-                    { appWindow = win
-                    , appRenderer = ren
-                    , appGPUDevice = gpu
-                    , appDefaultSampler = defaultSampler
-                    , appTextEngine = engine
-                    , appMixer = mix
-                    , appMusicTrack = musicTrackRef
-                    , appBlendPools = blendPools
-                    , appAssets = placeholderAssets
-                    , appTargets = targets
-                    , appPipelineTargets = pipelineTargets
-                    , appRenderState = renderState
-                    , appHotReload = hotReload
-                    }
-              bracket (initAssetManager windowBase) (shutdownAssetManager windowBase) $ \assets -> do
-                let windowHandle = windowBase { appAssets = assets }
-                action windowHandle `finally` cleanupRenderTargets windowHandle
+      okShow <- sdlShowWindow win
+      unless okShow (die "SDL_ShowWindow")
+      sdlPumpEvents
+      gpu <- require "SDL_CreateGPUDevice" (sdlCreateGPUDevice sdlGPUShaderFormatSpirv False)
+      bracket (pure gpu) sdlDestroyGPUDevice $ \dev -> do
+        okClaim <- sdlClaimWindowForGPUDevice dev win
+        unless okClaim (die "SDL_ClaimWindowForGPUDevice")
+        let releaseWindow = sdlReleaseWindowFromGPUDevice dev win
+        bracket_ (pure ()) releaseWindow $ do
+          swapFmt <- sdlGetGPUSwapchainTextureFormat dev win
+          sampler <- require "SDL_CreateGPUSampler" (sdlCreateGPUSampler dev defaultSamplerCreateInfo)
+          let defaultSampler = Sampler sampler
+          bracket (pure sampler) (sdlReleaseGPUSampler dev) $ \_ -> do
+            textEngine <- case cfg.textAtlasSize of
+              Nothing ->
+                require "TTF_CreateGPUTextEngine" (ttfCreateGPUTextEngine dev)
+              Just size ->
+                bracket sdlCreateProperties sdlDestroyProperties $ \props -> do
+                  when (props == 0) (die "SDL_CreateProperties")
+                  let GPUDevice devPtr = dev
+                  let propDevice = "SDL_ttf.gpu_text_engine.create.device"
+                  let propAtlas = "SDL_ttf.gpu_text_engine.create.atlas_texture_size"
+                  okDev <- sdlSetPointerProperty props propDevice (castPtr devPtr)
+                  unless okDev (die "SDL_SetPointerProperty (TTF device)")
+                  okSize <- sdlSetNumberProperty props propAtlas (fromIntegral size)
+                  unless okSize (die "SDL_SetNumberProperty (TTF atlas size)")
+                  require "TTF_CreateGPUTextEngineWithProperties" (ttfCreateGPUTextEngineWithProperties props)
+            bracket (pure textEngine) ttfDestroyGPUTextEngine $ \engine -> do
+              mixer <- require "MIX_CreateMixerDevice" (mixCreateMixerDevice sdlAudioDeviceDefaultPlayback)
+              bracket (pure mixer) mixDestroyMixer $ \mix -> do
+                vertexShader <- require "SDL_CreateGPUShader (vertex)" (createRawShader dev defaultVertexSpirv sdlGPUShaderStageVertex 0 0 0 0)
+                bracket (pure vertexShader) (sdlReleaseGPUShader dev) $ \vertShader -> do
+                  defaultShader <- createShaderFromSpirvWithDevice dev defaultFragmentSpirv 1 0 0 0
+                  bracket (pure defaultShader) destroyShaderIO $ \defShader -> do
+                    whiteTex <- createSolidTexture dev sdlGPUTextureFormatRGBA8 1 1 255 255 255 255
+                    bracket (pure whiteTex) destroyTextureIO $ \whiteTexture -> do
+                      musicTrackRef <- newIORef Nothing
+                      blendPools <- newIORef []
+                      mainAssetQueue <- newTQueueIO
+                      targets <- newIORef Map.empty
+                      pipelineTargets <- newIORef Map.empty
+                      renderState <- newIORef (RenderState Map.empty 0)
+                      hotReload <- newIORef (HotReloadConfig True 0.5 0)
+                      frameCommands <- newIORef []
+                      frameShaders <- newIORef []
+                      recording <- newIORef Nothing
+                      winSize <- sdlGetWindowSize win
+                      windowSize <- newIORef winSize
+                      pipelines <- newIORef Map.empty
+                      drawColor <- newIORef (rgba 1 1 1 1)
+                      let frameContext = RecordingContext frameCommands frameShaders
+                      let placeholderAssets = error "AssetManager not initialized"
+                      let windowBase = Window
+                            { appWindow = win
+                            , appGPUDevice = dev
+                            , appSwapchainFormat = swapFmt
+                            , appDefaultSampler = defaultSampler
+                            , appTextEngine = engine
+                            , appMixer = mix
+                            , appMusicTrack = musicTrackRef
+                            , appBlendPools = blendPools
+                            , appAssets = placeholderAssets
+                            , appMainAssetQueue = mainAssetQueue
+                            , appTargets = targets
+                            , appPipelineTargets = pipelineTargets
+                            , appRenderState = renderState
+                            , appHotReload = hotReload
+                            , appFrameContext = frameContext
+                            , appRecording = recording
+                            , appWindowSize = windowSize
+                            , appWhiteTexture = whiteTexture
+                            , appVertexShader = vertShader
+                            , appDefaultShader = defShader
+                            , appPipelines = pipelines
+                            , appDrawColor = drawColor
+                            }
+                      workerCount <-
+                        if cfg.assetWorkers <= 0
+                          then max 1 <$> getNumCapabilities
+                          else pure cfg.assetWorkers
+                      bracket (initAssetManager windowBase workerCount) (shutdownAssetManager windowBase) $ \assets -> do
+                        let windowHandle = windowBase { appAssets = assets }
+                        action windowHandle `finally` (cleanupPipelines windowHandle >> cleanupRenderTargets windowHandle)
   where
     initSDL = do
       ok <- sdlInit (sdlInitVideo .|. sdlInitAudio)
@@ -1474,6 +2162,7 @@ runWindowIO cfg action =
     die label = do
       err <- sdlGetError
       ioError (userError (label <> " failed: " <> err))
+
 
 require :: String -> IO (Maybe a) -> IO a
 require label action = do
@@ -1496,7 +2185,9 @@ readInputState = do
     }
 
 renderTargetKey :: Texture -> Ptr ()
-renderTargetKey (Texture ptr) = castPtr ptr
+renderTargetKey texture =
+  case texture.textureHandle of
+    GPUTexture ptr -> castPtr ptr
 
 registerRenderTarget :: Window -> Texture -> IO ()
 registerRenderTarget window tex =
@@ -1515,7 +2206,13 @@ cleanupRenderTargets :: Window -> IO ()
 cleanupRenderTargets window = do
   targets <- atomicModifyIORef' (window.appTargets) $ \targets ->
     (Map.empty, Map.elems targets)
-  mapM_ sdlDestroyTexture targets
+  mapM_ destroyTextureIO targets
+
+cleanupPipelines :: Window -> IO ()
+cleanupPipelines window = do
+  pipelines <- atomicModifyIORef' (window.appPipelines) $ \cache ->
+    (Map.empty, Map.elems cache)
+  mapM_ (sdlReleaseGPUGraphicsPipeline window.appGPUDevice) pipelines
 
 readKeySet :: Ptr Word8 -> Int -> IO IntSet
 readKeySet ptr count = go 0 IntSet.empty
@@ -1541,61 +2238,193 @@ readMouseState =
       pure (buttons, Vec2 (realToFrac x) (realToFrac y))
 
 clearIO :: Window -> Color -> IO ()
-clearIO window (Color r g b a) = do
-  void $ sdlSetRenderDrawColorFloat (window.appRenderer) (realToFrac r) (realToFrac g) (realToFrac b) (realToFrac a)
-  void $ sdlRenderClear (window.appRenderer)
+clearIO window color = recordClear window color
 
 presentIO :: Window -> IO ()
-presentIO window = sdlRenderPresent window.appRenderer
+presentIO = flushFrame
 
 setDrawColorIO :: Window -> Color -> IO ()
-setDrawColorIO window (Color r g b a) =
-  void $ sdlSetRenderDrawColorFloat (window.appRenderer) (realToFrac r) (realToFrac g) (realToFrac b) (realToFrac a)
+setDrawColorIO window color =
+  writeIORef window.appDrawColor color
 
 drawLineIO :: Window -> Color -> FPoint -> FPoint -> IO ()
-drawLineIO window color (FPoint x1 y1) (FPoint x2 y2) = do
-  setDrawColorIO window color
-  void $ sdlRenderLine (window.appRenderer) x1 y1 x2 y2
+drawLineIO window color p1 p2 =
+  recordDraw window (ShapeLine color p1 p2)
 
 drawRectIO :: Window -> Color -> FRect -> IO ()
-drawRectIO window color rectShape = do
-  setDrawColorIO window color
-  alloca $ \ptr -> do
-    poke ptr rectShape
-    void $ sdlRenderRect (window.appRenderer) ptr
+drawRectIO window color rectShape =
+  recordDraw window (ShapeRectOutline color rectShape)
 
 fillRectIO :: Window -> Color -> FRect -> IO ()
-fillRectIO window color rectShape = do
-  setDrawColorIO window color
-  alloca $ \ptr -> do
-    poke ptr rectShape
-    void $ sdlRenderFillRect (window.appRenderer) ptr
+fillRectIO window color rectShape =
+  recordDraw window (ShapeRectFill color rectShape)
 
 drawTextureIO :: Window -> Texture -> Maybe FRect -> FRect -> IO ()
 drawTextureIO window texture src dst =
-  withMaybe src $ \srcPtr ->
-    with dst $ \dstPtr ->
-      void $ sdlRenderTexture (window.appRenderer) texture srcPtr dstPtr
+  recordDraw window (ShapeSprite texture src dst)
 
-getRenderTargetIO :: Window -> IO (Maybe Texture)
-getRenderTargetIO window = sdlGetRenderTarget (window.appRenderer)
-
-setRenderTargetIO :: Window -> Maybe Texture -> IO ()
-setRenderTargetIO window target = do
-  ok <- sdlSetRenderTarget (window.appRenderer) target
-  unless ok $ do
-    err <- sdlGetError
-    ioError (userError ("SDL_SetRenderTarget failed: " <> err))
-
-withMaybe :: Storable a => Maybe a -> (Ptr a -> IO b) -> IO b
-withMaybe Nothing f = f nullPtr
-withMaybe (Just value) f = with value f
 
 loadTextureIO :: Window -> FilePath -> IO Texture
-loadTextureIO window path = require "IMG_LoadTexture" (imgLoadTexture (window.appRenderer) path)
+loadTextureIO window path = do
+  surface <- require "IMG_Load" (imgLoadSurface path)
+  texture <- loadTextureFromSurface window surface
+  sdlDestroySurface surface
+  pure texture
 
 destroyTextureIO :: Texture -> IO ()
-destroyTextureIO = sdlDestroyTexture
+destroyTextureIO texture =
+  sdlReleaseGPUTexture texture.textureDevice texture.textureHandle
+
+loadTextureFromSurface :: Window -> Surface -> IO Texture
+loadTextureFromSurface window surface = do
+  surfaceInfo <- peekSurfaceInfo surface
+  gpuFormat <- sdlGetGPUTextureFormatFromPixelFormat surfaceInfo.surfaceInfoFormat
+  if gpuFormat == 0
+    then
+      if surfaceInfo.surfaceInfoFormat == sdlPixelFormatRGBA8888
+        then uploadSurface window surface sdlGPUTextureFormatRGBA8
+        else do
+          converted <- require "SDL_ConvertSurface" (sdlConvertSurface surface sdlPixelFormatRGBA8888)
+          texture <- loadTextureFromSurface window converted
+          sdlDestroySurface converted
+          pure texture
+    else do
+      uploadSurface window surface gpuFormat
+
+uploadSurface :: Window -> Surface -> SDL_GPUTextureFormat -> IO Texture
+uploadSurface window surface gpuFormat = do
+  surfaceInfo <- peekSurfaceInfo surface
+  let width = fromIntegral surfaceInfo.surfaceInfoWidth
+  let height = fromIntegral surfaceInfo.surfaceInfoHeight
+  let texUsage = sdlGPUTextureUsageSampler
+  tex <- createTexture window.appGPUDevice gpuFormat texUsage width height
+  ok <- sdlLockSurface surface
+  unless ok $ do
+    err <- sdlGetError
+    ioError (userError ("SDL_LockSurface failed: " <> err))
+  surfaceInfo' <- peekSurfaceInfo surface
+  let pitch = fromIntegral surfaceInfo'.surfaceInfoPitch
+  let byteSize = pitch * height
+  transfer <- require "SDL_CreateGPUTransferBuffer"
+    (sdlCreateGPUTransferBuffer window.appGPUDevice
+      GPUTransferBufferCreateInfo
+        { gpuTransferUsage = sdlGPUTransferBufferUsageUpload
+        , gpuTransferSize = fromIntegral byteSize
+        , gpuTransferProps = 0
+        })
+  ptr <- require "SDL_MapGPUTransferBuffer" (sdlMapGPUTransferBuffer window.appGPUDevice transfer False)
+  copyBytes ptr surfaceInfo'.surfaceInfoPixels byteSize
+  sdlUnmapGPUTransferBuffer window.appGPUDevice transfer
+  sdlUnlockSurface surface
+  cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
+  copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
+  let bpp = max 1 (pitch `div` max 1 width)
+  let transferInfo = GPUTextureTransferInfo
+        { gpuTransferBuffer = transfer
+        , gpuTransferOffset = 0
+        , gpuTransferPixelsPerRow = fromIntegral (pitch `div` bpp)
+        , gpuTransferRowsPerLayer = fromIntegral height
+        }
+  let region = GPUTextureRegion
+        { gpuTextureRegionTexture = tex.textureHandle
+        , gpuTextureRegionMipLevel = 0
+        , gpuTextureRegionLayer = 0
+        , gpuTextureRegionX = 0
+        , gpuTextureRegionY = 0
+        , gpuTextureRegionZ = 0
+        , gpuTextureRegionW = fromIntegral width
+        , gpuTextureRegionH = fromIntegral height
+        , gpuTextureRegionD = 1
+        }
+  sdlUploadToGPUTexture copyPass transferInfo region False
+  sdlEndGPUCopyPass copyPass
+  okSubmit <- sdlSubmitGPUCommandBuffer cmd
+  unless okSubmit $ do
+    err <- sdlGetError
+    ioError (userError ("SDL_SubmitGPUCommandBuffer failed: " <> err))
+  sdlReleaseGPUTransferBuffer window.appGPUDevice transfer
+  pure tex
+
+createSolidTexture :: GPUDevice -> SDL_GPUTextureFormat -> Int -> Int -> Word8 -> Word8 -> Word8 -> Word8 -> IO Texture
+createSolidTexture device fmt width height r g b a = do
+  let texUsage = sdlGPUTextureUsageSampler
+  tex <- createTexture device fmt texUsage width height
+  let byteSize = width * height * 4
+  transfer <- require "SDL_CreateGPUTransferBuffer"
+    (sdlCreateGPUTransferBuffer device
+      GPUTransferBufferCreateInfo
+        { gpuTransferUsage = sdlGPUTransferBufferUsageUpload
+        , gpuTransferSize = fromIntegral byteSize
+        , gpuTransferProps = 0
+        })
+  ptr <- require "SDL_MapGPUTransferBuffer" (sdlMapGPUTransferBuffer device transfer False)
+  let fill = [r, g, b, a]
+  let bytes = BS.pack (concat (replicate (width * height) fill))
+  BS.useAsCStringLen bytes $ \(src, _) ->
+    copyBytes ptr (castPtr src) byteSize
+  sdlUnmapGPUTransferBuffer device transfer
+  cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer device)
+  copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
+  let transferInfo = GPUTextureTransferInfo
+        { gpuTransferBuffer = transfer
+        , gpuTransferOffset = 0
+        , gpuTransferPixelsPerRow = fromIntegral width
+        , gpuTransferRowsPerLayer = fromIntegral height
+        }
+  let region = GPUTextureRegion
+        { gpuTextureRegionTexture = tex.textureHandle
+        , gpuTextureRegionMipLevel = 0
+        , gpuTextureRegionLayer = 0
+        , gpuTextureRegionX = 0
+        , gpuTextureRegionY = 0
+        , gpuTextureRegionZ = 0
+        , gpuTextureRegionW = fromIntegral width
+        , gpuTextureRegionH = fromIntegral height
+        , gpuTextureRegionD = 1
+        }
+  sdlUploadToGPUTexture copyPass transferInfo region False
+  sdlEndGPUCopyPass copyPass
+  okSubmit <- sdlSubmitGPUCommandBuffer cmd
+  unless okSubmit $ do
+    err <- sdlGetError
+    ioError (userError ("SDL_SubmitGPUCommandBuffer failed: " <> err))
+  sdlReleaseGPUTransferBuffer device transfer
+  pure tex
+
+createTexture :: GPUDevice -> SDL_GPUTextureFormat -> SDL_GPUTextureUsageFlags -> Int -> Int -> IO Texture
+createTexture device fmt usage width height = do
+  gpuTex <- require "SDL_CreateGPUTexture"
+    (sdlCreateGPUTexture device
+      GPUTextureCreateInfo
+        { gpuTextureType = sdlGPUTextureType2D
+        , gpuTextureFormat = fmt
+        , gpuTextureUsage = usage
+        , gpuTextureWidth = fromIntegral width
+        , gpuTextureHeight = fromIntegral height
+        , gpuTextureLayerCountOrDepth = 1
+        , gpuTextureNumLevels = 1
+        , gpuTextureSampleCount = sdlGPUSampleCount1
+        , gpuTextureProps = 0
+        })
+  pure Texture
+    { textureHandle = gpuTex
+    , textureDevice = device
+    , textureWidth = width
+    , textureHeight = height
+    }
+
+createRenderTargetTexture :: Window -> Int -> Int -> IO Texture
+createRenderTargetTexture window width height =
+  createTexture
+    window.appGPUDevice
+    window.appSwapchainFormat
+    (sdlGPUTextureUsageSampler .|. sdlGPUTextureUsageColorTarget)
+    width
+    height
+
+peekSurfaceInfo :: Surface -> IO SurfaceInfo
+peekSurfaceInfo (Surface ptr) =
+  peek (castPtr ptr :: Ptr SurfaceInfo)
 
 loadFontIO :: FilePath -> Float -> IO Font
 loadFontIO path size = require "TTF_OpenFont" (ttfOpenFont path size)
@@ -1626,7 +2455,8 @@ destroyTextIO :: Text -> IO ()
 destroyTextIO = ttfDestroyText
 
 drawTextIO :: Window -> Text -> Float -> Float -> IO ()
-drawTextIO _ textObj x y = void $ ttfDrawRendererText textObj x y
+drawTextIO window textObj x y =
+  recordDraw window (ShapeText textObj x y)
 
 setFrameId :: Window -> Word64 -> IO ()
 setFrameId window frameId =
@@ -1641,6 +2471,736 @@ pruneTextCache window = do
     in (st', map (\ct -> ct.ctText) (Map.elems dropMap))
   mapM_ ttfDestroyText stale
 
+currentRecordingContext :: Window -> IO RecordingContext
+currentRecordingContext window = do
+  active <- readIORef window.appRecording
+  pure (maybe window.appFrameContext (\(Recording ctx) -> ctx) active)
+
+withShaderContext :: Window -> ShaderContext -> IO a -> IO a
+withShaderContext window ctx action = do
+  recCtx <- currentRecordingContext window
+  bracket_
+    (modifyIORef' recCtx.rcShaderStack (ctx :))
+    (modifyIORef' recCtx.rcShaderStack (\stack -> case stack of
+      [] -> []
+      (_:rest) -> rest))
+    action
+
+recordClear :: Window -> Color -> IO ()
+recordClear window color = do
+  recCtx <- currentRecordingContext window
+  modifyIORef' recCtx.rcCommands (RecordedClear color :)
+
+recordDraw :: Window -> DrawShape -> IO ()
+recordDraw window shape = do
+  recCtx <- currentRecordingContext window
+  shaderStack <- readIORef recCtx.rcShaderStack
+  let ctx = case shaderStack of
+        [] -> Nothing
+        (top:_) -> Just top
+  modifyIORef' recCtx.rcCommands (RecordedDraw (DrawCmd shape ctx) :)
+
+recordMesh :: Window -> Pipeline -> Mesh -> [Binding] -> IO ()
+recordMesh window pipeline mesh bindings = do
+  recCtx <- currentRecordingContext window
+  modifyIORef' recCtx.rcCommands (RecordedMesh pipeline mesh bindings :)
+
+drainRecording :: RecordingContext -> IO [RecordedOp]
+drainRecording recCtx =
+  atomicModifyIORef' recCtx.rcCommands (\ops -> ([], reverse ops))
+
+resetRecording :: RecordingContext -> IO ()
+resetRecording recCtx = do
+  writeIORef recCtx.rcCommands []
+  writeIORef recCtx.rcShaderStack []
+
+withRecording :: Window -> RenderTarget -> (RecordingContext -> IO a) -> IO a
+withRecording window _target action = do
+  recCtx <- newRecordingContext
+  let recording = Recording recCtx
+  prev <- atomicModifyIORef' window.appRecording (\old -> (Just recording, old))
+  action recCtx `finally` writeIORef window.appRecording prev
+  where
+    newRecordingContext = RecordingContext <$> newIORef [] <*> newIORef []
+
+data PreparedDraw = PreparedDraw
+  { pdPipeline :: GPUGraphicsPipeline
+  , pdPrimitive :: SDL_GPUPrimitiveType
+  , pdVertexBuffer :: GPUBuffer
+  , pdVertexCount :: Word32
+  , pdVertexByteSize :: Word32
+  , pdTransferBuffer :: Maybe GPUTransferBuffer
+  , pdReleaseBuffer :: Bool
+  , pdSamplers :: [GPUTextureSamplerBinding]
+  , pdStorageTextures :: [GPUTexture]
+  , pdVertexUniforms :: [UniformBinding]
+  , pdFragmentUniforms :: [UniformBinding]
+  }
+
+flushFrame :: Window -> IO ()
+flushFrame window = do
+  ops <- drainRecording window.appFrameContext
+  unless (null ops) $ do
+    cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
+    (swapTex, w, h) <- require "SDL_WaitAndAcquireGPUSwapchainTexture" (sdlWaitAndAcquireGPUSwapchainTexture cmd window.appWindow)
+    flushOps window cmd window.appSwapchainFormat swapTex (fromIntegral w, fromIntegral h) ops
+
+flushTarget :: Window -> RenderTarget -> [RecordedOp] -> IO ()
+flushTarget window (RenderTarget tex) ops =
+  unless (null ops) $
+    do
+      cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
+      flushOps window cmd window.appSwapchainFormat tex.textureHandle (tex.textureWidth, tex.textureHeight) ops
+
+flushOps :: Window -> GPUCommandBuffer -> SDL_GPUTextureFormat -> GPUTexture -> (Int, Int) -> [RecordedOp] -> IO ()
+flushOps window cmd fmt targetTex (w, h) ops = do
+  let (clearColor, drawOps) = extractClear ops
+  prepared <- prepareDraws window fmt (w, h) drawOps
+  unless (null prepared) $ do
+    copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
+    mapM_ (uploadPrepared cmd copyPass) prepared
+    sdlEndGPUCopyPass copyPass
+  let clearF = maybe (FColor 0 0 0 0) toFColor clearColor
+  let loadOp = if clearColor == Nothing then sdlGPULoadOpLoad else sdlGPULoadOpClear
+  let targetInfo = GPUColorTargetInfo
+        { gpuColorTargetTexture = let GPUTexture ptr = targetTex in ptr
+        , gpuColorTargetMipLevel = 0
+        , gpuColorTargetLayer = 0
+        , gpuColorTargetClearColor = clearF
+        , gpuColorTargetLoadOp = loadOp
+        , gpuColorTargetStoreOp = sdlGPUStoreOpStore
+        , gpuColorTargetResolveTexture = nullPtr
+        , gpuColorTargetResolveMipLevel = 0
+        , gpuColorTargetResolveLayer = 0
+        , gpuColorTargetCycle = 0
+        , gpuColorTargetCycleResolve = 0
+        , gpuColorTargetPadding1 = 0
+        , gpuColorTargetPadding2 = 0
+        }
+  renderPass <- require "SDL_BeginGPURenderPass" (sdlBeginGPURenderPass cmd targetInfo)
+  sdlSetGPUViewport renderPass (GPUViewport 0 0 (fromIntegral w) (fromIntegral h) 0 1)
+  mapM_ (executePrepared cmd renderPass) prepared
+  sdlEndGPURenderPass renderPass
+  ok <- sdlSubmitGPUCommandBuffer cmd
+  unless ok $ do
+    err <- sdlGetError
+    ioError (userError ("SDL_SubmitGPUCommandBuffer failed: " <> err))
+  mapM_ (releasePrepared window) prepared
+
+uploadPrepared :: GPUCommandBuffer -> GPUCopyPass -> PreparedDraw -> IO ()
+uploadPrepared _ copyPass prepared =
+  case prepared.pdTransferBuffer of
+    Nothing -> pure ()
+    Just transfer ->
+      let source = GPUTransferBufferLocation
+            { gpuTransferLocationBuffer = transfer
+            , gpuTransferLocationOffset = 0
+            }
+          dest = GPUBufferRegion
+            { gpuBufferRegionBuffer = prepared.pdVertexBuffer
+            , gpuBufferRegionOffset = 0
+            , gpuBufferRegionSize = prepared.pdVertexByteSize
+            }
+      in sdlUploadToGPUBuffer copyPass source dest False
+
+executePrepared :: GPUCommandBuffer -> GPURenderPass -> PreparedDraw -> IO ()
+executePrepared cmd renderPass prepared = do
+  sdlBindGPUGraphicsPipeline renderPass prepared.pdPipeline
+  sdlBindGPUVertexBuffers renderPass 0 [GPUBufferBinding prepared.pdVertexBuffer 0]
+  sdlBindGPUFragmentSamplers renderPass 0 prepared.pdSamplers
+  unless (null prepared.pdStorageTextures) $
+    sdlBindGPUFragmentStorageTextures renderPass 0 prepared.pdStorageTextures
+  mapM_ (pushUniformVertex cmd) prepared.pdVertexUniforms
+  mapM_ (pushUniformFragment cmd) prepared.pdFragmentUniforms
+  sdlDrawGPUPrimitives renderPass prepared.pdVertexCount 1 0 0
+  where
+    pushUniformVertex cmd' (UniformBinding slot bytes) =
+      BS.useAsCStringLen bytes $ \(ptr, len) ->
+        sdlPushGPUVertexUniformData cmd' slot (castPtr ptr) (fromIntegral len)
+    pushUniformFragment cmd' (UniformBinding slot bytes) =
+      BS.useAsCStringLen bytes $ \(ptr, len) ->
+        sdlPushGPUFragmentUniformData cmd' slot (castPtr ptr) (fromIntegral len)
+
+releasePrepared :: Window -> PreparedDraw -> IO ()
+releasePrepared window prepared = do
+  when prepared.pdReleaseBuffer $
+    sdlReleaseGPUBuffer window.appGPUDevice prepared.pdVertexBuffer
+  case prepared.pdTransferBuffer of
+    Nothing -> pure ()
+    Just transfer -> sdlReleaseGPUTransferBuffer window.appGPUDevice transfer
+
+extractClear :: [RecordedOp] -> (Maybe Color, [RecordedOp])
+extractClear ops =
+  case ops of
+    (RecordedClear color : rest) ->
+      (Just color, filter (not . isClear) rest)
+    _ -> (Nothing, filter (not . isClear) ops)
+  where
+    isClear op =
+      case op of
+        RecordedClear {} -> True
+        _ -> False
+
+toFColor :: Color -> FColor
+toFColor (Color r g b a) =
+  FColor (realToFrac r) (realToFrac g) (realToFrac b) (realToFrac a)
+
+prepareDraws :: Window -> SDL_GPUTextureFormat -> (Int, Int) -> [RecordedOp] -> IO [PreparedDraw]
+prepareDraws window fmt size ops =
+  fmap concat $
+    forM ops $ \op ->
+      case op of
+        RecordedDraw cmd -> prepareDraw window fmt size cmd
+        RecordedMesh pipeline mesh bindings -> prepareMeshDraw window fmt pipeline mesh bindings
+        RecordedClear {} -> pure []
+
+prepareDraw :: Window -> SDL_GPUTextureFormat -> (Int, Int) -> DrawCmd -> IO [PreparedDraw]
+prepareDraw window fmt size (DrawCmd shape maybeCtx) = do
+  ctx <- resolveShaderContext window maybeCtx
+  resolved <- buildShapeDraws window size shape ctx
+  fmap catMaybes $
+    forM resolved $ \resolvedDraw -> do
+      if null resolvedDraw.rdVertices
+        then pure Nothing
+        else do
+          pipeline <- getPipeline
+            window
+            window.appVertexShader
+            resolvedDraw.rdShaderCtx.ctxShader.shaderHandle
+            spriteLayout
+            resolvedDraw.rdPrimitive
+            fmt
+            True
+          (buffer, transfer, count) <- createVertexBuffer window resolvedDraw.rdVertices
+          samplers <- buildSamplerBindings window resolvedDraw.rdShaderCtx resolvedDraw.rdTexture
+          storage <- buildStorageBindings resolvedDraw.rdShaderCtx
+          pure (Just PreparedDraw
+            { pdPipeline = pipeline
+            , pdPrimitive = resolvedDraw.rdPrimitive
+            , pdVertexBuffer = buffer
+            , pdVertexCount = count
+            , pdVertexByteSize = fromIntegral (count * fromIntegral (sizeOf (undefined :: Vertex)))
+            , pdTransferBuffer = Just transfer
+            , pdReleaseBuffer = True
+            , pdSamplers = samplers
+            , pdStorageTextures = storage
+            , pdVertexUniforms = []
+            , pdFragmentUniforms = resolvedDraw.rdShaderCtx.ctxUniforms
+            })
+
+prepareMeshDraw :: Window -> SDL_GPUTextureFormat -> Pipeline -> Mesh -> [Binding] -> IO [PreparedDraw]
+prepareMeshDraw window fmt pipeline mesh bindings = do
+  when (pipeline.pipelineTargetFormat /= fmt) $
+    ioError (userError "pipeline target format does not match render target format")
+  when (pipeline.pipelineLayout /= mesh.meshLayout) $
+    ioError (userError "mesh layout does not match pipeline layout")
+  resolved <- collectBindings bindings
+  samplers <- buildSamplerBindingsExplicit window resolved.dbSamplers
+  storage <- buildStorageBindingsExplicit resolved.dbStorageTextures
+  pure
+    [ PreparedDraw
+        { pdPipeline = pipeline.pipelineHandle
+        , pdPrimitive = primitiveToSDL pipeline.pipelinePrimitive
+        , pdVertexBuffer = mesh.meshBuffer
+        , pdVertexCount = mesh.meshVertexCount
+        , pdVertexByteSize = mesh.meshVertexCount * pipeline.pipelineLayout.layoutStride
+        , pdTransferBuffer = Nothing
+        , pdReleaseBuffer = mesh.meshReleaseOnDraw
+        , pdSamplers = samplers
+        , pdStorageTextures = storage
+        , pdVertexUniforms = resolved.dbVertexUniforms
+        , pdFragmentUniforms = resolved.dbFragmentUniforms
+        }
+    ]
+
+data ResolvedDraw = ResolvedDraw
+  { rdPrimitive :: SDL_GPUPrimitiveType
+  , rdVertices :: [Vertex]
+  , rdTexture :: GPUTexture
+  , rdShaderCtx :: ShaderContext
+  }
+
+resolveShaderContext :: Window -> Maybe ShaderContext -> IO ShaderContext
+resolveShaderContext window ctx =
+  case ctx of
+    Just value -> pure value
+    Nothing -> do
+      defaults <- mergeUniformBindings window.appDefaultShader []
+      pure ShaderContext
+        { ctxShader = window.appDefaultShader
+        , ctxUniforms = defaults
+        , ctxSamplers = []
+        , ctxStorage = []
+        }
+
+buildShapeDraws :: Window -> (Int, Int) -> DrawShape -> ShaderContext -> IO [ResolvedDraw]
+buildShapeDraws window size shape ctx =
+  case shape of
+    ShapeLine color p1 p2 ->
+      pure [ResolvedDraw sdlGPUPrimitiveTypeLineList (lineVertices size color p1 p2) (window.appWhiteTexture.textureHandle) ctx]
+    ShapeRectOutline color rectShape ->
+      pure [ResolvedDraw sdlGPUPrimitiveTypeLineList (rectOutlineVertices size color rectShape) (window.appWhiteTexture.textureHandle) ctx]
+    ShapeRectFill color rectShape ->
+      pure [ResolvedDraw sdlGPUPrimitiveTypeTriangleList (rectFillVertices size color rectShape) (window.appWhiteTexture.textureHandle) ctx]
+    ShapeSprite tex src dst ->
+      pure [ResolvedDraw sdlGPUPrimitiveTypeTriangleList (spriteVertices size tex src dst) tex.textureHandle ctx]
+    ShapeText textObj x y ->
+      textVertices size textObj x y ctx
+
+lineVertices :: (Int, Int) -> Color -> FPoint -> FPoint -> [Vertex]
+lineVertices size color p1 p2 =
+  [ mkVertex size p1 (Vec2 0 0) color
+  , mkVertex size p2 (Vec2 0 0) color
+  ]
+
+rectOutlineVertices :: (Int, Int) -> Color -> FRect -> [Vertex]
+rectOutlineVertices size color (FRect x y w h) =
+  let p1 = FPoint x y
+      p2 = FPoint (x + w) y
+      p3 = FPoint (x + w) (y + h)
+      p4 = FPoint x (y + h)
+  in [ mkVertex size p1 (Vec2 0 0) color
+     , mkVertex size p2 (Vec2 0 0) color
+     , mkVertex size p2 (Vec2 0 0) color
+     , mkVertex size p3 (Vec2 0 0) color
+     , mkVertex size p3 (Vec2 0 0) color
+     , mkVertex size p4 (Vec2 0 0) color
+     , mkVertex size p4 (Vec2 0 0) color
+     , mkVertex size p1 (Vec2 0 0) color
+     ]
+
+rectFillVertices :: (Int, Int) -> Color -> FRect -> [Vertex]
+rectFillVertices size color (FRect x y w h) =
+  let p1 = FPoint x y
+      p2 = FPoint (x + w) y
+      p3 = FPoint (x + w) (y + h)
+      p4 = FPoint x (y + h)
+      uv1 = Vec2 0 0
+      uv2 = Vec2 1 0
+      uv3 = Vec2 1 1
+      uv4 = Vec2 0 1
+  in [ mkVertex size p1 uv1 color
+     , mkVertex size p2 uv2 color
+     , mkVertex size p4 uv4 color
+     , mkVertex size p2 uv2 color
+     , mkVertex size p3 uv3 color
+     , mkVertex size p4 uv4 color
+     ]
+
+spriteVertices :: (Int, Int) -> Texture -> Maybe FRect -> FRect -> [Vertex]
+spriteVertices size tex src dst =
+  let (FRect dx dy dw dh) = dst
+      (u0, v0, u1, v1) =
+        case src of
+          Nothing -> (0, 0, 1, 1)
+          Just (FRect sx sy sw sh) ->
+            let tw = max 1 tex.textureWidth
+                th = max 1 tex.textureHeight
+                sx' = realToFrac sx :: Float
+                sy' = realToFrac sy :: Float
+                sw' = realToFrac sw :: Float
+                sh' = realToFrac sh :: Float
+                tw' = fromIntegral tw :: Float
+                th' = fromIntegral th :: Float
+            in (sx' / tw', sy' / th', (sx' + sw') / tw', (sy' + sh') / th')
+      p1 = FPoint dx dy
+      p2 = FPoint (dx + dw) dy
+      p3 = FPoint (dx + dw) (dy + dh)
+      p4 = FPoint dx (dy + dh)
+      uv1 = Vec2 u0 v0
+      uv2 = Vec2 u1 v0
+      uv3 = Vec2 u1 v1
+      uv4 = Vec2 u0 v1
+      white = rgba 1 1 1 1
+  in [ mkVertex size p1 uv1 white
+     , mkVertex size p2 uv2 white
+     , mkVertex size p4 uv4 white
+     , mkVertex size p2 uv2 white
+     , mkVertex size p3 uv3 white
+     , mkVertex size p4 uv4 white
+     ]
+
+textVertices :: (Int, Int) -> Text -> Float -> Float -> ShaderContext -> IO [ResolvedDraw]
+textVertices size textObj x y ctx = do
+  void (ttfSetTextPosition textObj (round x) (round y))
+  seqPtr <- ttfGetGPUTextDrawData textObj
+  go seqPtr []
+  where
+    go ptr acc
+      | ptr == nullPtr = pure (reverse acc)
+      | otherwise = do
+          seqInfo <- peek ptr
+          let numVerts = fromIntegral seqInfo.ttfAtlasNumVertices
+          let numIdx = fromIntegral seqInfo.ttfAtlasNumIndices
+          xy <- if seqInfo.ttfAtlasXY == nullPtr then pure [] else peekArray numVerts seqInfo.ttfAtlasXY
+          uv <- if seqInfo.ttfAtlasUV == nullPtr then pure [] else peekArray numVerts seqInfo.ttfAtlasUV
+          idx <- if seqInfo.ttfAtlasIndices == nullPtr then pure [] else peekArray numIdx seqInfo.ttfAtlasIndices
+          let vertices = map (vertexFrom xy uv) idx
+          let resolvedDraw = ResolvedDraw sdlGPUPrimitiveTypeTriangleList vertices seqInfo.ttfAtlasTexture ctx
+          go seqInfo.ttfAtlasNext (resolvedDraw : acc)
+    vertexFrom xy uv i =
+      let idx = fromIntegral i
+          FPoint px py = xy !! idx
+          FPoint u v = uv !! idx
+          uvVec = Vec2 (realToFrac u) (realToFrac v)
+          white = rgba 1 1 1 1
+      in mkVertex size (FPoint px py) uvVec white
+
+mkVertex :: (Int, Int) -> FPoint -> Vec2 -> Color -> Vertex
+mkVertex (w, h) (FPoint x y) (Vec2 u v) (Color r g b a) =
+  let wf = max 1 (fromIntegral w :: Float)
+      hf = max 1 (fromIntegral h :: Float)
+      nx = (realToFrac x / wf) * 2 - 1
+      ny = 1 - (realToFrac y / hf) * 2
+  in Vertex
+      (realToFrac nx)
+      (realToFrac ny)
+      (realToFrac u)
+      (realToFrac v)
+      (realToFrac r)
+      (realToFrac g)
+      (realToFrac b)
+      (realToFrac a)
+
+createVertexBuffer :: Window -> [Vertex] -> IO (GPUBuffer, GPUTransferBuffer, Word32)
+createVertexBuffer window vertices = do
+  let byteSize = length vertices * sizeOf (undefined :: Vertex)
+  buffer <- require "SDL_CreateGPUBuffer"
+    (sdlCreateGPUBuffer window.appGPUDevice
+      GPUBufferCreateInfo
+        { gpuBufferUsage = sdlGPUBufferUsageVertex
+        , gpuBufferSize = fromIntegral byteSize
+        , gpuBufferProps = 0
+        })
+  transfer <- require "SDL_CreateGPUTransferBuffer"
+    (sdlCreateGPUTransferBuffer window.appGPUDevice
+      GPUTransferBufferCreateInfo
+        { gpuTransferUsage = sdlGPUTransferBufferUsageUpload
+        , gpuTransferSize = fromIntegral byteSize
+        , gpuTransferProps = 0
+        })
+  ptr <- require "SDL_MapGPUTransferBuffer" (sdlMapGPUTransferBuffer window.appGPUDevice transfer False)
+  withArrayLen vertices $ \_ src ->
+    copyBytes ptr (castPtr src) byteSize
+  sdlUnmapGPUTransferBuffer window.appGPUDevice transfer
+  pure (buffer, transfer, fromIntegral (length vertices))
+
+createMeshIO :: forall a. Storable a => Window -> VertexLayout -> [a] -> IO Mesh
+createMeshIO window layout vertices = do
+  let byteSize = length vertices * sizeOf (undefined :: a)
+  buffer <- require "SDL_CreateGPUBuffer"
+    (sdlCreateGPUBuffer window.appGPUDevice
+      GPUBufferCreateInfo
+        { gpuBufferUsage = sdlGPUBufferUsageVertex
+        , gpuBufferSize = fromIntegral byteSize
+        , gpuBufferProps = 0
+        })
+  transfer <- require "SDL_CreateGPUTransferBuffer"
+    (sdlCreateGPUTransferBuffer window.appGPUDevice
+      GPUTransferBufferCreateInfo
+        { gpuTransferUsage = sdlGPUTransferBufferUsageUpload
+        , gpuTransferSize = fromIntegral byteSize
+        , gpuTransferProps = 0
+        })
+  ptr <- require "SDL_MapGPUTransferBuffer" (sdlMapGPUTransferBuffer window.appGPUDevice transfer False)
+  withArrayLen vertices $ \_ src ->
+    copyBytes ptr (castPtr src) byteSize
+  sdlUnmapGPUTransferBuffer window.appGPUDevice transfer
+  cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
+  copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
+  let source = GPUTransferBufferLocation
+        { gpuTransferLocationBuffer = transfer
+        , gpuTransferLocationOffset = 0
+        }
+  let dest = GPUBufferRegion
+        { gpuBufferRegionBuffer = buffer
+        , gpuBufferRegionOffset = 0
+        , gpuBufferRegionSize = fromIntegral byteSize
+        }
+  sdlUploadToGPUBuffer copyPass source dest False
+  sdlEndGPUCopyPass copyPass
+  ok <- sdlSubmitGPUCommandBuffer cmd
+  unless ok $ do
+    err <- sdlGetError
+    ioError (userError ("SDL_SubmitGPUCommandBuffer failed: " <> err))
+  sdlReleaseGPUTransferBuffer window.appGPUDevice transfer
+  pure Mesh
+    { meshBuffer = buffer
+    , meshVertexCount = fromIntegral (length vertices)
+    , meshLayout = layout
+    , meshReleaseOnDraw = False
+    }
+
+createTransientMeshIO :: Storable a => Window -> VertexLayout -> [a] -> IO Mesh
+createTransientMeshIO window layout vertices = do
+  mesh <- createMeshIO window layout vertices
+  pure mesh { meshReleaseOnDraw = True }
+
+createMesh :: Storable a => VertexLayout -> [a] -> WindowM Mesh
+createMesh layout vertices =
+  liftWindow (\window -> createMeshIO window layout vertices)
+
+createTransientMesh :: Storable a => VertexLayout -> [a] -> WindowM Mesh
+createTransientMesh layout vertices =
+  liftWindow (\window -> createTransientMeshIO window layout vertices)
+
+destroyMesh :: Mesh -> WindowM ()
+destroyMesh mesh = do
+  window <- ask
+  liftIO (sdlReleaseGPUBuffer window.appGPUDevice mesh.meshBuffer)
+
+buildSamplerBindings :: Window -> ShaderContext -> GPUTexture -> IO [GPUTextureSamplerBinding]
+buildSamplerBindings window ctx baseTexture = do
+  extras <- normalizeBindings "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) ctx.ctxSamplers)
+  let baseSampler = window.appDefaultSampler
+  let baseBinding = GPUTextureSamplerBinding baseTexture (unwrapSampler baseSampler)
+  let extraBindings = map (\(tex, sampler) ->
+        GPUTextureSamplerBinding tex.textureHandle (unwrapSampler (fromMaybe baseSampler sampler))) extras
+  pure (baseBinding : extraBindings)
+  where
+    unwrapSampler (Sampler s) = s
+
+buildSamplerBindingsExplicit :: Window -> [SamplerBindingSpec] -> IO [GPUTextureSamplerBinding]
+buildSamplerBindingsExplicit window specs = do
+  bindings <- normalizeBindings "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) specs)
+  let baseSampler = window.appDefaultSampler
+  pure (map (\(tex, sampler) ->
+    GPUTextureSamplerBinding tex.textureHandle (unwrapSampler (fromMaybe baseSampler sampler))) bindings)
+  where
+    unwrapSampler (Sampler s) = s
+
+buildStorageBindingsExplicit :: [StorageBinding] -> IO [GPUTexture]
+buildStorageBindingsExplicit specs = do
+  storage <- normalizeBindings "storage texture" (map (\(StorageBinding slot tex) -> (slot, tex)) specs)
+  pure (map (\tex -> tex.textureHandle) storage)
+
+buildStorageBindings :: ShaderContext -> IO [GPUTexture]
+buildStorageBindings ctx = do
+  storage <- normalizeBindings "storage texture" (map (\(StorageBinding slot tex) -> (slot, tex)) ctx.ctxStorage)
+  pure (map (\tex -> tex.textureHandle) storage)
+
+getPipeline :: Window -> GPUShader -> GPUShader -> VertexLayout -> SDL_GPUPrimitiveType -> SDL_GPUTextureFormat -> Bool -> IO GPUGraphicsPipeline
+getPipeline window vertexShader fragmentShader layout primitive fmt blendEnabled = do
+  let GPUShader vsPtr = vertexShader
+  let GPUShader fsPtr = fragmentShader
+  let key = PipelineKey (castPtr vsPtr) (castPtr fsPtr) layout primitive fmt blendEnabled
+  cache <- readIORef window.appPipelines
+  case Map.lookup key cache of
+    Just pipeline -> pure pipeline
+    Nothing -> do
+      pipeline <- createGraphicsPipeline window vertexShader fragmentShader layout primitive fmt blendEnabled
+      writeIORef window.appPipelines (Map.insert key pipeline cache)
+      pure pipeline
+
+createGraphicsPipeline :: Window -> GPUShader -> GPUShader -> VertexLayout -> SDL_GPUPrimitiveType -> SDL_GPUTextureFormat -> Bool -> IO GPUGraphicsPipeline
+createGraphicsPipeline window vertexShader fragmentShader layout primitive fmt blendEnabled =
+  withArray [vertexBufferDesc] $ \bufferPtr ->
+    withArray vertexAttributes $ \attrPtr ->
+      withArray [colorTargetDesc] $ \colorPtr -> do
+        let vertexInput = GPUVertexInputState
+              { gpuVertexInputBufferDescriptions = bufferPtr
+              , gpuVertexInputNumBuffers = 1
+              , gpuVertexInputAttributes = attrPtr
+              , gpuVertexInputNumAttributes = fromIntegral (length vertexAttributes)
+              }
+        let targetInfo = GPUGraphicsPipelineTargetInfo
+              { gpuPipelineColorTargetDescriptions = colorPtr
+              , gpuPipelineNumColorTargets = 1
+              , gpuPipelineDepthStencilFormat = 0
+              , gpuPipelineHasDepthStencil = 0
+              , gpuPipelinePadding1 = 0
+              , gpuPipelinePadding2 = 0
+              , gpuPipelinePadding3 = 0
+              }
+        let GPUShader vs = vertexShader
+        let GPUShader fs = fragmentShader
+        let createInfo = GPUGraphicsPipelineCreateInfo
+              { gpuPipelineVertexShader = vs
+              , gpuPipelineFragmentShader = fs
+              , gpuPipelineVertexInputState = vertexInput
+              , gpuPipelinePrimitiveType = primitive
+              , gpuPipelineRasterizerState = rasterizerState
+              , gpuPipelineMultisampleState = multisampleState
+              , gpuPipelineDepthStencilState = depthStencilState
+              , gpuPipelineTargetInfo = targetInfo
+              , gpuPipelineProps = 0
+              }
+        require "SDL_CreateGPUGraphicsPipeline" (sdlCreateGPUGraphicsPipeline window.appGPUDevice createInfo)
+  where
+    vertexBufferDesc =
+      GPUVertexBufferDescription
+        { gpuVertexBufferSlot = 0
+        , gpuVertexBufferPitch = layout.layoutStride
+        , gpuVertexBufferInputRate = sdlGPUVertexInputRateVertex
+        , gpuVertexBufferInstanceStepRate = 0
+        }
+    vertexAttributes =
+      map toAttr layout.layoutAttrs
+    toAttr attr =
+      GPUVertexAttribute
+        (attr.attrLocation)
+        0
+        (vertexFormatToSDL attr.attrFormat)
+        (attr.attrOffset)
+    vertexFormatToSDL fmt' =
+      case fmt' of
+        VertexFloat2 -> sdlGPUVertexElementFormatFloat2
+        VertexFloat4 -> sdlGPUVertexElementFormatFloat4
+    blendState =
+      GPUColorTargetBlendState
+        { gpuBlendSrcColor = sdlGPUBlendFactorSrcAlpha
+        , gpuBlendDstColor = sdlGPUBlendFactorOneMinusSrcAlpha
+        , gpuBlendColorOp = sdlGPUBlendOpAdd
+        , gpuBlendSrcAlpha = sdlGPUBlendFactorOne
+        , gpuBlendDstAlpha = sdlGPUBlendFactorOneMinusSrcAlpha
+        , gpuBlendAlphaOp = sdlGPUBlendOpAdd
+        , gpuBlendColorWriteMask = sdlGPUColorComponentRGBA
+        , gpuBlendEnable = if blendEnabled then 1 else 0
+        , gpuBlendEnableColorWriteMask = if blendEnabled then 1 else 0
+        , gpuBlendPadding1 = 0
+        , gpuBlendPadding2 = 0
+        }
+    colorTargetDesc =
+      GPUColorTargetDescription
+        { gpuColorTargetFormat = fmt
+        , gpuColorTargetBlend = blendState
+        }
+    rasterizerState =
+      GPURasterizerState
+        { gpuRasterizerFillMode = sdlGPUFillModeFill
+        , gpuRasterizerCullMode = sdlGPUCullModeNone
+        , gpuRasterizerFrontFace = sdlGPUFrontFaceCounterClockwise
+        , gpuRasterizerDepthBiasConstantFactor = 0
+        , gpuRasterizerDepthBiasClamp = 0
+        , gpuRasterizerDepthBiasSlopeFactor = 0
+        , gpuRasterizerEnableDepthBias = 0
+        , gpuRasterizerEnableDepthClip = 1
+        , gpuRasterizerPadding1 = 0
+        , gpuRasterizerPadding2 = 0
+        }
+    multisampleState =
+      GPUMultisampleState
+        { gpuMultisampleCount = sdlGPUSampleCount1
+        , gpuMultisampleMask = maxBound
+        , gpuMultisampleEnableMask = 0
+        , gpuMultisampleEnableAlphaToCoverage = 0
+        , gpuMultisamplePadding2 = 0
+        , gpuMultisamplePadding3 = 0
+        }
+    stencilState =
+      GPUStencilOpState
+        { gpuStencilFailOp = sdlGPUStencilOpKeep
+        , gpuStencilPassOp = sdlGPUStencilOpKeep
+        , gpuStencilDepthFailOp = sdlGPUStencilOpKeep
+        , gpuStencilCompareOp = sdlGPUCompareOpInvalid
+        }
+    depthStencilState =
+      GPUDepthStencilState
+        { gpuDepthCompareOp = sdlGPUCompareOpInvalid
+        , gpuDepthBackStencilState = stencilState
+        , gpuDepthFrontStencilState = stencilState
+        , gpuDepthCompareMask = 0
+        , gpuDepthWriteMask = 0
+        , gpuDepthEnableDepthTest = 0
+        , gpuDepthEnableDepthWrite = 0
+        , gpuDepthEnableStencilTest = 0
+        , gpuDepthPadding1 = 0
+        , gpuDepthPadding2 = 0
+        , gpuDepthPadding3 = 0
+        }
+
+primitiveToSDL :: Primitive -> SDL_GPUPrimitiveType
+primitiveToSDL prim =
+  case prim of
+    PrimTriangles -> sdlGPUPrimitiveTypeTriangleList
+    PrimLines -> sdlGPUPrimitiveTypeLineList
+
+defaultGraphics :: WindowM GraphicsDesc
+defaultGraphics = do
+  window <- ask
+  let vertex = VertexShader window.appVertexShader window.appGPUDevice
+  pure GraphicsDesc
+    { gfxVertex = vertex
+    , gfxFragment = window.appDefaultShader
+    , gfxLayout = spriteLayout
+    , gfxPrimitive = PrimTriangles
+    , gfxTarget = TargetSwapchain
+    , gfxBlend = BlendAlpha
+    }
+
+graphicsPipeline :: GraphicsDesc -> WindowM Pipeline
+graphicsPipeline desc = do
+  window <- ask
+  let fmt =
+        case desc.gfxTarget of
+          TargetSwapchain -> window.appSwapchainFormat
+          TargetFormat value -> value
+  let blendEnabled =
+        case desc.gfxBlend of
+          BlendAlpha -> True
+          BlendNone -> False
+  createPipeline desc.gfxVertex desc.gfxFragment desc.gfxLayout desc.gfxPrimitive fmt blendEnabled
+
+createPipeline :: VertexShader -> FragmentShader -> VertexLayout -> Primitive -> SDL_GPUTextureFormat -> Bool -> WindowM Pipeline
+createPipeline vertexShader fragmentShader layout prim fmt blendEnabled = do
+  window <- ask
+  pipelineHandle <- liftIO $
+    createGraphicsPipeline window
+      vertexShader.vertexShaderHandle
+      fragmentShader.shaderHandle
+      layout
+      (primitiveToSDL prim)
+      fmt
+      blendEnabled
+  pure Pipeline
+    { pipelineHandle = pipelineHandle
+    , pipelineVertex = vertexShader.vertexShaderHandle
+    , pipelineFragment = fragmentShader.shaderHandle
+    , pipelineLayout = layout
+    , pipelinePrimitive = prim
+    , pipelineTargetFormat = fmt
+    , pipelineBlend = blendEnabled
+    }
+
+destroyPipeline :: Pipeline -> WindowM ()
+destroyPipeline pipeline = do
+  window <- ask
+  liftIO (sdlReleaseGPUGraphicsPipeline window.appGPUDevice pipeline.pipelineHandle)
+
+swapchainFormat :: WindowM SDL_GPUTextureFormat
+swapchainFormat = do
+  window <- ask
+  pure window.appSwapchainFormat
+
+spriteLayout :: VertexLayout
+spriteLayout =
+  let stride = fromIntegral (sizeOf (undefined :: Vertex))
+      posOffset = 0
+      uvOffset = fromIntegral (2 * sizeOf (undefined :: CFloat))
+      colorOffset = fromIntegral (4 * sizeOf (undefined :: CFloat))
+  in VertexLayout
+      { layoutStride = stride
+      , layoutAttrs =
+          [ VertexAttr 0 VertexFloat2 posOffset
+          , VertexAttr 1 VertexFloat2 uvOffset
+          , VertexAttr 2 VertexFloat4 colorOffset
+          ]
+      }
+
+spritePipeline :: WindowM Pipeline
+spritePipeline = defaultGraphics >>= graphicsPipeline
+
+spriteBindings :: Texture -> [Binding]
+spriteBindings tex = [BindFragmentSampler 0 tex Nothing]
+
+spriteMesh :: (Int, Int) -> Texture -> Maybe FRect -> FRect -> WindowM Mesh
+spriteMesh size tex src dst =
+  createMesh spriteLayout (spriteVertices size tex src dst)
+
+spriteMeshTransient :: (Int, Int) -> Texture -> Maybe FRect -> FRect -> WindowM Mesh
+spriteMeshTransient size tex src dst =
+  liftWindow (\window -> createTransientMeshIO window spriteLayout (spriteVertices size tex src dst))
+
 -- WindowM wrappers
 
 loop :: a -> (Frame -> a -> Loop (LoopControl a)) -> WindowM (LoopExit a)
@@ -1651,10 +3211,12 @@ loop initialState onFrame = do
   initialInput <- liftIO readInputState
   let go previous frameId prevInput state = do
         liftIO sdlPumpEvents
+        liftIO (resetRecording window.appFrameContext)
         quitRequested <- liftIO pollQuit
         now <- liftIO sdlGetTicks
         currentInput <- liftIO readInputState
         (winW, winH) <- liftIO (sdlGetWindowSize (window.appWindow))
+        liftIO (writeIORef window.appWindowSize (winW, winH))
         let dt = fromIntegral (now - previous) / 1000
             t = fromIntegral (now - start) / 1000
             nextFrame = frameId + 1
@@ -1669,6 +3231,7 @@ loop initialState onFrame = do
               }
         autoUpdateBlendPools dt
         autoHotReload dt
+        processMainAssets
         control <- runLoop (onFrame frame state)
         liftIO (pruneTextCache window)
         liftIO (presentIO window)
@@ -1731,15 +3294,65 @@ fillRect color rectShape = withWindowLoop (\window -> fillRectIO window color re
 drawTexture :: Texture -> Maybe FRect -> FRect -> Loop ()
 drawTexture texture src dst = withWindowLoop (\window -> drawTextureIO window texture src dst)
 
+textureUsageFlags :: [TextureUsage] -> SDL_GPUTextureUsageFlags
+textureUsageFlags usages =
+  let hasRead = TextureStorageRead `elem` usages
+      hasWrite = TextureStorageWrite `elem` usages
+      base0 = 0
+      base1 = if TextureSampled `elem` usages then base0 .|. sdlGPUTextureUsageSampler else base0
+      base2 = if TextureColorTarget `elem` usages then base1 .|. sdlGPUTextureUsageColorTarget else base1
+      storage
+        | hasRead && hasWrite = sdlGPUTextureUsageComputeStorageSimultaneousReadWrite
+        | otherwise =
+            (if hasRead then sdlGPUTextureUsageComputeStorageRead else 0)
+              .|. (if hasWrite then sdlGPUTextureUsageComputeStorageWrite else 0)
+  in base2 .|. storage
+
+createTexture2D :: TextureDesc -> WindowM Texture
+createTexture2D desc = do
+  window <- ask
+  let info =
+        GPUTextureCreateInfo
+          { gpuTextureType = sdlGPUTextureType2D
+          , gpuTextureFormat = desc.texFormat
+          , gpuTextureUsage = textureUsageFlags desc.texUsage
+          , gpuTextureWidth = fromIntegral desc.texWidth
+          , gpuTextureHeight = fromIntegral desc.texHeight
+          , gpuTextureLayerCountOrDepth = 1
+          , gpuTextureNumLevels = 1
+          , gpuTextureSampleCount = sdlGPUSampleCount1
+          , gpuTextureProps = 0
+          }
+  tex <- liftIO (require "SDL_CreateGPUTexture" (sdlCreateGPUTexture window.appGPUDevice info))
+  pure Texture
+    { textureHandle = tex
+    , textureDevice = window.appGPUDevice
+    , textureWidth = desc.texWidth
+    , textureHeight = desc.texHeight
+    }
+
+drawMesh :: Pipeline -> Mesh -> [Binding] -> Loop ()
+drawMesh pipeline mesh bindings =
+  withWindowLoop (\window -> recordMesh window pipeline mesh bindings)
+
+instance Draw AsMesh Mesh where
+  draw (AsMesh pipeline bindings) mesh = drawMesh pipeline mesh bindings
+
 createRenderTarget :: Int -> Int -> WindowM RenderTarget
 createRenderTarget width height = do
   window <- ask
-  tex <- liftIO $
-    require
-      "SDL_CreateTexture"
-      (sdlCreateTexture (window.appRenderer) sdlPixelFormatRGBA8888 sdlTextureAccessTarget width height)
+  tex <- liftIO (createRenderTargetTexture window width height)
   liftIO (registerRenderTarget window tex)
   pure (RenderTarget tex)
+
+withRenderTarget :: Int -> Int -> (RenderTarget -> WindowM a) -> WindowM a
+withRenderTarget width height action = do
+  window <- ask
+  liftIO $
+    bracket
+      (runWindowM window (createRenderTarget width height))
+      (\target -> runWindowM window (destroyTarget target))
+      (\target -> runWindowM window (action target))
 
 destroyTarget :: RenderTarget -> WindowM ()
 destroyTarget (RenderTarget tex) = do
@@ -1750,15 +3363,15 @@ destroyTarget (RenderTarget tex) = do
     else pure ()
 
 render :: RenderTarget -> Loop () -> Loop ()
-render (RenderTarget tex) (Loop action) =
+render target (Loop action) =
   Loop $ do
     window <- ask
-    prev <- liftIO (getRenderTargetIO window)
-    liftIO $
-      bracket_
-        (setRenderTargetIO window (Just tex))
-        (setRenderTargetIO window prev)
-        (runWindowM window action)
+    let runWithContext ctx = do
+          result <- runWindowM window action
+          ops <- liftIO (drainRecording ctx)
+          liftIO (flushTarget window target ops)
+          pure result
+    liftIO (withRecording window target runWithContext)
 
 drawRender :: RenderTarget -> Maybe FRect -> FRect -> Loop ()
 drawRender (RenderTarget tex) src dst = do
@@ -1785,8 +3398,8 @@ pass passTarget (PassM action) =
 passClear :: Color -> PassM ()
 passClear color = PassM (tell (singleton (OpClear color)))
 
-passDraw :: Drawable a => a -> PassM ()
-passDraw item = PassM (tell (singleton (OpDraw (DrawItem item))))
+passDraw :: Draw ctx a => ctx -> a -> PassM ()
+passDraw ctx item = PassM (tell (singleton (OpDraw (DrawItem ctx item))))
 
 passBlit :: RenderTarget -> Maybe FRect -> FRect -> PassM ()
 passBlit target src dst = PassM (tell (singleton (OpBlit target src dst)))
@@ -1813,7 +3426,7 @@ runPlan (RenderPlan passes) = mapM_ runPass passes
     runOp op =
       case op of
         OpClear color -> clear color
-        OpDraw item -> draw item
+        OpDraw item -> drawItem item
         OpBlit target src dst -> drawRender target src dst
         OpShader shader uniforms opsList ->
           withShaderBindings shader uniforms (runOps opsList)
@@ -1866,7 +3479,7 @@ drawTextCached font str x y =
           let cache' = Map.insert key (CachedText t frameId) (st.rsTextCache)
           in (st { rsTextCache = cache' }, ())
         pure t
-    liftIO (void $ ttfDrawRendererText textObj x y)
+    liftIO (recordDraw window (ShapeText textObj x y))
 
 playMusic :: Audio -> Int -> WindowM Bool
 playMusic audio loops = do
@@ -2181,10 +3794,13 @@ stopTrack track = Loop (liftIO (mixStopTrack track 0))
 -- Shaders
 
 data Shader = Shader
-  { shaderState :: GPURenderState
-  , shaderHandle :: GPUShader
+  { shaderHandle :: GPUShader
   , shaderDevice :: GPUDevice
-  , shaderStateCache :: IORef (Map.Map BindingKey GPURenderState)
+  , shaderSamplerCount :: Word32
+  , shaderStorageTextureCount :: Word32
+  , shaderStorageBufferCount :: Word32
+  , shaderUniformBufferCount :: Word32
+  , shaderUniformDefaults :: IORef (Map.Map Word32 ByteString)
   , shaderBindingTable :: IORef ShaderBindings
   }
 
@@ -2285,6 +3901,26 @@ createShaderFromSpirvIO window spirv =
 
 createShaderFromSpirvWithIO :: Window -> ByteString -> Word32 -> Word32 -> Word32 -> Word32 -> IO Shader
 createShaderFromSpirvWithIO window spirv numSamplers numStorageTextures numStorageBuffers numUniformBuffers =
+  createShaderFromSpirvWithDevice window.appGPUDevice spirv numSamplers numStorageTextures numStorageBuffers numUniformBuffers
+
+createShaderFromSpirvWithDevice :: GPUDevice -> ByteString -> Word32 -> Word32 -> Word32 -> Word32 -> IO Shader
+createShaderFromSpirvWithDevice device spirv numSamplers numStorageTextures numStorageBuffers numUniformBuffers = do
+  shader <- require "SDL_CreateGPUShader" (createRawShader device spirv sdlGPUShaderStageFragment numSamplers numStorageTextures numStorageBuffers numUniformBuffers)
+  defaults <- newIORef Map.empty
+  bindingsRef <- newIORef emptyShaderBindings
+  pure Shader
+    { shaderHandle = shader
+    , shaderDevice = device
+    , shaderSamplerCount = numSamplers
+    , shaderStorageTextureCount = numStorageTextures
+    , shaderStorageBufferCount = numStorageBuffers
+    , shaderUniformBufferCount = numUniformBuffers
+    , shaderUniformDefaults = defaults
+    , shaderBindingTable = bindingsRef
+    }
+
+createRawShader :: GPUDevice -> ByteString -> SDL_GPUShaderStage -> Word32 -> Word32 -> Word32 -> Word32 -> IO (Maybe GPUShader)
+createRawShader device spirv stage numSamplers numStorageTextures numStorageBuffers numUniformBuffers =
   BS.useAsCStringLen spirv $ \(ptr, len) ->
     withCString "main" $ \entry -> do
       let createInfo = GPUShaderCreateInfo
@@ -2292,92 +3928,198 @@ createShaderFromSpirvWithIO window spirv numSamplers numStorageTextures numStora
             , gpuShaderCode = castPtr ptr
             , gpuShaderEntryPoint = entry
             , gpuShaderFormat = sdlGPUShaderFormatSpirv
-            , gpuShaderStage = sdlGPUShaderStageFragment
+            , gpuShaderStage = stage
             , gpuShaderNumSamplers = numSamplers
             , gpuShaderNumStorageTextures = numStorageTextures
             , gpuShaderNumStorageBuffers = numStorageBuffers
             , gpuShaderNumUniformBuffers = numUniformBuffers
             , gpuShaderProps = 0
             }
-      shader <- require "SDL_CreateGPUShader" (sdlCreateGPUShader (window.appGPUDevice) createInfo)
-      let GPUShader shaderPtr = shader
-      let stateInfo = GPURenderStateCreateInfo
-            { gpuRenderFragmentShader = shaderPtr
-            , gpuRenderNumSamplerBindings = 0
-            , gpuRenderSamplerBindings = nullPtr
-            , gpuRenderNumStorageTextures = 0
-            , gpuRenderStorageTextures = nullPtr
-            , gpuRenderNumStorageBuffers = 0
-            , gpuRenderStorageBuffers = nullPtr
-            , gpuRenderProps = 0
-            }
-      stateResult <- sdlCreateGPURenderState (window.appRenderer) stateInfo
-      case stateResult of
-        Nothing -> do
-          sdlReleaseGPUShader (window.appGPUDevice) shader
-          err <- sdlGetError
-          ioError (userError ("SDL_CreateGPURenderState failed: " <> err))
-        Just gpuState -> do
-          cacheRef <- newIORef Map.empty
-          bindingsRef <- newIORef emptyShaderBindings
-          pure Shader
-            { shaderState = gpuState
-            , shaderHandle = shader
-            , shaderDevice = window.appGPUDevice
-            , shaderStateCache = cacheRef
-            , shaderBindingTable = bindingsRef
-            }
+      sdlCreateGPUShader device createInfo
+
+createVertexShaderIO :: Window -> ByteString -> ShaderCounts -> IO VertexShader
+createVertexShaderIO window spirv counts = do
+  let device = window.appGPUDevice
+  shader <- require "SDL_CreateGPUShader (vertex)"
+    (createRawShader device spirv sdlGPUShaderStageVertex
+      counts.shaderSamplers
+      counts.shaderStorageTextures
+      counts.shaderStorageBuffers
+      counts.shaderUniformBuffers)
+  pure VertexShader
+    { vertexShaderHandle = shader
+    , vertexShaderDevice = device
+    }
+
+createVertexShader :: ByteString -> ShaderCounts -> WindowM VertexShader
+createVertexShader spirv counts =
+  liftWindow (\window -> createVertexShaderIO window spirv counts)
+
+destroyVertexShader :: VertexShader -> WindowM ()
+destroyVertexShader shader =
+  liftWindow (\_ -> sdlReleaseGPUShader shader.vertexShaderDevice shader.vertexShaderHandle)
+
+createFragmentShader :: ByteString -> ShaderCounts -> WindowM FragmentShader
+createFragmentShader spirv counts =
+  createShaderFromSpirvWith spirv counts.shaderSamplers counts.shaderStorageTextures counts.shaderStorageBuffers counts.shaderUniformBuffers
+
+destroyFragmentShader :: FragmentShader -> WindowM ()
+destroyFragmentShader = destroyShader
+
+createComputePipelineIO :: Window -> ComputeDesc -> IO ComputePipeline
+createComputePipelineIO window desc = do
+  let device = window.appGPUDevice
+  BS.useAsCStringLen desc.computeShaderCode $ \(ptr, len) ->
+    withCString "main" $ \entry -> do
+      let (threadsX, threadsY, threadsZ) = desc.computeThreads
+      let createInfo =
+            GPUComputePipelineCreateInfo
+              { gpuComputeCodeSize = fromIntegral len
+              , gpuComputeCode = castPtr ptr
+              , gpuComputeEntryPoint = entry
+              , gpuComputeFormat = sdlGPUShaderFormatSpirv
+              , gpuComputeNumSamplers = desc.computeSamplers
+              , gpuComputeNumReadonlyStorageTextures = desc.computeReadonlyStorageTextures
+              , gpuComputeNumReadonlyStorageBuffers = desc.computeReadonlyStorageBuffers
+              , gpuComputeNumReadwriteStorageTextures = desc.computeReadwriteStorageTextures
+              , gpuComputeNumReadwriteStorageBuffers = desc.computeReadwriteStorageBuffers
+              , gpuComputeNumUniformBuffers = desc.computeUniformBuffers
+              , gpuComputeThreadCountX = threadsX
+              , gpuComputeThreadCountY = threadsY
+              , gpuComputeThreadCountZ = threadsZ
+              , gpuComputeProps = 0
+              }
+      pipeline <- require "SDL_CreateGPUComputePipeline" (sdlCreateGPUComputePipeline device createInfo)
+      pure ComputePipeline
+        { computeHandle = pipeline
+        , computeDevice = device
+        }
+
+createComputePipeline :: ComputeDesc -> WindowM ComputePipeline
+createComputePipeline desc =
+  liftWindow (\window -> createComputePipelineIO window desc)
+
+defaultCompute :: ComputeDesc
+defaultCompute =
+  ComputeDesc
+    { computeShaderCode = mempty
+    , computeSamplers = 0
+    , computeReadonlyStorageTextures = 0
+    , computeReadonlyStorageBuffers = 0
+    , computeReadwriteStorageTextures = 0
+    , computeReadwriteStorageBuffers = 0
+    , computeUniformBuffers = 0
+    , computeThreads = (1, 1, 1)
+    }
+
+computePipeline :: ComputeDesc -> WindowM ComputePipeline
+computePipeline = createComputePipeline
+
+destroyComputePipeline :: ComputePipeline -> WindowM ()
+destroyComputePipeline pipeline =
+  liftWindow (\_ -> sdlReleaseGPUComputePipeline pipeline.computeDevice pipeline.computeHandle)
+
+dispatchCompute :: ComputePipeline -> [ComputeBinding] -> (Word32, Word32, Word32) -> WindowM ()
+dispatchCompute pipeline bindings (groupX, groupY, groupZ) = do
+  window <- ask
+  resolved <- liftIO (collectComputeBindings bindings)
+  let rwBindings =
+        map (\tex ->
+          GPUStorageTextureReadWriteBinding
+            { gpuStorageTexture = tex.textureHandle
+            , gpuStorageMipLevel = 0
+            , gpuStorageLayer = 0
+            , gpuStorageCycle = 0
+            , gpuStoragePadding1 = 0
+            , gpuStoragePadding2 = 0
+            , gpuStoragePadding3 = 0
+            }) resolved.cbReadWriteTextures
+  cmd <- liftIO (require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice))
+  computePass <- liftIO (require "SDL_BeginGPUComputePass" (sdlBeginGPUComputePass cmd rwBindings []))
+  liftIO (sdlBindGPUComputePipeline computePass pipeline.computeHandle)
+  samplers <- liftIO (buildSamplerBindingsExplicit window resolved.cbSamplers)
+  liftIO (sdlBindGPUComputeSamplers computePass 0 samplers)
+  let readOnlyTextures = map (\tex -> tex.textureHandle) resolved.cbReadOnlyTextures
+  liftIO (sdlBindGPUComputeStorageTextures computePass 0 readOnlyTextures)
+  liftIO $ forM_ resolved.cbUniforms $ \(UniformBinding slot bytes) ->
+    BS.useAsCStringLen bytes $ \(ptr, len) ->
+      sdlPushGPUComputeUniformData cmd slot (castPtr ptr) (fromIntegral len)
+  liftIO (sdlDispatchGPUCompute computePass groupX groupY groupZ)
+  liftIO (sdlEndGPUComputePass computePass)
+  ok <- liftIO (sdlSubmitGPUCommandBuffer cmd)
+  unless ok $ do
+    err <- liftIO sdlGetError
+    liftIO (ioError (userError ("SDL_SubmitGPUCommandBuffer failed: " <> err)))
 
 destroyShaderIO :: Shader -> IO ()
-destroyShaderIO shader = do
-  cached <- readIORef shader.shaderStateCache
-  mapM_ sdlDestroyGPURenderState (Map.elems cached)
-  sdlDestroyGPURenderState (shader.shaderState)
+destroyShaderIO shader =
   sdlReleaseGPUShader (shader.shaderDevice) (shader.shaderHandle)
 
 withShaderIO :: Window -> Shader -> IO a -> IO a
 withShaderIO window shader action = do
-  ok <- sdlSetGPURenderState (window.appRenderer) (Just (shader.shaderState))
-  unless ok $ do
-    err <- sdlGetError
-    ioError (userError ("SDL_SetGPURenderState failed: " <> err))
-  action `finally` void (sdlSetGPURenderState (window.appRenderer) Nothing)
+  defaults <- readIORef shader.shaderUniformDefaults
+  let uniforms = map (uncurry UniformBinding) (Map.toList defaults)
+  let ctx = ShaderContext shader uniforms [] []
+  withShaderContext window ctx action
 
 setShaderUniformIO :: Storable a => Shader -> Word32 -> a -> IO ()
 setShaderUniformIO shader slot value =
-  with value $ \ptr -> do
-    let sizeBytes = fromIntegral (sizeOf value)
-    ok <- sdlSetGPURenderStateFragmentUniforms (shader.shaderState) slot (castPtr ptr) sizeBytes
-    unless ok $ do
-      err <- sdlGetError
-      ioError (userError ("SDL_SetGPURenderStateFragmentUniforms failed: " <> err))
+  toBytes value >>= setShaderUniformBytesIO shader slot
 
 setShaderUniformBytesIO :: Shader -> Word32 -> ByteString -> IO ()
 setShaderUniformBytesIO shader slot bytes =
-  BS.useAsCStringLen bytes $ \(ptr, len) -> do
-    ok <- sdlSetGPURenderStateFragmentUniforms (shader.shaderState) slot (castPtr ptr) (fromIntegral len)
-    unless ok $ do
-      err <- sdlGetError
-      ioError (userError ("SDL_SetGPURenderStateFragmentUniforms failed: " <> err))
-
-setShaderUniformBytesIOFromState :: GPURenderState -> Word32 -> ByteString -> IO ()
-setShaderUniformBytesIOFromState state slot bytes =
-  BS.useAsCStringLen bytes $ \(ptr, len) -> do
-    ok <- sdlSetGPURenderStateFragmentUniforms state slot (castPtr ptr) (fromIntegral len)
-    unless ok $ do
-      err <- sdlGetError
-      ioError (userError ("SDL_SetGPURenderStateFragmentUniforms failed: " <> err))
-
-shaderUniformKeyState :: GPURenderState -> Word32 -> UniformKey
-shaderUniformKeyState state slot =
-  case state of
-    GPURenderState ptr -> (castPtr ptr, slot)
+  modifyIORef' shader.shaderUniformDefaults (Map.insert slot bytes)
 
 
 toBytes :: Storable a => a -> IO ByteString
 toBytes value =
   BSI.create (sizeOf value) $ \ptr ->
     poke (castPtr ptr) value
+
+bindingValueBytes :: BindingValue -> IO ByteString
+bindingValueBytes value =
+  case value of
+    BindingValue v -> toBytes v
+    BindingBytes bytes -> pure bytes
+
+vUniform :: Storable a => Word32 -> a -> Binding
+vUniform slot value = BindVertexUniform slot (BindingValue value)
+
+vUniformBytes :: Word32 -> ByteString -> Binding
+vUniformBytes slot bytes = BindVertexUniform slot (BindingBytes bytes)
+
+fUniform :: Storable a => Word32 -> a -> Binding
+fUniform slot value = BindFragmentUniform slot (BindingValue value)
+
+fUniformBytes :: Word32 -> ByteString -> Binding
+fUniformBytes slot bytes = BindFragmentUniform slot (BindingBytes bytes)
+
+fSampler :: Word32 -> Texture -> Binding
+fSampler slot tex = BindFragmentSampler slot tex Nothing
+
+fSamplerWith :: Word32 -> Texture -> Sampler -> Binding
+fSamplerWith slot tex sampler = BindFragmentSampler slot tex (Just sampler)
+
+fStorageTexture :: Word32 -> Texture -> Binding
+fStorageTexture slot tex = BindFragmentStorageTexture slot tex
+
+computeUniform :: Storable a => Word32 -> a -> ComputeBinding
+computeUniform slot value = ComputeUniform slot (BindingValue value)
+
+computeUniformBytes :: Word32 -> ByteString -> ComputeBinding
+computeUniformBytes slot bytes = ComputeUniform slot (BindingBytes bytes)
+
+computeSampler :: Word32 -> Texture -> ComputeBinding
+computeSampler slot tex = ComputeSampler slot tex Nothing
+
+computeSamplerWith :: Word32 -> Texture -> Sampler -> ComputeBinding
+computeSamplerWith slot tex sampler = ComputeSampler slot tex (Just sampler)
+
+computeStorageTexture :: Word32 -> Texture -> ComputeBinding
+computeStorageTexture slot tex = ComputeStorageTexture slot tex
+
+computeStorageTextureRW :: Word32 -> Texture -> ComputeBinding
+computeStorageTextureRW slot tex = ComputeStorageTextureRW slot tex
 
 collectShaderBindings :: [ShaderUniform] -> IO ([UniformBinding], [SamplerBindingSpec], [StorageBinding])
 collectShaderBindings = foldM step ([], [], [])
@@ -2423,30 +4165,109 @@ collectStageBindings = foldM step ([], [], [])
           let (uniforms, samplers, storage) = acc
           pure (uniforms, samplers, StorageBinding slot tex : storage)
 
+collectBindings :: [Binding] -> IO DrawBindings
+collectBindings bindings = do
+  (vUniforms, fUniforms, samplers, storage) <- foldM step ([], [], [], []) bindings
+  vUniforms' <- normalizeUniforms "vertex uniform" vUniforms
+  fUniforms' <- normalizeUniforms "fragment uniform" fUniforms
+  samplerValues <- normalizeBindings "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) samplers)
+  storageValues <- normalizeBindings "storage texture" (map (\(StorageBinding slot tex) -> (slot, tex)) storage)
+  pure DrawBindings
+    { dbVertexUniforms = vUniforms'
+    , dbFragmentUniforms = fUniforms'
+    , dbSamplers = zipWith (\slot (tex, sampler) -> SamplerBindingSpec slot tex sampler) [0..] samplerValues
+    , dbStorageTextures = zipWith StorageBinding [0..] storageValues
+    }
+  where
+    step (vAcc, fAcc, sAcc, stAcc) binding =
+      case binding of
+        BindVertexUniform slot value -> do
+          bytes <- bindingValueBytes value
+          pure (UniformBinding slot bytes : vAcc, fAcc, sAcc, stAcc)
+        BindFragmentUniform slot value -> do
+          bytes <- bindingValueBytes value
+          pure (vAcc, UniformBinding slot bytes : fAcc, sAcc, stAcc)
+        BindFragmentSampler slot tex sampler ->
+          pure (vAcc, fAcc, SamplerBindingSpec slot tex sampler : sAcc, stAcc)
+        BindFragmentStorageTexture slot tex ->
+          pure (vAcc, fAcc, sAcc, StorageBinding slot tex : stAcc)
+
+collectComputeBindings :: [ComputeBinding] -> IO ComputeBindings
+collectComputeBindings bindings = do
+  (uniforms, samplers, readOnly, readWrite) <- foldM step ([], [], [], []) bindings
+  uniforms' <- normalizeUniforms "compute uniform" uniforms
+  samplerValues <- normalizeBindings "compute sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) samplers)
+  readOnlyValues <- normalizeBindings "compute storage texture" (map (\(slot, tex) -> (slot, tex)) readOnly)
+  readWriteValues <- normalizeBindings "compute storage texture (rw)" (map (\(slot, tex) -> (slot, tex)) readWrite)
+  pure ComputeBindings
+    { cbUniforms = uniforms'
+    , cbSamplers = zipWith (\slot (tex, sampler) -> SamplerBindingSpec slot tex sampler) [0..] samplerValues
+    , cbReadOnlyTextures = readOnlyValues
+    , cbReadWriteTextures = readWriteValues
+    }
+  where
+    step (uAcc, sAcc, roAcc, rwAcc) binding =
+      case binding of
+        ComputeUniform slot value -> do
+          bytes <- bindingValueBytes value
+          pure (UniformBinding slot bytes : uAcc, sAcc, roAcc, rwAcc)
+        ComputeSampler slot tex sampler ->
+          pure (uAcc, SamplerBindingSpec slot tex sampler : sAcc, roAcc, rwAcc)
+        ComputeStorageTexture slot tex ->
+          pure (uAcc, sAcc, (slot, tex) : roAcc, rwAcc)
+        ComputeStorageTextureRW slot tex ->
+          pure (uAcc, sAcc, roAcc, (slot, tex) : rwAcc)
+
+mergeUniformBindings :: Shader -> [UniformBinding] -> IO [UniformBinding]
+mergeUniformBindings shader explicit = do
+  defaults <- readIORef shader.shaderUniformDefaults
+  let explicitMap = Map.fromList [ (slot, bytes) | UniformBinding slot bytes <- explicit ]
+  let merged = Map.union explicitMap defaults
+  pure (map (uncurry UniformBinding) (Map.toAscList merged))
+
 ensureFragmentStage :: ShaderStage -> IO ()
 ensureFragmentStage stage =
   case stage of
     ShaderFragment -> pure ()
     ShaderVertex ->
-      ioError (userError "vertex-stage bindings are not supported by the SDL renderer backend")
+      ioError (userError "vertex-stage bindings are not supported by the Slop renderer")
     ShaderCompute ->
-      ioError (userError "compute-stage bindings are not supported by the SDL renderer backend")
+      ioError (userError "compute-stage bindings are not supported by the Slop renderer")
 
 normalizeBindings :: String -> [(Word32, a)] -> IO [a]
 normalizeBindings label bindings =
+  either (ioError . userError) pure (normalizeBindingsEither label bindings)
+
+normalizeBindingsEither :: String -> [(Word32, a)] -> Either String [a]
+normalizeBindingsEither label bindings =
   case bindings of
-    [] -> pure []
+    [] -> Right []
     _ -> do
       let pairs = map (\(slot, value) -> (fromIntegral slot :: Int, value)) bindings
       let mapSlots = Map.fromList pairs
       when (Map.size mapSlots /= length pairs) $
-        ioError (userError ("duplicate " <> label <> " binding slot"))
+        Left ("duplicate " <> label <> " binding slot")
       let slots = Map.keys mapSlots
       let maxSlot = last slots
       let expected = [0 .. maxSlot]
       when (slots /= expected) $
-        ioError (userError ("non-contiguous " <> label <> " binding slots; expected 0.." <> show maxSlot))
+        Left ("non-contiguous " <> label <> " binding slots; expected 0.." <> show maxSlot)
       pure (map snd (Map.toAscList mapSlots))
+
+normalizeUniforms :: String -> [UniformBinding] -> IO [UniformBinding]
+normalizeUniforms label bindings =
+  either (ioError . userError) pure (normalizeUniformsEither label bindings)
+
+normalizeUniformsEither :: String -> [UniformBinding] -> Either String [UniformBinding]
+normalizeUniformsEither label bindings =
+  case bindings of
+    [] -> Right []
+    _ -> do
+      let pairs = map (\(UniformBinding slot bytes) -> (slot, bytes)) bindings
+      let mapSlots = Map.fromList pairs
+      when (Map.size mapSlots /= length pairs) $
+        Left ("duplicate " <> label <> " binding slot")
+      pure (map (uncurry UniformBinding) (Map.toAscList mapSlots))
 
 resolveNamedUniforms :: ShaderBindings -> [NamedUniform] -> IO [ShaderUniform]
 resolveNamedUniforms bindings =
@@ -2509,121 +4330,13 @@ lookupStorageTextureSlot table name =
   case Map.lookup name table.shaderStorageTextureSlots of
     Just slot -> pure slot
     Nothing -> ioError (userError ("unknown storage texture binding: " <> name))
-
-textureToGPUTextureIO :: Texture -> IO (Maybe GPUTexture)
-textureToGPUTextureIO texture = do
-  props <- sdlGetTextureProperties texture
-  if props == 0
-    then pure Nothing
-    else do
-      ptr <- sdlGetPointerProperty props sdlPropTextureGpuTexturePointer nullPtr
-      if ptr == nullPtr
-        then pure Nothing
-        else pure (Just (GPUTexture (castPtr ptr)))
-
-requireGPUTexture :: Texture -> IO GPUTexture
-requireGPUTexture texture = do
-  result <- textureToGPUTextureIO texture
-  case result of
-    Just gpuTex -> pure gpuTex
-    Nothing -> ioError (userError "texture is not GPU-backed; sampler bindings require a GPU renderer texture")
-
-buildSamplerBindings :: Window -> [SamplerBinding] -> IO ([GPUTextureSamplerBinding], [SamplerKey])
-buildSamplerBindings _ bindings = do
-  pairs <- forM bindings $ \(SamplerBinding tex sampler) -> do
-    gpuTex@(GPUTexture texPtr) <- requireGPUTexture tex
-    let Sampler (GPUSampler samplerPtr) = sampler
-    let binding = GPUTextureSamplerBinding gpuTex (GPUSampler samplerPtr)
-    let key = SamplerKey (PtrKey (castPtr texPtr)) (PtrKey (castPtr samplerPtr))
-    pure (binding, key)
-  pure (map fst pairs, map snd pairs)
-
-buildStorageBindings :: [Texture] -> IO ([GPUTexture], [PtrKey])
-buildStorageBindings textures = do
-  gpuTexs <- mapM requireGPUTexture textures
-  let keys = map (\(GPUTexture ptr) -> PtrKey (castPtr ptr)) gpuTexs
-  pure (gpuTexs, keys)
-
-createRenderStateWithBindings :: Window -> Shader -> [GPUTextureSamplerBinding] -> [GPUTexture] -> IO GPURenderState
-createRenderStateWithBindings window shader samplerBindings storageTextures = do
-  let GPUShader shaderPtr = shader.shaderHandle
-  let renderer = window.appRenderer
-  let withSamplers action =
-        if null samplerBindings
-          then action 0 nullPtr
-          else withArrayLen samplerBindings (\count ptr -> action (fromIntegral count) (castPtr ptr))
-  let withStorage action =
-        if null storageTextures
-          then action 0 nullPtr
-          else
-            let storagePtrs = map (\(GPUTexture ptr) -> ptr) storageTextures
-            in withArrayLen storagePtrs (\count ptr -> action (fromIntegral count) (castPtr ptr))
-  withSamplers $ \samplerCount samplerPtr ->
-    withStorage $ \storageCount storagePtr -> do
-      let stateInfo = GPURenderStateCreateInfo
-            { gpuRenderFragmentShader = shaderPtr
-            , gpuRenderNumSamplerBindings = samplerCount
-            , gpuRenderSamplerBindings = samplerPtr
-            , gpuRenderNumStorageTextures = storageCount
-            , gpuRenderStorageTextures = storagePtr
-            , gpuRenderNumStorageBuffers = 0
-            , gpuRenderStorageBuffers = nullPtr
-            , gpuRenderProps = 0
-            }
-      result <- sdlCreateGPURenderState renderer stateInfo
-      case result of
-        Nothing -> do
-          err <- sdlGetError
-          ioError (userError ("SDL_CreateGPURenderState failed: " <> err))
-        Just state -> pure state
-
-getShaderRenderState :: Window -> Shader -> [SamplerBindingSpec] -> [StorageBinding] -> IO GPURenderState
-getShaderRenderState window shader samplers storage
-  | null samplers && null storage = pure shader.shaderState
-  | otherwise = do
-      samplerList <- normalizeBindings "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) samplers)
-      let samplerBindings = map (\(tex, sampler) -> SamplerBinding tex (fromMaybe window.appDefaultSampler sampler)) samplerList
-      storageList <- normalizeBindings "storage texture" (map (\(StorageBinding slot tex) -> (slot, tex)) storage)
-      (samplerBindingsRaw, samplerKeys) <- buildSamplerBindings window samplerBindings
-      (storageTextures, storageKeys) <- buildStorageBindings storageList
-      let key = BindingKey samplerKeys storageKeys
-      cache <- readIORef shader.shaderStateCache
-      case Map.lookup key cache of
-        Just state -> pure state
-        Nothing -> do
-          state <- createRenderStateWithBindings window shader samplerBindingsRaw storageTextures
-          writeIORef shader.shaderStateCache (Map.insert key state cache)
-          pure state
-
-setShaderUniformCachedOn :: Storable a => GPURenderState -> Word32 -> a -> Loop ()
-setShaderUniformCachedOn state slot value = do
-  bytes <- liftIO (toBytes value)
-  setShaderUniformBytesCachedOn state slot bytes
-
 setShaderUniformCached :: Storable a => Shader -> Word32 -> a -> Loop ()
 setShaderUniformCached shader slot value =
-  setShaderUniformCachedOn shader.shaderState slot value
-
-setShaderUniformBytesCachedOn :: GPURenderState -> Word32 -> ByteString -> Loop ()
-setShaderUniformBytesCachedOn state slot bytes =
-  Loop $ do
-    window <- ask
-    let key = shaderUniformKeyState state slot
-    let ref = window.appRenderState
-    shouldUpdate <- liftIO $
-      atomicModifyIORef' ref $ \st ->
-        case Map.lookup key (st.rsUniformCache) of
-          Just old | old == bytes -> (st, False)
-          _ ->
-            let cache' = Map.insert key bytes (st.rsUniformCache)
-            in (st { rsUniformCache = cache' }, True)
-    if shouldUpdate
-      then liftIO (setShaderUniformBytesIOFromState state slot bytes)
-      else pure ()
+  Loop (liftIO (setShaderUniformIO shader slot value))
 
 setShaderUniformBytesCached :: Shader -> Word32 -> ByteString -> Loop ()
 setShaderUniformBytesCached shader slot bytes =
-  setShaderUniformBytesCachedOn shader.shaderState slot bytes
+  Loop (liftIO (setShaderUniformBytesIO shader slot bytes))
 
 createShaderFromSpirv :: ByteString -> WindowM Shader
 createShaderFromSpirv spirv = liftWindow (\window -> createShaderFromSpirvIO window spirv)
@@ -2631,14 +4344,6 @@ createShaderFromSpirv spirv = liftWindow (\window -> createShaderFromSpirvIO win
 createShaderFromSpirvWith :: ByteString -> Word32 -> Word32 -> Word32 -> Word32 -> WindowM Shader
 createShaderFromSpirvWith spirv numSamplers numStorageTextures numStorageBuffers numUniformBuffers =
   liftWindow (\window -> createShaderFromSpirvWithIO window spirv numSamplers numStorageTextures numStorageBuffers numUniformBuffers)
-
-evictShaderCacheIO :: Window -> Shader -> IO ()
-evictShaderCacheIO window shader = do
-  cached <- readIORef shader.shaderStateCache
-  let statePtrs = map (\(GPURenderState ptr) -> castPtr ptr) (shader.shaderState : Map.elems cached)
-  atomicModifyIORef' (window.appRenderState) $ \st ->
-    let cache' = Map.filterWithKey (\(p, _) _ -> p `notElem` statePtrs) (st.rsUniformCache)
-    in (st { rsUniformCache = cache' }, ())
 
 evictTextCacheForFontIO :: Window -> Font -> IO ()
 evictTextCacheForFontIO window font = do
@@ -2650,9 +4355,7 @@ evictTextCacheForFontIO window font = do
   mapM_ ttfDestroyText stale
 
 destroyShader :: Shader -> WindowM ()
-destroyShader shader = do
-  window <- ask
-  liftIO (evictShaderCacheIO window shader)
+destroyShader shader =
   liftIO (destroyShaderIO shader)
 
 withShaderBindings :: Shader -> [ShaderUniform] -> Loop a -> Loop a
@@ -2678,38 +4381,122 @@ withShaderBindingsInternal :: Shader -> ([UniformBinding], [SamplerBindingSpec],
 withShaderBindingsInternal shader (uniforms, samplers, storage) (Loop action) =
   Loop $ do
     window <- ask
-    state <- liftIO (getShaderRenderState window shader samplers storage)
-    mapM_ (applyUniformBinding state) uniforms
-    liftIO $
-      bracket
-        (do
-          ok <- sdlSetGPURenderState (window.appRenderer) (Just state)
-          unless ok $ do
-            err <- sdlGetError
-            ioError (userError ("SDL_SetGPURenderState failed: " <> err))
-        )
-        (\_ -> void (sdlSetGPURenderState (window.appRenderer) Nothing))
-        (\_ -> runWindowM window action)
-  where
-    applyUniformBinding state (UniformBinding slot bytes) =
-      runLoop (setShaderUniformBytesCachedOn state slot bytes)
+    merged <- liftIO (mergeUniformBindings shader uniforms)
+    let ctx = ShaderContext shader merged samplers storage
+    liftIO (withShaderContext window ctx (runWindowM window action))
 
 withShader :: Shader -> Loop a -> Loop a
 withShader shader (Loop action) =
   Loop $ do
     window <- ask
-    liftIO $
-      bracket
-        (do
-          ok <- sdlSetGPURenderState (window.appRenderer) (Just (shader.shaderState))
-          unless ok $ do
-            err <- sdlGetError
-            ioError (userError ("SDL_SetGPURenderState failed: " <> err))
-        )
-        (\_ -> void (sdlSetGPURenderState (window.appRenderer) Nothing))
-        (\_ -> runWindowM window action)
+    merged <- liftIO (mergeUniformBindings shader [])
+    let ctx = ShaderContext shader merged [] []
+    liftIO (withShaderContext window ctx (runWindowM window action))
 
 withShaderUniform :: Storable a => Shader -> Word32 -> a -> Loop b -> Loop b
 withShaderUniform shader slot value action = do
   setShaderUniformCached shader slot value
   withShader shader action
+
+defaultVertexSpirv :: ByteString
+defaultVertexSpirv = BS.pack
+  [ 3, 2, 35, 7, 0, 6, 1, 0, 0, 0, 0, 0, 35, 0, 0, 0, 0, 0, 0, 0
+  , 17, 0, 2, 0, 1, 0, 0, 0, 14, 0, 3, 0, 0, 0, 0, 0, 1, 0, 0, 0
+  , 15, 0, 11, 0, 0, 0, 0, 0, 17, 0, 0, 0, 109, 97, 105, 110, 0, 0, 0, 0
+  , 6, 0, 0, 0, 7, 0, 0, 0, 9, 0, 0, 0, 11, 0, 0, 0, 13, 0, 0, 0
+  , 14, 0, 0, 0, 5, 0, 4, 0, 1, 0, 0, 0, 86, 115, 79, 117, 116, 0, 0, 0
+  , 6, 0, 6, 0, 1, 0, 0, 0, 0, 0, 0, 0, 112, 111, 115, 105, 116, 105, 111, 110
+  , 0, 0, 0, 0, 6, 0, 4, 0, 1, 0, 0, 0, 1, 0, 0, 0, 117, 118, 0, 0
+  , 6, 0, 5, 0, 1, 0, 0, 0, 2, 0, 0, 0, 99, 111, 108, 111, 114, 0, 0, 0
+  , 5, 0, 4, 0, 6, 0, 0, 0, 105, 110, 95, 112, 111, 115, 0, 0, 5, 0, 4, 0
+  , 7, 0, 0, 0, 105, 110, 95, 117, 118, 0, 0, 0, 5, 0, 5, 0, 9, 0, 0, 0
+  , 105, 110, 95, 99, 111, 108, 111, 114, 0, 0, 0, 0, 5, 0, 6, 0, 11, 0, 0, 0
+  , 86, 115, 79, 117, 116, 95, 112, 111, 115, 105, 116, 105, 111, 110, 0, 0, 5, 0, 5, 0
+  , 13, 0, 0, 0, 86, 115, 79, 117, 116, 95, 117, 118, 0, 0, 0, 0, 5, 0, 5, 0
+  , 14, 0, 0, 0, 86, 115, 79, 117, 116, 95, 99, 111, 108, 111, 114, 0, 5, 0, 4, 0
+  , 17, 0, 0, 0, 109, 97, 105, 110, 0, 0, 0, 0, 72, 0, 5, 0, 1, 0, 0, 0
+  , 0, 0, 0, 0, 35, 0, 0, 0, 0, 0, 0, 0, 72, 0, 5, 0, 1, 0, 0, 0
+  , 1, 0, 0, 0, 35, 0, 0, 0, 16, 0, 0, 0, 72, 0, 5, 0, 1, 0, 0, 0
+  , 2, 0, 0, 0, 35, 0, 0, 0, 32, 0, 0, 0, 71, 0, 4, 0, 6, 0, 0, 0
+  , 30, 0, 0, 0, 0, 0, 0, 0, 71, 0, 4, 0, 7, 0, 0, 0, 30, 0, 0, 0
+  , 1, 0, 0, 0, 71, 0, 4, 0, 9, 0, 0, 0, 30, 0, 0, 0, 2, 0, 0, 0
+  , 71, 0, 4, 0, 11, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 71, 0, 4, 0
+  , 13, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 71, 0, 4, 0, 14, 0, 0, 0
+  , 30, 0, 0, 0, 1, 0, 0, 0, 22, 0, 3, 0, 2, 0, 0, 0, 32, 0, 0, 0
+  , 23, 0, 4, 0, 3, 0, 0, 0, 2, 0, 0, 0, 4, 0, 0, 0, 23, 0, 4, 0
+  , 4, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 30, 0, 5, 0, 1, 0, 0, 0
+  , 3, 0, 0, 0, 4, 0, 0, 0, 3, 0, 0, 0, 32, 0, 4, 0, 5, 0, 0, 0
+  , 1, 0, 0, 0, 4, 0, 0, 0, 32, 0, 4, 0, 8, 0, 0, 0, 1, 0, 0, 0
+  , 3, 0, 0, 0, 32, 0, 4, 0, 10, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0
+  , 32, 0, 4, 0, 12, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 19, 0, 2, 0
+  , 15, 0, 0, 0, 33, 0, 3, 0, 16, 0, 0, 0, 15, 0, 0, 0, 32, 0, 4, 0
+  , 26, 0, 0, 0, 7, 0, 0, 0, 3, 0, 0, 0, 43, 0, 4, 0, 2, 0, 0, 0
+  , 23, 0, 0, 0, 0, 0, 0, 0, 43, 0, 4, 0, 2, 0, 0, 0, 24, 0, 0, 0
+  , 0, 0, 128, 63, 59, 0, 4, 0, 5, 0, 0, 0, 6, 0, 0, 0, 1, 0, 0, 0
+  , 59, 0, 4, 0, 5, 0, 0, 0, 7, 0, 0, 0, 1, 0, 0, 0, 59, 0, 4, 0
+  , 8, 0, 0, 0, 9, 0, 0, 0, 1, 0, 0, 0, 59, 0, 4, 0, 10, 0, 0, 0
+  , 11, 0, 0, 0, 3, 0, 0, 0, 59, 0, 4, 0, 12, 0, 0, 0, 13, 0, 0, 0
+  , 3, 0, 0, 0, 59, 0, 4, 0, 10, 0, 0, 0, 14, 0, 0, 0, 3, 0, 0, 0
+  , 54, 0, 5, 0, 15, 0, 0, 0, 17, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0
+  , 248, 0, 2, 0, 18, 0, 0, 0, 59, 0, 4, 0, 26, 0, 0, 0, 27, 0, 0, 0
+  , 7, 0, 0, 0, 61, 0, 4, 0, 4, 0, 0, 0, 19, 0, 0, 0, 6, 0, 0, 0
+  , 81, 0, 5, 0, 2, 0, 0, 0, 20, 0, 0, 0, 19, 0, 0, 0, 0, 0, 0, 0
+  , 61, 0, 4, 0, 4, 0, 0, 0, 21, 0, 0, 0, 6, 0, 0, 0, 81, 0, 5, 0
+  , 2, 0, 0, 0, 22, 0, 0, 0, 21, 0, 0, 0, 1, 0, 0, 0, 80, 0, 7, 0
+  , 3, 0, 0, 0, 25, 0, 0, 0, 20, 0, 0, 0, 22, 0, 0, 0, 23, 0, 0, 0
+  , 24, 0, 0, 0, 62, 0, 3, 0, 27, 0, 0, 0, 25, 0, 0, 0, 61, 0, 4, 0
+  , 3, 0, 0, 0, 28, 0, 0, 0, 27, 0, 0, 0, 61, 0, 4, 0, 4, 0, 0, 0
+  , 29, 0, 0, 0, 7, 0, 0, 0, 61, 0, 4, 0, 3, 0, 0, 0, 30, 0, 0, 0
+  , 9, 0, 0, 0, 80, 0, 6, 0, 1, 0, 0, 0, 31, 0, 0, 0, 28, 0, 0, 0
+  , 29, 0, 0, 0, 30, 0, 0, 0, 81, 0, 5, 0, 3, 0, 0, 0, 32, 0, 0, 0
+  , 31, 0, 0, 0, 0, 0, 0, 0, 62, 0, 3, 0, 11, 0, 0, 0, 32, 0, 0, 0
+  , 81, 0, 5, 0, 4, 0, 0, 0, 33, 0, 0, 0, 31, 0, 0, 0, 1, 0, 0, 0
+  , 62, 0, 3, 0, 13, 0, 0, 0, 33, 0, 0, 0, 81, 0, 5, 0, 3, 0, 0, 0
+  , 34, 0, 0, 0, 31, 0, 0, 0, 2, 0, 0, 0, 62, 0, 3, 0, 14, 0, 0, 0
+  , 34, 0, 0, 0, 253, 0, 1, 0, 56, 0, 1, 0
+  ]
+
+defaultFragmentSpirv :: ByteString
+defaultFragmentSpirv = BS.pack
+  [ 3, 2, 35, 7, 0, 6, 1, 0, 0, 0, 0, 0, 31, 0, 0, 0, 0, 0, 0, 0
+  , 17, 0, 2, 0, 1, 0, 0, 0, 14, 0, 3, 0, 0, 0, 0, 0, 1, 0, 0, 0
+  , 15, 0, 10, 0, 4, 0, 0, 0, 18, 0, 0, 0, 109, 97, 105, 110, 0, 0, 0, 0
+  , 4, 0, 0, 0, 7, 0, 0, 0, 10, 0, 0, 0, 13, 0, 0, 0, 15, 0, 0, 0
+  , 16, 0, 3, 0, 18, 0, 0, 0, 7, 0, 0, 0, 5, 0, 5, 0, 4, 0, 0, 0
+  , 115, 112, 114, 105, 116, 101, 84, 101, 120, 0, 0, 0, 5, 0, 5, 0, 7, 0, 0, 0
+  , 115, 112, 114, 105, 116, 101, 83, 97, 109, 112, 0, 0, 5, 0, 3, 0, 10, 0, 0, 0
+  , 117, 118, 0, 0, 5, 0, 4, 0, 13, 0, 0, 0, 99, 111, 108, 111, 114, 0, 0, 0
+  , 5, 0, 5, 0, 15, 0, 0, 0, 102, 114, 97, 103, 95, 111, 117, 116, 112, 117, 116, 0
+  , 5, 0, 4, 0, 18, 0, 0, 0, 109, 97, 105, 110, 0, 0, 0, 0, 71, 0, 4, 0
+  , 4, 0, 0, 0, 34, 0, 0, 0, 2, 0, 0, 0, 71, 0, 4, 0, 4, 0, 0, 0
+  , 33, 0, 0, 0, 0, 0, 0, 0, 71, 0, 4, 0, 7, 0, 0, 0, 34, 0, 0, 0
+  , 2, 0, 0, 0, 71, 0, 4, 0, 7, 0, 0, 0, 33, 0, 0, 0, 1, 0, 0, 0
+  , 71, 0, 4, 0, 10, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 71, 0, 4, 0
+  , 13, 0, 0, 0, 30, 0, 0, 0, 1, 0, 0, 0, 71, 0, 4, 0, 15, 0, 0, 0
+  , 30, 0, 0, 0, 0, 0, 0, 0, 22, 0, 3, 0, 1, 0, 0, 0, 32, 0, 0, 0
+  , 25, 0, 9, 0, 2, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0
+  , 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 32, 0, 4, 0
+  , 3, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 26, 0, 2, 0, 5, 0, 0, 0
+  , 32, 0, 4, 0, 6, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 23, 0, 4, 0
+  , 8, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 32, 0, 4, 0, 9, 0, 0, 0
+  , 1, 0, 0, 0, 8, 0, 0, 0, 23, 0, 4, 0, 11, 0, 0, 0, 1, 0, 0, 0
+  , 4, 0, 0, 0, 32, 0, 4, 0, 12, 0, 0, 0, 1, 0, 0, 0, 11, 0, 0, 0
+  , 32, 0, 4, 0, 14, 0, 0, 0, 3, 0, 0, 0, 11, 0, 0, 0, 19, 0, 2, 0
+  , 16, 0, 0, 0, 33, 0, 3, 0, 17, 0, 0, 0, 16, 0, 0, 0, 27, 0, 3, 0
+  , 23, 0, 0, 0, 2, 0, 0, 0, 32, 0, 4, 0, 26, 0, 0, 0, 7, 0, 0, 0
+  , 11, 0, 0, 0, 59, 0, 4, 0, 3, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0
+  , 59, 0, 4, 0, 6, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 59, 0, 4, 0
+  , 9, 0, 0, 0, 10, 0, 0, 0, 1, 0, 0, 0, 59, 0, 4, 0, 12, 0, 0, 0
+  , 13, 0, 0, 0, 1, 0, 0, 0, 59, 0, 4, 0, 14, 0, 0, 0, 15, 0, 0, 0
+  , 3, 0, 0, 0, 54, 0, 5, 0, 16, 0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0
+  , 17, 0, 0, 0, 248, 0, 2, 0, 19, 0, 0, 0, 59, 0, 4, 0, 26, 0, 0, 0
+  , 27, 0, 0, 0, 7, 0, 0, 0, 61, 0, 4, 0, 2, 0, 0, 0, 20, 0, 0, 0
+  , 4, 0, 0, 0, 61, 0, 4, 0, 5, 0, 0, 0, 21, 0, 0, 0, 7, 0, 0, 0
+  , 61, 0, 4, 0, 8, 0, 0, 0, 22, 0, 0, 0, 10, 0, 0, 0, 86, 0, 5, 0
+  , 23, 0, 0, 0, 24, 0, 0, 0, 20, 0, 0, 0, 21, 0, 0, 0, 87, 0, 5, 0
+  , 11, 0, 0, 0, 25, 0, 0, 0, 24, 0, 0, 0, 22, 0, 0, 0, 62, 0, 3, 0
+  , 27, 0, 0, 0, 25, 0, 0, 0, 61, 0, 4, 0, 11, 0, 0, 0, 28, 0, 0, 0
+  , 27, 0, 0, 0, 61, 0, 4, 0, 11, 0, 0, 0, 29, 0, 0, 0, 13, 0, 0, 0
+  , 133, 0, 5, 0, 11, 0, 0, 0, 30, 0, 0, 0, 28, 0, 0, 0, 29, 0, 0, 0
+  , 62, 0, 3, 0, 15, 0, 0, 0, 30, 0, 0, 0, 253, 0, 1, 0, 56, 0, 1, 0
+  ]

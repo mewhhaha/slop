@@ -35,7 +35,8 @@ library
                       Slop.SDL.Raw
                       Slop.Pipeline
                       Slop.Pipeline.Graph
-    -- other-modules:
+                      Slop.Storable.Generic
+    other-modules:    Slop.Internal.DList
     -- other-extensions:
     build-depends:
         base ^>=4.21.0.0,
@@ -62,8 +63,9 @@ executable slop
         buildable: False
     build-depends:
         base ^>=4.21.0.0,
-        slop,
         bytestring,
+        containers,
+        slop,
         spirdo
     pkgconfig-depends:
         sdl3-mixer

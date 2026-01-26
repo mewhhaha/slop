@@ -9,6 +9,8 @@ module Slop.Pipeline.Graph
   , pass
   , clear
   , draw
+  , drawMesh
+  , compute
   , blit
   , withShader
   , postProcess
@@ -28,45 +30,41 @@ import Data.IORef (readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 
 import qualified Slop as S
+import Slop.Internal.DList (DList, singleton, toList)
 import Slop
-  ( Color
-  , Drawable
+  ( Binding
+  , Color
+  , ComputeBinding
+  , ComputePipeline
+  , Draw
   , DrawItem (..)
   , Loop
+  , Mesh
+  , Pipeline
   , RenderTarget
   , Shader
   , ShaderUniform (..)
   , askWindow
+  , dispatchCompute
   , liftLoop
   , withShaderBindings
   )
 import Slop.SDL.Raw (FRect)
-
-newtype DList a = DList ([a] -> [a])
-
-instance Semigroup (DList a) where
-  DList f <> DList g = DList (f . g)
-
-instance Monoid (DList a) where
-  mempty = DList id
-
-singleton :: a -> DList a
-singleton x = DList (x :)
-
-toList :: DList a -> [a]
-toList (DList f) = f []
+import Data.Word (Word32)
 
 newtype Node = Node Int
 
 data Op
   = OpClear Color
   | OpDraw DrawItem
+  | OpDrawMesh Pipeline Mesh [Binding]
   | OpBlit Node (Maybe FRect) FRect
   | OpShader Shader [ShaderUniform] [Op]
 
 data Step
   = StepPass Node [Op]
   | StepOutput Node (Maybe FRect) FRect
+  | StepCompute ComputePipeline [ComputeBinding] (Word32, Word32, Word32)
 
 newtype PassM a = PassM (Writer (DList Op) a)
   deriving (Functor, Applicative, Monad)
@@ -85,8 +83,16 @@ pass (PassM action) = Graph $ do
 clear :: Color -> PassM ()
 clear color = PassM (tell (singleton (OpClear color)))
 
-draw :: Drawable a => a -> PassM ()
-draw item = PassM (tell (singleton (OpDraw (DrawItem item))))
+draw :: Draw ctx a => ctx -> a -> PassM ()
+draw ctx item = PassM (tell (singleton (OpDraw (DrawItem ctx item))))
+
+drawMesh :: Pipeline -> Mesh -> [Binding] -> PassM ()
+drawMesh pipeline mesh bindings =
+  PassM (tell (singleton (OpDrawMesh pipeline mesh bindings)))
+
+compute :: ComputePipeline -> [ComputeBinding] -> (Word32, Word32, Word32) -> Graph ()
+compute pipeline bindings groups =
+  Graph (tell (singleton (StepCompute pipeline bindings groups)))
 
 blit :: Node -> Maybe FRect -> FRect -> PassM ()
 blit node src dst = PassM (tell (singleton (OpBlit node src dst)))
@@ -137,6 +143,8 @@ runStep size step =
     StepOutput node src dst -> do
       target <- ensureTarget node size
       blitTarget target src dst
+    StepCompute pipeline bindings groups ->
+      liftLoop (dispatchCompute pipeline bindings groups)
 
 runOps :: (Int, Int) -> [Op] -> Loop ()
 runOps size = mapM_ (runOp size)
@@ -146,6 +154,8 @@ runOp size op =
   case op of
     OpClear color -> clearTarget color
     OpDraw item -> drawTarget item
+    OpDrawMesh pipeline mesh bindings ->
+      S.drawMesh pipeline mesh bindings
     OpBlit node src dst -> do
       target <- ensureTarget node size
       blitTarget target src dst
@@ -172,8 +182,8 @@ ensureTarget (Node nodeId) size = do
 clearTarget :: Color -> Loop ()
 clearTarget = S.clear
 
-drawTarget :: Drawable a => a -> Loop ()
-drawTarget = S.draw
+drawTarget :: DrawItem -> Loop ()
+drawTarget (DrawItem ctx item) = S.draw ctx item
 
 blitTarget :: RenderTarget -> Maybe FRect -> FRect -> Loop ()
 blitTarget = S.output

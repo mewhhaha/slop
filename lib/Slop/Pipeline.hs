@@ -30,7 +30,7 @@ module Slop.Pipeline
 
 import Slop
   ( Color
-  , Drawable
+  , Draw
   , PassM
   , PlanM
   , RenderPlan
@@ -53,7 +53,7 @@ import Slop.SDL.Raw (FRect)
 clear :: Color -> PassM ()
 clear = passClear
 
-draw :: Drawable a => a -> PassM ()
+draw :: Draw ctx a => ctx -> a -> PassM ()
 draw = passDraw
 
 blit :: RenderTarget -> Maybe FRect -> FRect -> PassM ()
