@@ -288,7 +288,7 @@ main = do
       let winRect = rect 0 0 winW winH
       let cam2d =
             camera2D
-              (Vec2 (winW / 2 + 40 * sin frame.time) (winH / 2 + 140))
+              (V2 (winW / 2 + 40 * sin frame.time) (winH / 2 + 140))
               1
               (winW, winH)
       let params = Params frame.time winW winH 0

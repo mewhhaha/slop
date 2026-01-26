@@ -184,8 +184,8 @@ The built-in draw contexts only differ by blend mode today:
 
 ```haskell
 mesh <- createMesh3D vertices
-let cam = camera3D (Vec3 0 0 5) (Vec3 0 0 0) (Vec3 0 1 0) (pi/3) (16/9) 0.1 100
-draw (basic3D cam) (mesh3D mesh mat4Identity [])
+let cam = camera3D (V3 0 0 5) (V3 0 0 0) (V3 0 1 0) (pi/3) (16/9) 0.1 100
+draw (basic3D cam) (mesh3D mesh identity [])
 ```
 
 `Vertex3D` packs position as `vec4` (x, y, z, w), UV as `vec2`, and color as `vec4` in that order.
@@ -193,14 +193,14 @@ draw (basic3D cam) (mesh3D mesh mat4Identity [])
 For 2D, you can supply a camera transform that maps world coordinates to NDC on the CPU:
 
 ```haskell
-let cam2 = camera2D (Vec2 320 180) 1 (640, 360)
+let cam2 = camera2D (V2 320 180) 1 (640, 360)
 draw (basic2D cam2) (RectOutline (rgb 0.2 0.8 0.9) (rect 100 100 120 80))
 ```
 
 If you want the camera to auto‑size from the window, use `camera2DWindow`:
 
 ```haskell
-let cam2 = camera2DWindow (Vec2 0 0) 1
+let cam2 = camera2DWindow (V2 0 0) 1
 draw (basic2D cam2) (RectOutline (rgb 0.2 0.8 0.9) (rect 0 0 120 80))
 ```
 

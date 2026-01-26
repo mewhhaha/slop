@@ -140,15 +140,16 @@ module Slop
   , mouseButtonPressed
   , mouseButtonReleased
   , Color(..)
-  , Vec2(..)
-  , Vec3(..)
-  , Vec4(..)
-  , Mat4(..)
-  , mat4Identity
-  , mat4Mul
-  , mat4Perspective
-  , mat4Ortho
-  , mat4LookAt
+  , V2(..)
+  , V3(..)
+  , V4(..)
+  , M44(..)
+  , v2
+  , v3
+  , v4
+  , v3Cross
+  , Vector(..)
+  , Matrix4(..)
   , camera2D
   , camera2DWindow
   , camera2DScreen
@@ -678,7 +679,7 @@ data RecordingContext = RecordingContext
 newtype Recording = Recording RecordingContext
 
 data Transform2D
-  = TransformMatrix Mat4
+  = TransformMatrix (M44 Float)
   | TransformCamera Camera2D
   deriving (Eq, Show)
 
@@ -738,7 +739,7 @@ data Mesh = Mesh
 
 data Mesh3D = Mesh3D
   { mesh3DMesh :: Mesh
-  , mesh3DModel :: Mat4
+  , mesh3DModel :: M44 Float
   , mesh3DBindings :: [Binding]
   }
 
@@ -1675,7 +1676,7 @@ newtype MouseButton = MouseButton Word32
 data InputState = InputState
   { inputKeysDown :: !IntSet
   , inputMouseButtonsDown :: !Word32
-  , inputMousePos :: !Vec2
+  , inputMousePos :: !(V2 Float)
   }
   deriving (Eq, Show)
 
@@ -1837,128 +1838,279 @@ rgba :: Float -> Float -> Float -> Float -> Color
 rgba = Color
 
 
-data Vec2 = Vec2 !Float !Float deriving (Eq, Show)
+data V2 a = V2 !a !a deriving (Eq, Show)
 
-data Vec3 = Vec3 !Float !Float !Float deriving (Eq, Show)
+data V3 a = V3 !a !a !a deriving (Eq, Show)
 
-data Vec4 = Vec4 !Float !Float !Float !Float deriving (Eq, Show)
+data V4 a = V4 !a !a !a !a deriving (Eq, Show)
 
-data Mat4
-  = Mat4 !Float !Float !Float !Float
-         !Float !Float !Float !Float
-         !Float !Float !Float !Float
-         !Float !Float !Float !Float
+data M44 a
+  = M44 !a !a !a !a
+         !a !a !a !a
+         !a !a !a !a
+         !a !a !a !a
   deriving (Eq, Show)
 
-mat4Identity :: Mat4
-mat4Identity =
-  Mat4 1 0 0 0
-       0 1 0 0
-       0 0 1 0
-       0 0 0 1
+v2 :: (a, a) -> V2 a
+v2 (x, y) = V2 x y
 
-mat4Mul :: Mat4 -> Mat4 -> Mat4
-mat4Mul (Mat4 a00 a01 a02 a03
-               a10 a11 a12 a13
-               a20 a21 a22 a23
-               a30 a31 a32 a33)
-        (Mat4 b00 b01 b02 b03
-               b10 b11 b12 b13
-               b20 b21 b22 b23
-               b30 b31 b32 b33) =
-  Mat4
-    (a00*b00 + a01*b10 + a02*b20 + a03*b30)
-    (a00*b01 + a01*b11 + a02*b21 + a03*b31)
-    (a00*b02 + a01*b12 + a02*b22 + a03*b32)
-    (a00*b03 + a01*b13 + a02*b23 + a03*b33)
-    (a10*b00 + a11*b10 + a12*b20 + a13*b30)
-    (a10*b01 + a11*b11 + a12*b21 + a13*b31)
-    (a10*b02 + a11*b12 + a12*b22 + a13*b32)
-    (a10*b03 + a11*b13 + a12*b23 + a13*b33)
-    (a20*b00 + a21*b10 + a22*b20 + a23*b30)
-    (a20*b01 + a21*b11 + a22*b21 + a23*b31)
-    (a20*b02 + a21*b12 + a22*b22 + a23*b32)
-    (a20*b03 + a21*b13 + a22*b23 + a23*b33)
-    (a30*b00 + a31*b10 + a32*b20 + a33*b30)
-    (a30*b01 + a31*b11 + a32*b21 + a33*b31)
-    (a30*b02 + a31*b12 + a32*b22 + a33*b32)
-    (a30*b03 + a31*b13 + a32*b23 + a33*b33)
+v3 :: (a, a, a) -> V3 a
+v3 (x, y, z) = V3 x y z
 
-mat4MulVec4 :: Mat4 -> Vec4 -> Vec4
-mat4MulVec4 (Mat4 m00 m01 m02 m03
+v4 :: (a, a, a, a) -> V4 a
+v4 (x, y, z, w) = V4 x y z w
+
+class Vector v where
+  dot :: Num a => v a -> v a -> a
+  len :: Floating a => v a -> a
+  normalize :: (Eq a, Floating a) => v a -> v a
+
+instance Num a => Num (V2 a) where
+  (+) (V2 ax ay) (V2 bx by) = V2 (ax + bx) (ay + by)
+  (-) (V2 ax ay) (V2 bx by) = V2 (ax - bx) (ay - by)
+  (*) (V2 ax ay) (V2 bx by) = V2 (ax * bx) (ay * by)
+  negate (V2 x y) = V2 (negate x) (negate y)
+  abs (V2 x y) = V2 (abs x) (abs y)
+  signum (V2 x y) = V2 (signum x) (signum y)
+  fromInteger n =
+    let a = fromInteger n
+    in V2 a a
+
+instance Fractional a => Fractional (V2 a) where
+  (/) (V2 ax ay) (V2 bx by) = V2 (ax / bx) (ay / by)
+  recip (V2 x y) = V2 (recip x) (recip y)
+  fromRational r =
+    let a = fromRational r
+    in V2 a a
+
+instance Vector V2 where
+  dot (V2 ax ay) (V2 bx by) = ax * bx + ay * by
+  len v = sqrt (dot v v)
+  normalize v@(V2 x y) =
+    let l = len v
+        inv = if l == 0 then 1 else 1 / l
+    in V2 (x * inv) (y * inv)
+
+instance Num a => Num (V3 a) where
+  (+) (V3 ax ay az) (V3 bx by bz) = V3 (ax + bx) (ay + by) (az + bz)
+  (-) (V3 ax ay az) (V3 bx by bz) = V3 (ax - bx) (ay - by) (az - bz)
+  (*) (V3 ax ay az) (V3 bx by bz) = V3 (ax * bx) (ay * by) (az * bz)
+  negate (V3 x y z) = V3 (negate x) (negate y) (negate z)
+  abs (V3 x y z) = V3 (abs x) (abs y) (abs z)
+  signum (V3 x y z) = V3 (signum x) (signum y) (signum z)
+  fromInteger n =
+    let a = fromInteger n
+    in V3 a a a
+
+instance Fractional a => Fractional (V3 a) where
+  (/) (V3 ax ay az) (V3 bx by bz) = V3 (ax / bx) (ay / by) (az / bz)
+  recip (V3 x y z) = V3 (recip x) (recip y) (recip z)
+  fromRational r =
+    let a = fromRational r
+    in V3 a a a
+
+instance Vector V3 where
+  dot (V3 ax ay az) (V3 bx by bz) = ax*bx + ay*by + az*bz
+  len v = sqrt (dot v v)
+  normalize v@(V3 x y z) =
+    let l = len v
+        inv = if l == 0 then 1 else 1 / l
+    in V3 (x*inv) (y*inv) (z*inv)
+
+instance Num a => Num (V4 a) where
+  (+) (V4 ax ay az aw) (V4 bx by bz bw) = V4 (ax + bx) (ay + by) (az + bz) (aw + bw)
+  (-) (V4 ax ay az aw) (V4 bx by bz bw) = V4 (ax - bx) (ay - by) (az - bz) (aw - bw)
+  (*) (V4 ax ay az aw) (V4 bx by bz bw) = V4 (ax * bx) (ay * by) (az * bz) (aw * bw)
+  negate (V4 x y z w) = V4 (negate x) (negate y) (negate z) (negate w)
+  abs (V4 x y z w) = V4 (abs x) (abs y) (abs z) (abs w)
+  signum (V4 x y z w) = V4 (signum x) (signum y) (signum z) (signum w)
+  fromInteger n =
+    let a = fromInteger n
+    in V4 a a a a
+
+instance Fractional a => Fractional (V4 a) where
+  (/) (V4 ax ay az aw) (V4 bx by bz bw) = V4 (ax / bx) (ay / by) (az / bz) (aw / bw)
+  recip (V4 x y z w) = V4 (recip x) (recip y) (recip z) (recip w)
+  fromRational r =
+    let a = fromRational r
+    in V4 a a a a
+
+instance Vector V4 where
+  dot (V4 ax ay az aw) (V4 bx by bz bw) = ax*bx + ay*by + az*bz + aw*bw
+  len v = sqrt (dot v v)
+  normalize v@(V4 x y z w) =
+    let l = len v
+        inv = if l == 0 then 1 else 1 / l
+    in V4 (x*inv) (y*inv) (z*inv) (w*inv)
+
+v3Cross :: Num a => V3 a -> V3 a -> V3 a
+v3Cross (V3 ax ay az) (V3 bx by bz) =
+  V3 (ay*bz - az*by) (az*bx - ax*bz) (ax*by - ay*bx)
+
+class Matrix4 m where
+  identity :: m Float
+  transpose :: m Float -> m Float
+  transformPoint :: m Float -> V3 Float -> V3 Float
+  transformDir :: m Float -> V3 Float -> V3 Float
+  ortho :: Float -> Float -> Float -> Float -> Float -> Float -> m Float
+  perspective :: Float -> Float -> Float -> Float -> m Float
+  lookAt :: V3 Float -> V3 Float -> V3 Float -> m Float
+
+m44MulV4 :: M44 Float -> V4 Float -> V4 Float
+m44MulV4 (M44 m00 m01 m02 m03
                    m10 m11 m12 m13
                    m20 m21 m22 m23
                    m30 m31 m32 m33)
-            (Vec4 x y z w) =
-  Vec4
+            (V4 x y z w) =
+  V4
     (m00*x + m01*y + m02*z + m03*w)
     (m10*x + m11*y + m12*z + m13*w)
     (m20*x + m21*y + m22*z + m23*w)
     (m30*x + m31*y + m32*z + m33*w)
 
-mat4Ortho :: Float -> Float -> Float -> Float -> Float -> Float -> Mat4
-mat4Ortho l r b t n f =
-  let rl = r - l
-      tb = t - b
-      fn = f - n
-  in Mat4
-      (2 / rl) 0 0 (-(r + l) / rl)
-      0 (2 / tb) 0 (-(t + b) / tb)
-      0 0 (1 / fn) (-n / fn)
-      0 0 0 1
+instance Matrix4 M44 where
+  identity = fromInteger 1
+  transpose (M44 m00 m01 m02 m03
+                   m10 m11 m12 m13
+                   m20 m21 m22 m23
+                   m30 m31 m32 m33) =
+    M44 m00 m10 m20 m30
+         m01 m11 m21 m31
+         m02 m12 m22 m32
+         m03 m13 m23 m33
+  transformPoint mat (V3 x y z) =
+    let V4 tx ty tz tw = m44MulV4 mat (V4 x y z 1)
+        inv = if tw == 0 then 1 else 1 / tw
+    in V3 (tx * inv) (ty * inv) (tz * inv)
+  transformDir mat (V3 x y z) =
+    let V4 tx ty tz _ = m44MulV4 mat (V4 x y z 0)
+    in V3 tx ty tz
+  ortho l r b t n f =
+    let rl = r - l
+        tb = t - b
+        fn = f - n
+    in M44
+        (2 / rl) 0 0 (-(r + l) / rl)
+        0 (2 / tb) 0 (-(t + b) / tb)
+        0 0 (1 / fn) (-n / fn)
+        0 0 0 1
+  perspective fovY aspect n f =
+    let t = 1 / tan (fovY / 2)
+        fn = f - n
+    in M44
+        (t / aspect) 0 0 0
+        0 t 0 0
+        0 0 (f / fn) 1
+        0 0 ((-n * f) / fn) 0
+  lookAt eye target up =
+    let f = normalize (target - eye)
+        s = normalize (v3Cross f up)
+        u = v3Cross s f
+        V3 sx sy sz = s
+        V3 ux uy uz = u
+        V3 fx fy fz = f
+    in M44
+        sx ux (-fx) 0
+        sy uy (-fy) 0
+        sz uz (-fz) 0
+        (-dot s eye) (-dot u eye) (dot f eye) 1
 
-mat4Perspective :: Float -> Float -> Float -> Float -> Mat4
-mat4Perspective fovY aspect n f =
-  let t = 1 / tan (fovY / 2)
-      fn = f - n
-  in Mat4
-      (t / aspect) 0 0 0
-      0 t 0 0
-      0 0 (f / fn) 1
-      0 0 ((-n * f) / fn) 0
+instance Num a => Num (M44 a) where
+  (+) (M44 a00 a01 a02 a03
+            a10 a11 a12 a13
+            a20 a21 a22 a23
+            a30 a31 a32 a33)
+      (M44 b00 b01 b02 b03
+            b10 b11 b12 b13
+            b20 b21 b22 b23
+            b30 b31 b32 b33) =
+    M44 (a00 + b00) (a01 + b01) (a02 + b02) (a03 + b03)
+         (a10 + b10) (a11 + b11) (a12 + b12) (a13 + b13)
+         (a20 + b20) (a21 + b21) (a22 + b22) (a23 + b23)
+         (a30 + b30) (a31 + b31) (a32 + b32) (a33 + b33)
+  (-) (M44 a00 a01 a02 a03
+            a10 a11 a12 a13
+            a20 a21 a22 a23
+            a30 a31 a32 a33)
+      (M44 b00 b01 b02 b03
+            b10 b11 b12 b13
+            b20 b21 b22 b23
+            b30 b31 b32 b33) =
+    M44 (a00 - b00) (a01 - b01) (a02 - b02) (a03 - b03)
+         (a10 - b10) (a11 - b11) (a12 - b12) (a13 - b13)
+         (a20 - b20) (a21 - b21) (a22 - b22) (a23 - b23)
+         (a30 - b30) (a31 - b31) (a32 - b32) (a33 - b33)
+  (*) (M44 a00 a01 a02 a03
+            a10 a11 a12 a13
+            a20 a21 a22 a23
+            a30 a31 a32 a33)
+      (M44 b00 b01 b02 b03
+            b10 b11 b12 b13
+            b20 b21 b22 b23
+            b30 b31 b32 b33) =
+    M44
+      (a00*b00 + a01*b10 + a02*b20 + a03*b30)
+      (a00*b01 + a01*b11 + a02*b21 + a03*b31)
+      (a00*b02 + a01*b12 + a02*b22 + a03*b32)
+      (a00*b03 + a01*b13 + a02*b23 + a03*b33)
+      (a10*b00 + a11*b10 + a12*b20 + a13*b30)
+      (a10*b01 + a11*b11 + a12*b21 + a13*b31)
+      (a10*b02 + a11*b12 + a12*b22 + a13*b32)
+      (a10*b03 + a11*b13 + a12*b23 + a13*b33)
+      (a20*b00 + a21*b10 + a22*b20 + a23*b30)
+      (a20*b01 + a21*b11 + a22*b21 + a23*b31)
+      (a20*b02 + a21*b12 + a22*b22 + a23*b32)
+      (a20*b03 + a21*b13 + a22*b23 + a23*b33)
+      (a30*b00 + a31*b10 + a32*b20 + a33*b30)
+      (a30*b01 + a31*b11 + a32*b21 + a33*b31)
+      (a30*b02 + a31*b12 + a32*b22 + a33*b32)
+      (a30*b03 + a31*b13 + a32*b23 + a33*b33)
+  negate (M44 a00 a01 a02 a03
+               a10 a11 a12 a13
+               a20 a21 a22 a23
+               a30 a31 a32 a33) =
+    M44 (negate a00) (negate a01) (negate a02) (negate a03)
+         (negate a10) (negate a11) (negate a12) (negate a13)
+         (negate a20) (negate a21) (negate a22) (negate a23)
+         (negate a30) (negate a31) (negate a32) (negate a33)
+  abs (M44 a00 a01 a02 a03
+            a10 a11 a12 a13
+            a20 a21 a22 a23
+            a30 a31 a32 a33) =
+    M44 (abs a00) (abs a01) (abs a02) (abs a03)
+         (abs a10) (abs a11) (abs a12) (abs a13)
+         (abs a20) (abs a21) (abs a22) (abs a23)
+         (abs a30) (abs a31) (abs a32) (abs a33)
+  signum (M44 a00 a01 a02 a03
+               a10 a11 a12 a13
+               a20 a21 a22 a23
+               a30 a31 a32 a33) =
+    M44 (signum a00) (signum a01) (signum a02) (signum a03)
+         (signum a10) (signum a11) (signum a12) (signum a13)
+         (signum a20) (signum a21) (signum a22) (signum a23)
+         (signum a30) (signum a31) (signum a32) (signum a33)
+  fromInteger n =
+    let a = fromInteger n
+    in M44 a 0 0 0
+           0 a 0 0
+           0 0 a 0
+           0 0 0 a
 
-vec3Sub :: Vec3 -> Vec3 -> Vec3
-vec3Sub (Vec3 ax ay az) (Vec3 bx by bz) = Vec3 (ax - bx) (ay - by) (az - bz)
+instance Semigroup (M44 Float) where
+  (<>) = (*)
 
-vec3Dot :: Vec3 -> Vec3 -> Float
-vec3Dot (Vec3 ax ay az) (Vec3 bx by bz) = ax*bx + ay*by + az*bz
-
-vec3Cross :: Vec3 -> Vec3 -> Vec3
-vec3Cross (Vec3 ax ay az) (Vec3 bx by bz) =
-  Vec3 (ay*bz - az*by) (az*bx - ax*bz) (ax*by - ay*bx)
-
-vec3Length :: Vec3 -> Float
-vec3Length v = sqrt (vec3Dot v v)
-
-vec3Normalize :: Vec3 -> Vec3
-vec3Normalize v@(Vec3 x y z) =
-  let len = vec3Length v
-      inv = if len == 0 then 1 else 1 / len
-  in Vec3 (x*inv) (y*inv) (z*inv)
-
-mat4LookAt :: Vec3 -> Vec3 -> Vec3 -> Mat4
-mat4LookAt eye target up =
-  let f = vec3Normalize (vec3Sub target eye)
-      s = vec3Normalize (vec3Cross f up)
-      u = vec3Cross s f
-      Vec3 sx sy sz = s
-      Vec3 ux uy uz = u
-      Vec3 fx fy fz = f
-  in Mat4
-      sx ux (-fx) 0
-      sy uy (-fy) 0
-      sz uz (-fz) 0
-      (-vec3Dot s eye) (-vec3Dot u eye) (vec3Dot f eye) 1
+instance Monoid (M44 Float) where
+  mempty = identity
 
 data Camera2D = Camera2D
-  { camera2DPosition :: Vec2
+  { camera2DPosition :: V2 Float
   , camera2DZoom :: Float
   , camera2DRotation :: Float
   , camera2DViewport :: Maybe (Float, Float)
   }
   deriving (Eq, Show)
 
-camera2D :: Vec2 -> Float -> (Float, Float) -> Camera2D
+camera2D :: V2 Float -> Float -> (Float, Float) -> Camera2D
 camera2D pos zoom viewport =
   Camera2D
     { camera2DPosition = pos
@@ -1967,7 +2119,7 @@ camera2D pos zoom viewport =
     , camera2DViewport = Just viewport
     }
 
-camera2DWindow :: Vec2 -> Float -> Camera2D
+camera2DWindow :: V2 Float -> Float -> Camera2D
 camera2DWindow pos zoom =
   Camera2D
     { camera2DPosition = pos
@@ -1978,11 +2130,11 @@ camera2DWindow pos zoom =
 
 camera2DScreen :: (Float, Float) -> Camera2D
 camera2DScreen (vw, vh) =
-  camera2D (Vec2 (vw / 2) (vh / 2)) 1 (vw, vh)
+  camera2D (V2 (vw / 2) (vh / 2)) 1 (vw, vh)
 
-camera2DMatrix :: (Int, Int) -> Camera2D -> Mat4
+camera2DMatrix :: (Int, Int) -> Camera2D -> M44 Float
 camera2DMatrix size cam =
-  let Vec2 px py = cam.camera2DPosition
+  let V2 px py = cam.camera2DPosition
       (vw, vh) =
         case cam.camera2DViewport of
           Just value -> value
@@ -1997,30 +2149,30 @@ camera2DMatrix size cam =
       right = px + halfW
       top = py - halfH
       bottom = py + halfH
-      proj = mat4Ortho left right bottom top 0 1
+      proj = ortho left right bottom top 0 1
       c = cos (-rot)
       s = sin (-rot)
       rotZ =
-        Mat4 c (-s) 0 0
+        M44 c (-s) 0 0
              s c 0 0
              0 0 1 0
              0 0 0 1
       view =
-        Mat4 1 0 0 (-px)
+        M44 1 0 0 (-px)
              0 1 0 (-py)
              0 0 1 0
              0 0 0 1
-      scale =
-        Mat4 zoom 0 0 0
+      scaleMat =
+        M44 zoom 0 0 0
              0 zoom 0 0
              0 0 1 0
              0 0 0 1
-  in proj `mat4Mul` (rotZ `mat4Mul` (scale `mat4Mul` view))
+  in proj * (rotZ * (scaleMat * view))
 
 data Camera3D = Camera3D
-  { camera3DEye :: Vec3
-  , camera3DTarget :: Vec3
-  , camera3DUp :: Vec3
+  { camera3DEye :: V3 Float
+  , camera3DTarget :: V3 Float
+  , camera3DUp :: V3 Float
   , camera3DFovY :: Float
   , camera3DAspect :: Float
   , camera3DNear :: Float
@@ -2028,7 +2180,7 @@ data Camera3D = Camera3D
   }
   deriving (Eq, Show)
 
-camera3D :: Vec3 -> Vec3 -> Vec3 -> Float -> Float -> Float -> Float -> Camera3D
+camera3D :: V3 Float -> V3 Float -> V3 Float -> Float -> Float -> Float -> Float -> Camera3D
 camera3D eye target up fovY aspect nearZ farZ =
   Camera3D
     { camera3DEye = eye
@@ -2040,34 +2192,34 @@ camera3D eye target up fovY aspect nearZ farZ =
     , camera3DFar = farZ
     }
 
-camera3DView :: Camera3D -> Mat4
+camera3DView :: Camera3D -> M44 Float
 camera3DView cam =
-  mat4LookAt cam.camera3DEye cam.camera3DTarget cam.camera3DUp
+  lookAt cam.camera3DEye cam.camera3DTarget cam.camera3DUp
 
-camera3DProj :: Camera3D -> Mat4
+camera3DProj :: Camera3D -> M44 Float
 camera3DProj cam =
-  mat4Perspective cam.camera3DFovY cam.camera3DAspect cam.camera3DNear cam.camera3DFar
+  perspective cam.camera3DFovY cam.camera3DAspect cam.camera3DNear cam.camera3DFar
 
-camera3DViewProj :: Camera3D -> Mat4
+camera3DViewProj :: Camera3D -> M44 Float
 camera3DViewProj cam =
-  mat4Mul (camera3DProj cam) (camera3DView cam)
+  camera3DProj cam * camera3DView cam
 
-camera3DMVP :: Camera3D -> Mat4 -> Mat4
+camera3DMVP :: Camera3D -> M44 Float -> M44 Float
 camera3DMVP cam model =
-  mat4Mul (camera3DViewProj cam) model
+  camera3DViewProj cam * model
 
-instance Storable Vec2 where
+instance Storable (V2 Float) where
   sizeOf _ = 2 * sizeOf (undefined :: CFloat)
   alignment _ = alignment (undefined :: CFloat)
   peek ptr = do
     x <- peekByteOff ptr 0 :: IO CFloat
     y <- peekByteOff ptr (sizeOf (undefined :: CFloat)) :: IO CFloat
-    pure (Vec2 (realToFrac x) (realToFrac y))
-  poke ptr (Vec2 x y) = do
+    pure (V2 (realToFrac x) (realToFrac y))
+  poke ptr (V2 x y) = do
     pokeByteOff ptr 0 (realToFrac x :: CFloat)
     pokeByteOff ptr (sizeOf (undefined :: CFloat)) (realToFrac y :: CFloat)
 
-instance Storable Vec4 where
+instance Storable (V4 Float) where
   sizeOf _ = 4 * sizeOf (undefined :: CFloat)
   alignment _ = alignment (undefined :: CFloat)
   peek ptr = do
@@ -2076,26 +2228,26 @@ instance Storable Vec4 where
     y <- peekByteOff ptr step :: IO CFloat
     z <- peekByteOff ptr (2 * step) :: IO CFloat
     w <- peekByteOff ptr (3 * step) :: IO CFloat
-    pure (Vec4 (realToFrac x) (realToFrac y) (realToFrac z) (realToFrac w))
-  poke ptr (Vec4 x y z w) = do
+    pure (V4 (realToFrac x) (realToFrac y) (realToFrac z) (realToFrac w))
+  poke ptr (V4 x y z w) = do
     let step = sizeOf (undefined :: CFloat)
     pokeByteOff ptr 0 (realToFrac x :: CFloat)
     pokeByteOff ptr step (realToFrac y :: CFloat)
     pokeByteOff ptr (2 * step) (realToFrac z :: CFloat)
     pokeByteOff ptr (3 * step) (realToFrac w :: CFloat)
 
-instance Storable Mat4 where
+instance Storable (M44 Float) where
   sizeOf _ = 16 * sizeOf (undefined :: CFloat)
   alignment _ = alignment (undefined :: CFloat)
   peek ptr = do
     let step = sizeOf (undefined :: CFloat)
         at n = realToFrac <$> (peekByteOff ptr (n * step) :: IO CFloat)
-    Mat4
+    M44
       <$> at 0 <*> at 1 <*> at 2 <*> at 3
       <*> at 4 <*> at 5 <*> at 6 <*> at 7
       <*> at 8 <*> at 9 <*> at 10 <*> at 11
       <*> at 12 <*> at 13 <*> at 14 <*> at 15
-  poke ptr (Mat4 m00 m01 m02 m03 m10 m11 m12 m13 m20 m21 m22 m23 m30 m31 m32 m33) = do
+  poke ptr (M44 m00 m01 m02 m03 m10 m11 m12 m13 m20 m21 m22 m23 m30 m31 m32 m33) = do
     let step = sizeOf (undefined :: CFloat)
         pokeAt n value = pokeByteOff ptr (n * step) (realToFrac value :: CFloat)
     pokeAt 0 m00
@@ -2179,14 +2331,14 @@ data As2D
   = As2DCamera Camera2D
   | AsUI
   | AsUIWith Shader [ShaderUniform]
-  | AsUIView Mat4
-  | AsUIWithView Shader [ShaderUniform] Mat4
+  | AsUIView (M44 Float)
+  | AsUIWithView Shader [ShaderUniform] (M44 Float)
   | AsUICamera Camera2D
   | AsUIWithCamera Shader [ShaderUniform] Camera2D
   | AsParticle
   | AsParticleWith Shader [ShaderUniform]
-  | AsParticleView Mat4
-  | AsParticleWithView Shader [ShaderUniform] Mat4
+  | AsParticleView (M44 Float)
+  | AsParticleWithView Shader [ShaderUniform] (M44 Float)
   | AsParticleCamera Camera2D
   | AsParticleWithCamera Shader [ShaderUniform] Camera2D
   | As3DCamera Camera3D
@@ -2720,14 +2872,14 @@ readKeySet ptr count = go 0 IntSet.empty
               let acc' = IntSet.insert (fromIntegral keycode) acc
               go (idx + 1) acc'
 
-readMouseState :: IO (Word32, Vec2)
+readMouseState :: IO (Word32, V2 Float)
 readMouseState =
   alloca $ \xPtr ->
     alloca $ \yPtr -> do
       buttons <- sdlGetMouseState xPtr yPtr
       x <- peek xPtr
       y <- peek yPtr
-      pure (buttons, Vec2 (realToFrac x) (realToFrac y))
+      pure (buttons, V2 (realToFrac x) (realToFrac y))
 
 clearIO :: Window -> Color -> IO ()
 clearIO window color = recordClear window color
@@ -3173,11 +3325,11 @@ executePrepared cmd renderPass prepared = do
   sdlDrawGPUPrimitives renderPass prepared.pdVertexCount 1 0 0
   where
     pushUniformVertex cmd' (UniformBinding slot bytes) =
-      BS.useAsCStringLen bytes $ \(ptr, len) ->
-        sdlPushGPUVertexUniformData cmd' slot (castPtr ptr) (fromIntegral len)
+      BS.useAsCStringLen bytes $ \(ptr, byteLen) ->
+        sdlPushGPUVertexUniformData cmd' slot (castPtr ptr) (fromIntegral byteLen)
     pushUniformFragment cmd' (UniformBinding slot bytes) =
-      BS.useAsCStringLen bytes $ \(ptr, len) ->
-        sdlPushGPUFragmentUniformData cmd' slot (castPtr ptr) (fromIntegral len)
+      BS.useAsCStringLen bytes $ \(ptr, byteLen) ->
+        sdlPushGPUFragmentUniformData cmd' slot (castPtr ptr) (fromIntegral byteLen)
 
 releasePrepared :: Window -> PreparedDraw -> IO ()
 releasePrepared window prepared = do
@@ -3313,8 +3465,8 @@ buildShapeDraws window size shape ctx =
 
 lineVertices :: (Int, Int) -> Maybe Transform2D -> Color -> FPoint -> FPoint -> [Vertex]
 lineVertices size transform color p1 p2 =
-  [ mkVertex size transform p1 (Vec2 0 0) color
-  , mkVertex size transform p2 (Vec2 0 0) color
+  [ mkVertex size transform p1 (V2 0 0) color
+  , mkVertex size transform p2 (V2 0 0) color
   ]
 
 rectOutlineVertices :: (Int, Int) -> Maybe Transform2D -> Color -> FRect -> [Vertex]
@@ -3323,14 +3475,14 @@ rectOutlineVertices size transform color (FRect x y w h) =
       p2 = FPoint (x + w) y
       p3 = FPoint (x + w) (y + h)
       p4 = FPoint x (y + h)
-  in [ mkVertex size transform p1 (Vec2 0 0) color
-     , mkVertex size transform p2 (Vec2 0 0) color
-     , mkVertex size transform p2 (Vec2 0 0) color
-     , mkVertex size transform p3 (Vec2 0 0) color
-     , mkVertex size transform p3 (Vec2 0 0) color
-     , mkVertex size transform p4 (Vec2 0 0) color
-     , mkVertex size transform p4 (Vec2 0 0) color
-     , mkVertex size transform p1 (Vec2 0 0) color
+  in [ mkVertex size transform p1 (V2 0 0) color
+     , mkVertex size transform p2 (V2 0 0) color
+     , mkVertex size transform p2 (V2 0 0) color
+     , mkVertex size transform p3 (V2 0 0) color
+     , mkVertex size transform p3 (V2 0 0) color
+     , mkVertex size transform p4 (V2 0 0) color
+     , mkVertex size transform p4 (V2 0 0) color
+     , mkVertex size transform p1 (V2 0 0) color
      ]
 
 rectFillVertices :: (Int, Int) -> Maybe Transform2D -> Color -> FRect -> [Vertex]
@@ -3339,10 +3491,10 @@ rectFillVertices size transform color (FRect x y w h) =
       p2 = FPoint (x + w) y
       p3 = FPoint (x + w) (y + h)
       p4 = FPoint x (y + h)
-      uv1 = Vec2 0 0
-      uv2 = Vec2 1 0
-      uv3 = Vec2 1 1
-      uv4 = Vec2 0 1
+      uv1 = V2 0 0
+      uv2 = V2 1 0
+      uv3 = V2 1 1
+      uv4 = V2 0 1
   in [ mkVertex size transform p1 uv1 color
      , mkVertex size transform p2 uv2 color
      , mkVertex size transform p4 uv4 color
@@ -3371,10 +3523,10 @@ spriteVertices size transform tex src dst =
       p2 = FPoint (dx + dw) dy
       p3 = FPoint (dx + dw) (dy + dh)
       p4 = FPoint dx (dy + dh)
-      uv1 = Vec2 u0 v0
-      uv2 = Vec2 u1 v0
-      uv3 = Vec2 u1 v1
-      uv4 = Vec2 u0 v1
+      uv1 = V2 u0 v0
+      uv2 = V2 u1 v0
+      uv3 = V2 u1 v1
+      uv4 = V2 u0 v1
       white = rgba 1 1 1 1
   in [ mkVertex size transform p1 uv1 white
      , mkVertex size transform p2 uv2 white
@@ -3406,12 +3558,12 @@ textVertices size textObj x y ctx = do
       let idx = fromIntegral i
           FPoint px py = xy !! idx
           FPoint u v = uv !! idx
-          uvVec = Vec2 (realToFrac u) (realToFrac v)
+          uvVec = V2 (realToFrac u) (realToFrac v)
           white = rgba 1 1 1 1
       in mkVertex size ctx.ctxTransform (FPoint px py) uvVec white
 
-mkVertex :: (Int, Int) -> Maybe Transform2D -> FPoint -> Vec2 -> Color -> Vertex
-mkVertex (w, h) transform (FPoint x y) (Vec2 u v) (Color r g b a) =
+mkVertex :: (Int, Int) -> Maybe Transform2D -> FPoint -> V2 Float -> Color -> Vertex
+mkVertex (w, h) transform (FPoint x y) (V2 u v) (Color r g b a) =
   let (nx, ny) =
         case transform of
           Nothing ->
@@ -3421,12 +3573,12 @@ mkVertex (w, h) transform (FPoint x y) (Vec2 u v) (Color r g b a) =
                , 1 - (realToFrac y / hf) * 2
                )
           Just (TransformMatrix mat) ->
-            let Vec4 tx ty _ tw = mat4MulVec4 mat (Vec4 (realToFrac x) (realToFrac y) 0 1)
+            let V4 tx ty _ tw = m44MulV4 mat (V4 (realToFrac x) (realToFrac y) 0 1)
                 invW = if tw == 0 then 1 else 1 / tw
             in (tx * invW, ty * invW)
           Just (TransformCamera cam) ->
             let mat = camera2DMatrix (w, h) cam
-                Vec4 tx ty _ tw = mat4MulVec4 mat (Vec4 (realToFrac x) (realToFrac y) 0 1)
+                V4 tx ty _ tw = m44MulV4 mat (V4 (realToFrac x) (realToFrac y) 0 1)
                 invW = if tw == 0 then 1 else 1 / tw
             in (tx * invW, ty * invW)
   in Vertex
@@ -3529,7 +3681,7 @@ createTransientMesh3D :: [Vertex3D] -> WindowM Mesh
 createTransientMesh3D vertices =
   createTransientMesh mesh3DLayout vertices
 
-mesh3D :: Mesh -> Mat4 -> [Binding] -> Mesh3D
+mesh3D :: Mesh -> M44 Float -> [Binding] -> Mesh3D
 mesh3D = Mesh3D
 
 destroyMesh :: Mesh -> WindowM ()
@@ -4006,7 +4158,7 @@ instance Draw As2D Mesh3D where
       _ ->
         Loop (liftIO (ioError (userError "Mesh3D draw requires basic3D camera context")))
 
-bindMesh3DMVP :: Mat4 -> [Binding] -> [Binding]
+bindMesh3DMVP :: M44 Float -> [Binding] -> [Binding]
 bindMesh3DMVP mvp bindings =
   let filtered = filter (not . isSlot0Binding) bindings
   in BindVertexUniform 0 (BindingValue mvp) : filtered
@@ -4606,10 +4758,10 @@ createShaderFromSpirvWithDevice device spirv numSamplers numStorageTextures numS
 
 createRawShader :: GPUDevice -> ByteString -> SDL_GPUShaderStage -> Word32 -> Word32 -> Word32 -> Word32 -> IO (Maybe GPUShader)
 createRawShader device spirv stage numSamplers numStorageTextures numStorageBuffers numUniformBuffers =
-  BS.useAsCStringLen spirv $ \(ptr, len) ->
+  BS.useAsCStringLen spirv $ \(ptr, byteLen) ->
     withCString "main" $ \entry -> do
       let createInfo = GPUShaderCreateInfo
-            { gpuShaderCodeSize = fromIntegral len
+            { gpuShaderCodeSize = fromIntegral byteLen
             , gpuShaderCode = castPtr ptr
             , gpuShaderEntryPoint = entry
             , gpuShaderFormat = sdlGPUShaderFormatSpirv
@@ -4654,12 +4806,12 @@ destroyFragmentShader = destroyShader
 createComputePipelineIO :: Window -> ComputeDesc -> IO ComputePipeline
 createComputePipelineIO window desc = do
   let device = window.appGPUDevice
-  BS.useAsCStringLen desc.computeShaderCode $ \(ptr, len) ->
+  BS.useAsCStringLen desc.computeShaderCode $ \(ptr, byteLen) ->
     withCString "main" $ \entry -> do
       let (threadsX, threadsY, threadsZ) = desc.computeThreads
       let createInfo =
             GPUComputePipelineCreateInfo
-              { gpuComputeCodeSize = fromIntegral len
+            { gpuComputeCodeSize = fromIntegral byteLen
               , gpuComputeCode = castPtr ptr
               , gpuComputeEntryPoint = entry
               , gpuComputeFormat = sdlGPUShaderFormatSpirv
@@ -4727,8 +4879,8 @@ dispatchCompute pipeline bindings (groupX, groupY, groupZ) = do
   let readOnlyTextures = map (\tex -> tex.textureHandle) resolved.cbReadOnlyTextures
   liftIO (sdlBindGPUComputeStorageTextures computePass 0 readOnlyTextures)
   liftIO $ forM_ resolved.cbUniforms $ \(UniformBinding slot bytes) ->
-    BS.useAsCStringLen bytes $ \(ptr, len) ->
-      sdlPushGPUComputeUniformData cmd slot (castPtr ptr) (fromIntegral len)
+    BS.useAsCStringLen bytes $ \(ptr, byteLen) ->
+      sdlPushGPUComputeUniformData cmd slot (castPtr ptr) (fromIntegral byteLen)
   liftIO (sdlDispatchGPUCompute computePass groupX groupY groupZ)
   liftIO (sdlEndGPUComputePass computePass)
   ok <- liftIO (sdlSubmitGPUCommandBuffer cmd)
