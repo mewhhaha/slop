@@ -353,6 +353,7 @@ import qualified Data.ByteString.Internal as BSI
 import Data.Dynamic (Dynamic, fromDynamic, toDyn)
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
+import Data.Kind (Type)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Monoid (Last (..))
@@ -1467,17 +1468,17 @@ awaitAsset assetId = do
         Just (AssetFailed err) -> pure (Left err)
         Just (AssetReady value) -> pure (Right value)
 
-getAsset :: forall a. Typeable a => AssetId a -> WindowM (Maybe a)
+getAsset :: forall (a :: Type). Typeable a => AssetId a -> WindowM (Maybe a)
 getAsset assetId = do
   status <- getAssetStatus assetId
   case status of
     Just (AssetReady value) -> pure (Just value)
     _ -> pure Nothing
 
-getAssetReady :: forall a. Typeable a => AssetId a -> WindowM (Maybe a)
+getAssetReady :: forall (a :: Type). Typeable a => AssetId a -> WindowM (Maybe a)
 getAssetReady = getAsset
 
-assetReady :: forall a. Typeable a => AssetId a -> WindowM Bool
+assetReady :: forall (a :: Type). Typeable a => AssetId a -> WindowM Bool
 assetReady assetId = isJust <$> getAsset assetId
 
 getAssetStatus :: forall a. Typeable a => AssetId a -> WindowM (Maybe (AssetStatus a))
@@ -2479,7 +2480,6 @@ data TextStyle = TextStyle
   , textEffect :: Maybe SpriteEffect
   , textBlend :: Maybe BlendMode
   }
-  deriving (Eq, Show)
 
 defaultTextStyle :: TextStyle
 defaultTextStyle =
@@ -2854,21 +2854,21 @@ runWindowIO cfg action =
                                 , appHotReload = hotReload
                                 , appFrameContext = frameContext
                                 , appRecording = recording
-                              , appWindowSize = windowSize
-                              , appWhiteTexture = whiteTexture
-                              , appVertexShader = vertShader
-                              , appVertexShader3D = vertShader3D
-                              , appDefaultShader = defShader
-                              , appPipelines = pipelines
-                              , appDrawColor = drawColor
-                              }
-                        workerCount <-
-                          if cfg.assetWorkers <= 0
-                            then max 1 <$> getNumCapabilities
-                            else pure cfg.assetWorkers
-                        bracket (initAssetManager windowBase workerCount) (shutdownAssetManager windowBase) $ \assets -> do
-                          let windowHandle = windowBase { appAssets = assets }
-                          action windowHandle `finally` (cleanupPipelines windowHandle >> cleanupRenderTargets windowHandle >> cleanupDepthTargets windowHandle)
+                                , appWindowSize = windowSize
+                                , appWhiteTexture = whiteTexture
+                                , appVertexShader = vertShader
+                                , appVertexShader3D = vertShader3D
+                                , appDefaultShader = defShader
+                                , appPipelines = pipelines
+                                , appDrawColor = drawColor
+                                }
+                          workerCount <-
+                            if cfg.assetWorkers <= 0
+                              then max 1 <$> getNumCapabilities
+                              else pure cfg.assetWorkers
+                          bracket (initAssetManager windowBase workerCount) (shutdownAssetManager windowBase) $ \assets -> do
+                            let windowHandle = windowBase { appAssets = assets }
+                            action windowHandle `finally` (cleanupPipelines windowHandle >> cleanupRenderTargets windowHandle >> cleanupDepthTargets windowHandle)
   where
     initSDL = do
       ok <- sdlInit (sdlInitVideo .|. sdlInitAudio)
