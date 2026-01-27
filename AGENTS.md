@@ -9,11 +9,13 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 ## Config
 
 - `Config.assetWorkers` controls the number of background asset-loading threads (`0` = auto based on GHC capabilities).
+- `Config.debugLog` enables `logDebug`.
 
 ## Layout
 
 - `slop.cabal` — package metadata (library + demo executable).
 - `lib/Slop.hs` — public API (window/loop, rendering, assets, audio pools).
+- `lib/Slop/Math.hs` — vector/matrix types and math helpers.
 - `lib/Slop/SDL/Raw.hs` — raw FFI bindings for SDL3 + SDL_gpu + SDL3_image/ttf/mixer.
 - `lib/Slop/Pipeline.hs` — explicit render targets + pass-based pipeline helpers.
 - `lib/Slop/Pipeline/Graph.hs` — graph-based pipeline DSL (implicit targets).
@@ -43,6 +45,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 - Depth/stencil is enabled for `basic3D` (depth test + write). The renderer allocates a depth target per swapchain/render target as needed.
 - 2D camera helpers are CPU-side transforms via `camera2DMatrix`.
 - `SpriteEffect` is a typed wrapper for per-sprite shader overrides.
+- `SlopGlobals` uniform (slot 0) is auto-bound for fragment shaders with uniform buffers (time, renderSize, dpiScale).
 - Declarative pipeline builders: `defaultGraphics`/`graphicsPipeline` and `defaultCompute`/`computePipeline`.
 - Compute pipelines use `computePipeline` + `dispatchCompute`, or `compute` steps inside the graph DSL.
 
@@ -55,13 +58,16 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 ## Text
 
 - Text uses SDL_ttf GPU TextEngine.
-- `drawText` uses the text cache and prunes unused entries each frame.
+- `drawText`/`drawTextWith`/`measureText` use the text cache and prune unused entries each frame.
 - Configure text atlas size via `Config.textAtlasSize` to reduce GPU memory if needed.
+- Public text APIs take `Data.Text.Text` (`OverloadedStrings` recommended).
+- `TextStylePatch` gives compositional style changes (`Monoid`).
 
 ## Input
 
 - Input is keycode-based (layout-aware), not raw scancodes.
-- `Frame` includes `quitRequested`, `size`, `input` (prev/now for justPressed/justReleased).
+- `Frame` includes `quitRequested`, `size` (logical), `renderSize` (drawable), `dpiScale`, and `input` (prev/now for justPressed/justReleased).
+- `input.events` provides per-frame `InputEvent` values (text, wheel, quit).
 
 ## Assets
 
@@ -105,3 +111,13 @@ Phase 4: Add safer uniform helpers (size-checked or bytes-first) and document ne
 Phase 5: Update Spirdo to track latest, simplify `exe/Main.hs` with the input builder, and remove boilerplate shader binding code. (done)
 
 Phase 6: Update docs for camera-required `basic2D`/`basic3D`, fix README examples, and clean up AGENTS notes. (done)
+
+## Refactor Phases (Current)
+
+Phase A: Move text-facing API to `Data.Text` (draw/measure/cache/input), update demo + README. (done)
+
+Phase B: Fix render-graph target retention by pruning unused node targets per render. (done)
+
+Phase C: Replace busy-polling in `awaitAsset`/`awaitAssetUpdate` with STM blocking + main-queue servicing. (done)
+
+Phase D: Performance/ergonomics cleanup (strict fields for hot structs, `IntMap` for asset IDs + pipeline targets). (done)

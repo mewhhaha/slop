@@ -3,13 +3,13 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-missing-signatures #-}
 
 module Main (main) where
 
-import Control.Monad.IO.Class (liftIO)
 import Data.Word (Word32)
 import Foreign.Ptr (nullPtr, ptrToWordPtr, wordPtrToPtr)
 import GHC.Generics (Generic)
@@ -45,14 +45,15 @@ instance ToUniform Params
 
 demoShader =
   [wesl|
-struct Params {
+struct SlopGlobals {
   time: f32,
-  width: f32,
-  height: f32,
-  _pad: f32,
+  _pad0: f32,
+  renderSize: vec2<f32>,
+  dpiScale: vec2<f32>,
+  _pad1: vec2<f32>,
 };
 
-@group(3) @binding(0) var<uniform> params: Params;
+@group(0) @binding(0) var<uniform> slop: SlopGlobals;
 @group(2) @binding(0) var spriteTex: texture_2d<f32>;
 @group(2) @binding(1) var spriteSamp: sampler;
 @group(2) @binding(2) var noiseTex: texture_2d<f32>;
@@ -66,15 +67,15 @@ fn main(@location(0) uv: vec2<f32>, @location(1) inColor: vec4<f32>) -> @locatio
   let barrel = 1.0 + 0.12 * r * r;
   let uvDistorted = center + offset * barrel;
 
-  let chroma = (0.0015 + 0.0015 * sin(params.time * 0.7)) * (1.0 + r * 1.5);
+  let chroma = (0.0015 + 0.0015 * sin(slop.time * 0.7)) * (1.0 + r * 1.5);
   let sampleR = textureSample(spriteTex, spriteSamp, uvDistorted + vec2(chroma, 0.0));
   let sampleG = textureSample(spriteTex, spriteSamp, uvDistorted);
   let sampleB = textureSample(spriteTex, spriteSamp, uvDistorted - vec2(chroma, 0.0));
 
   let vignette = 1.0 - smoothstep(0.35, 0.95, r);
-  let scan = 0.92 + 0.08 * sin(uv.y * params.height * 0.25 + params.time * 18.0);
-  let noise = fract(sin(dot(uv * vec2(12.9898, 78.233), vec2(12.9898, 78.233)) + params.time * 10.0) * 43758.5453);
-  let noiseTexSample = textureSample(noiseTex, noiseSamp, uv * vec2(3.0, 3.0) + vec2(params.time * 0.03, params.time * 0.01));
+  let scan = 0.92 + 0.08 * sin(uv.y * slop.renderSize.y * 0.25 + slop.time * 18.0);
+  let noise = fract(sin(dot(uv * vec2(12.9898, 78.233), vec2(12.9898, 78.233)) + slop.time * 10.0) * 43758.5453);
+  let noiseTexSample = textureSample(noiseTex, noiseSamp, uv * vec2(3.0, 3.0) + vec2(slop.time * 0.03, slop.time * 0.01));
 
   var color = vec3(sampleR.r, sampleG.g, sampleB.b);
   color = color * vignette * scan;
@@ -87,23 +88,31 @@ fn main(@location(0) uv: vec2<f32>, @location(1) inColor: vec4<f32>) -> @locatio
 
 noise3dShader =
   [wesl|
-struct Params {
+struct SlopGlobals {
   time: f32,
-  width: f32,
-  height: f32,
-  _pad: f32,
+  _pad0: f32,
+  renderSize: vec2<f32>,
+  dpiScale: vec2<f32>,
+  _pad1: vec2<f32>,
 };
 
-@group(3) @binding(0) var<uniform> params: Params;
-@group(2) @binding(0) var noiseTex3D: texture_3d<f32>;
-@group(2) @binding(1) var noiseSamp: sampler;
+@group(0) @binding(0) var<uniform> slop: SlopGlobals;
+@group(2) @binding(0) var spriteTex: texture_2d<f32>;
+@group(2) @binding(1) var spriteSamp: sampler;
+@group(2) @binding(2) var noiseTex3D: texture_3d<f32>;
+@group(2) @binding(3) var noiseSamp: sampler;
 
 @fragment
 fn main(@location(0) uv: vec2<f32>, @location(1) inColor: vec4<f32>) -> @location(0) vec4<f32> {
-  let t = fract(params.time / 6.0);
-  let n = textureSample(noiseTex3D, noiseSamp, vec3(uv.x, uv.y, t)).r;
-  let v = smoothstep(0.35, 0.65, n);
-  let col = vec3(v, v, v);
+  let t = slop.time * 0.06;
+  let uvNoise = uv * vec2(1.4, 1.4);
+  let n0 = textureSample(noiseTex3D, noiseSamp, vec3(uvNoise.x, uvNoise.y, t)).r;
+  let n1 = textureSample(noiseTex3D, noiseSamp, vec3(uvNoise.x + 0.25, uvNoise.y + 0.15, t + 0.17)).r;
+  let v = smoothstep(0.25, 0.75, n0);
+  let clouds = mix(v, n1, 0.35);
+  let base = textureSample(spriteTex, spriteSamp, uv).rgb;
+  let tint = vec3(0.15, 0.45, 0.9);
+  let col = mix(base, tint * (0.6 + clouds), vec3(0.65, 0.65, 0.65));
   return vec4(col.r * inColor.r, col.g * inColor.g, col.b * inColor.b, inColor.a);
 }
 |]
@@ -147,21 +156,20 @@ main = do
           }
 
   runWindow cfg $ do
-    let orCrash label = either (liftIO . ioError . userError . (\msg -> label <> ": " <> msg)) pure
-    let load label spec = loadAssetAsync spec >>= awaitAsset >>= orCrash label
-    let prepareOrCrash label shader = orCrash label (prepareShader shader)
-    let inputsOrCrash label prepared builder = orCrash label (inputsFromPrepared prepared builder)
+    let load label spec = loadAssetAsync spec >>= awaitAsset >>= expect label
+    let prepare label shader = expect label (prepareShader shader)
+    let inputs label prepared builder = expect label (inputsFromPrepared prepared builder)
 
-    demoPrepared <- prepareOrCrash "demoShader" demoShader
-    noise3dPrepared <- prepareOrCrash "noise3dShader" noise3dShader
-    computePrepared <- prepareOrCrash "computeShader" computeShader
+    demoPrepared <- prepare "demoShader" demoShader
+    noise3dPrepared <- prepare "noise3dShader" noise3dShader
+    computePrepared <- prepare "computeShader" computeShader
 
     computePipe <-
       load "compute pipeline" (ComputePipelineAsset defaultCompute
         { computeShaderCode = shaderSpirv computeShader
         , computeReadwriteStorageTextures = 1
         , computeUniformBuffers = 1
-        , computeThreads = (8, 8, 1)
+        , computeThreads = threads3D 8 8 1
         })
 
     let computeSize = 256
@@ -184,20 +192,26 @@ main = do
         })
 
     shader <- load "effect shader" (ShaderAsset (shaderSpirv demoShader) 2 0 0 1)
-    noise3dShaderHandle <- load "noise3d shader" (ShaderAsset (shaderSpirv noise3dShader) 1 0 0 1)
+    noise3dShaderHandle <- load "noise3d shader" (ShaderAsset (shaderSpirv noise3dShader) 2 0 0 1)
+    let noiseSize = 512
     let noiseSettings =
-          defaultNoiseSettings
-            { noiseType = NoisePerlin
-            , noiseScale = 96
-            , noiseOctaves = 4
-            }
-    noiseTex <- load "noise" (NoiseTexture2DAsset 256 256 noiseSettings)
+          loopNoise2D noiseSize noiseSize
+            defaultNoiseSettings
+              { noiseType = NoisePerlin
+              , noiseScale = 16
+              , noiseOctaves = 4
+              }
+    noiseTex <- load "noise" (NoiseTexture2DAsset noiseSize noiseSize noiseSettings)
+    let volumeSize = 160
     let volumeSettings =
-          noiseSettings
-            { noiseScale = 32
-            , noisePeriod3D = Just (4, 4, 4)
-            }
-    noiseVolume <- load "noise3d" (NoiseTexture3DAsset 128 128 128 volumeSettings)
+          loopNoise3D volumeSize volumeSize volumeSize
+            defaultNoiseSettings
+              { noiseType = NoisePerlin
+              , noiseScale = 8
+              , noiseOctaves = 5
+              , noiseGain = 0.55
+              }
+    noiseVolume <- load "noise3d" (NoiseTexture3DAsset volumeSize volumeSize volumeSize volumeSettings)
 
     blend <- createTrackPool PoolBlend 2
     sfxPool <- createTrackPool PoolRoundRobin 8
@@ -208,63 +222,63 @@ main = do
     let computeGroups = (groupsX, groupsY, 1)
 
     _ <- loop (0 :: Int) $ \frame active -> do
-      let (winWInt, winHInt) = frame.size
+      let (winWInt, winHInt) = frame.renderSize
       let winW = fromIntegral winWInt
       let winH = fromIntegral winHInt
-      let winRect = rect 0 0 winW winH
+      let winRect = fullscreenRect frame.renderSize
       let cam2d =
             camera2D
               (V2 (winW / 2 + 40 * sin frame.time) (winH / 2 + 140))
               1
               (winW, winH)
-      let params = Params frame.time winW winH 0
       let computeParams = Params frame.time (fromIntegral computeSize) (fromIntegral computeSize) 0
 
       computeInputs <-
-        inputsOrCrash "compute inputs" computePrepared
+        inputs "compute inputs" computePrepared
           ( Inputs.storageTexture @"out_tex" (toStorageHandle computeTex)
               <> Inputs.uniform @"params" computeParams
           )
 
       effectInputs <-
-        inputsOrCrash "effect inputs" demoPrepared
-          ( Inputs.uniform @"params" params
-              <> Inputs.texture @"spriteTex" (toTextureHandle texture)
+        inputs "effect inputs" demoPrepared
+          ( Inputs.texture @"spriteTex" (toTextureHandle texture)
               <> Inputs.sampler @"spriteSamp" (toSamplerHandle sampler)
               <> Inputs.texture @"noiseTex" (toTextureHandle computeTex)
               <> Inputs.sampler @"noiseSamp" (toSamplerHandle sampler)
           )
       let effect = spriteEffectFrom shader effectInputs
       volumeInputs <-
-        inputsOrCrash "noise3d inputs" noise3dPrepared
-          ( Inputs.uniform @"params" params
+        inputs "noise3d inputs" noise3dPrepared
+          ( Inputs.texture @"spriteTex" (toTextureHandle computeTex)
+              <> Inputs.sampler @"spriteSamp" (toSamplerHandle sampler)
               <> Inputs.texture @"noiseTex3D" (toTextureHandle noiseVolume)
               <> Inputs.sampler @"noiseSamp" (toSamplerHandle sampler)
           )
       let volumeEffect = spriteEffectFrom noise3dShaderHandle volumeInputs
 
-      let pipeline = do
+      let scene =
+            pass $ mconcat
+              [ clear (rgb 0.06 0.07 0.1)
+              , draw basicUI (Line (rgb 0.95 0.35 0.35) (point 80 90) (point 400 130))
+              , draw basicUI (RectOutline (rgb 0.2 0.8 0.9) (rect 80 150 200 120))
+              , draw basicUI (RectFill (rgba 0.25 0.25 0.8 0.9) (rect 320 150 120 120))
+              , draw basicUI (Sprite texture Nothing (rect 80 320 160 160) Nothing)
+              , draw basicUI (Sprite computeTex Nothing (rect 520 70 180 180) Nothing)
+              , draw basicUI (Sprite noiseTex Nothing (rect 720 70 180 180) Nothing)
+              , draw basicUI (Sprite computeTex Nothing (rect 520 260 180 180) (Just volumeEffect))
+              , draw basicUI (Sprite texture Nothing (rect 320 320 200 160) (Just effect))
+              , draw basicUI (textWith (defaultTextStyle { textColor = rgb 0.95 0.9 0.6 }) font "Slop + SDL3.4" 80 40)
+              , draw (basic2D cam2d) (RectFill (rgba 0.1 0.1 0.2 0.9) (rect 60 320 560 180))
+              , draw (basic2D cam2d) (RectOutline (rgb 0.15 0.7 0.6) (rect 60 320 560 180))
+              , draw (basic2D cam2d) (Line (rgb 0.85 0.75 0.2) (point 80 350) (point 560 350))
+              , draw (basic2D cam2d) (Sprite texture Nothing (rect 100 380 120 120) Nothing)
+              , draw (basic2D cam2d) (Sprite computeTex Nothing (rect 260 380 120 120) Nothing)
+              , draw (basic2D cam2d) (Sprite texture Nothing (rect 420 360 160 140) (Just effect))
+              ]
+
+      let pipeline =
             compute computePipe (computeBindingsFrom computeInputs) computeGroups
-            scene <- pass $ do
-              clear (rgb 0.06 0.07 0.1)
-              draw basicUI (Line (rgb 0.95 0.35 0.35) (point 80 90) (point 400 130))
-              draw basicUI (RectOutline (rgb 0.2 0.8 0.9) (rect 80 150 200 120))
-              draw basicUI (RectFill (rgba 0.25 0.25 0.8 0.9) (rect 320 150 120 120))
-              draw basicUI (Sprite texture Nothing (rect 80 320 160 160) Nothing)
-              draw basicUI (Sprite computeTex Nothing (rect 520 70 180 180) Nothing)
-              draw basicUI (Sprite noiseTex Nothing (rect 720 70 180 180) Nothing)
-              draw basicUI (Sprite noiseVolume Nothing (rect 520 260 180 180) (Just volumeEffect))
-              draw basicUI (Sprite texture Nothing (rect 320 320 200 160) (Just effect))
-              let titleStyle = defaultTextStyle { textColor = rgb 0.95 0.9 0.6 }
-              draw basicUI (textWith titleStyle font "Slop + SDL3.4" 80 40)
-              let sceneY = 320
-              draw (basic2D cam2d) (RectFill (rgba 0.1 0.1 0.2 0.9) (rect 60 sceneY 560 180))
-              draw (basic2D cam2d) (RectOutline (rgb 0.15 0.7 0.6) (rect 60 sceneY 560 180))
-              draw (basic2D cam2d) (Line (rgb 0.85 0.75 0.2) (point 80 (sceneY + 30)) (point 560 (sceneY + 30)))
-              draw (basic2D cam2d) (Sprite texture Nothing (rect 100 (sceneY + 60) 120 120) Nothing)
-              draw (basic2D cam2d) (Sprite computeTex Nothing (rect 260 (sceneY + 60) 120 120) Nothing)
-              draw (basic2D cam2d) (Sprite texture Nothing (rect 420 (sceneY + 40) 160 140) (Just effect))
-            output scene Nothing winRect
+              *> outputOf scene Nothing winRect
 
       active' <- if keyPressed KeyB frame.input
         then do
@@ -279,7 +293,7 @@ main = do
         then playPool sfxPool sfx
         else pure False
 
-      render (winWInt, winHInt) pipeline
+      render frame.renderSize pipeline
       pure (Continue active')
 
     removeAllAssets

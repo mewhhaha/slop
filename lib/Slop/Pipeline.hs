@@ -5,7 +5,7 @@
 module Slop.Pipeline
   ( TargetRef(..)
   , RenderPlan
-  , PlanM
+  , PlanM(..)
   , PassM
   , Pipeline
   , plan
@@ -28,11 +28,12 @@ module Slop.Pipeline
   , postProcess
   ) where
 
+import Data.Foldable (traverse_)
 import Slop
   ( Color
   , Draw
   , PassM
-  , PlanM
+  , PlanM(..)
   , RenderPlan
   , RenderTarget
   , Shader
@@ -66,7 +67,13 @@ postProcess :: RenderTarget -> Shader -> [ShaderUniform] -> Maybe FRect -> FRect
 postProcess = passPostProcess
 
 newtype Pipeline a = Pipeline (PlanM a)
-  deriving (Functor, Applicative, Monad)
+  deriving (Functor, Applicative)
+
+instance Semigroup a => Semigroup (Pipeline a) where
+  Pipeline a <> Pipeline b = Pipeline (liftA2 (<>) a b)
+
+instance Monoid a => Monoid (Pipeline a) where
+  mempty = pure mempty
 
 pipeline :: Pipeline a -> RenderPlan
 pipeline (Pipeline action) = plan action
@@ -76,10 +83,7 @@ runPipeline = runPlan . pipeline
 
 fork :: Pipeline a -> Pipeline b -> Pipeline (a, b)
 fork (Pipeline left) (Pipeline right) =
-  Pipeline $ do
-    a <- left
-    b <- right
-    pure (a, b)
+  Pipeline (liftA2 (,) left right)
 
 join :: RenderTarget -> [RenderTarget] -> Maybe FRect -> FRect -> Pipeline RenderTarget
 join = merge
@@ -95,19 +99,19 @@ output target src dst =
   passTo WindowTarget (blit target src dst)
 
 postProcessTo :: RenderTarget -> RenderTarget -> Shader -> [ShaderUniform] -> Maybe FRect -> FRect -> Pipeline RenderTarget
-postProcessTo input outputTarget shader uniforms src dst = do
-  passTo (Target outputTarget) (postProcess input shader uniforms src dst)
-  pure outputTarget
+postProcessTo input outputTarget shader uniforms src dst =
+  Pipeline (pass (Target outputTarget) (postProcess input shader uniforms src dst) *> pure outputTarget)
 
 merge :: RenderTarget -> [RenderTarget] -> Maybe FRect -> FRect -> Pipeline RenderTarget
-merge outputTarget inputs src dst = do
-  passTo (Target outputTarget) (mapM_ (\target -> blit target src dst) inputs)
-  pure outputTarget
+merge outputTarget inputs src dst =
+  Pipeline (pass (Target outputTarget) (traverse_ (\target -> blit target src dst) inputs) *> pure outputTarget)
 
 linear :: RenderTarget -> RenderTarget -> [(Shader, [ShaderUniform])] -> Maybe FRect -> FRect -> Pipeline RenderTarget
-linear first second passes src dst = go first second passes
+linear first second passes src dst =
+  Pipeline (PlanM (go first second passes))
   where
     go current _ [] = pure current
     go current next ((shader, uniforms) : rest) = do
-      _ <- postProcessTo current next shader uniforms src dst
-      go next current rest
+      let Pipeline (PlanM step) = postProcessTo current next shader uniforms src dst
+      current' <- step
+      go current' current rest

@@ -243,6 +243,7 @@ module Slop.SDL.Raw
   , sdlStartTextInput
   , sdlStopTextInput
   , sdlGetWindowSize
+  , sdlGetWindowSizeInPixels
   , allocaEvent
   , peekEventType
   , sdlGetTicks
@@ -3560,6 +3561,18 @@ sdlGetWindowSize (Window win) =
   alloca $ \wPtr ->
     alloca $ \hPtr -> do
       c_SDL_GetWindowSize win wPtr hPtr
+      w <- peek wPtr
+      h <- peek hPtr
+      pure (fromIntegral w, fromIntegral h)
+
+foreign import ccall unsafe "SDL_GetWindowSizeInPixels" c_SDL_GetWindowSizeInPixels
+  :: Ptr SDL_Window -> Ptr CInt -> Ptr CInt -> IO ()
+
+sdlGetWindowSizeInPixels :: Window -> IO (Int, Int)
+sdlGetWindowSizeInPixels (Window win) =
+  alloca $ \wPtr ->
+    alloca $ \hPtr -> do
+      c_SDL_GetWindowSizeInPixels win wPtr hPtr
       w <- peek wPtr
       h <- peek hPtr
       pure (fromIntegral w, fromIntegral h)

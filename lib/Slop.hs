@@ -15,6 +15,9 @@ module Slop
   , WindowM
   , Window(..)
   , Loop
+  , Resource(..)
+  , withResource
+  , releaseResource
   , runWindowM
   , runWindow
   , runWindowIO
@@ -22,6 +25,7 @@ module Slop
   , liftWindow
   , runLoop
   , liftLoop
+  , logDebug
   , startTextInput
   , stopTextInput
   , loop
@@ -35,12 +39,37 @@ module Slop
   , TextureUsage(..)
   , TextureDesc(..)
   , textureDesc
+  , textureDescSize
+  , Positive(..)
+  , mkPositive
+  , positive
+  , Size2D(..)
+  , Size3D(..)
+  , mkSize2D
+  , mkSize3D
+  , size2D
+  , size3D
+  , size2DToTuple
+  , size3DToTuple
+  , Threads2D(..)
+  , Threads3D(..)
+  , mkThreads2D
+  , mkThreads3D
+  , threads2D
+  , threads3D
+  , threads2DToInts
+  , threads3DToInts
   , createTexture2D
+  , createTexture2DSize
   , createNoiseTexture2D
+  , createNoiseTexture2DSize
   , createNoiseTexture3D
+  , createNoiseTexture3DSize
   , NoiseType(..)
   , NoiseSettings(..)
   , defaultNoiseSettings
+  , loopNoise2D
+  , loopNoise3D
   , VertexAttrFormat(..)
   , VertexAttr(..)
   , VertexLayout(..)
@@ -100,6 +129,7 @@ module Slop
   , computeStorageTextureRW
   , RenderTarget
   , createRenderTarget
+  , createRenderTargetSize
   , withRenderTarget
   , destroyTarget
   , render
@@ -108,8 +138,8 @@ module Slop
   , postProcess
   , TargetRef(..)
   , RenderPlan
-  , PlanM
-  , PassM
+  , PlanM(..)
+  , PassM(..)
   , plan
   , pass
   , runPlan
@@ -130,7 +160,6 @@ module Slop
   , drawTextRaw
   , drawTextRawWith
   , measureText
-  , measureTextCached
   , textStyle
   , textColor
   , textEffect
@@ -139,16 +168,20 @@ module Slop
   , defaultTextStyle
   , textWith
   , Frame(..)
+  , SlopGlobals(..)
+  , slopGlobals
   , LoopControl(..)
   , LoopExit(..)
   , InputState(..)
   , InputFrame(..)
+  , InputEvent(..)
   , Modifiers(..)
   , inputPrev
   , inputNow
   , inputText
   , inputWheel
   , inputMods
+  , inputEvents
   , Key(..)
   , MouseButton(..)
   , mouseLeft
@@ -164,16 +197,7 @@ module Slop
   , mouseButtonPressed
   , mouseButtonReleased
   , Color(..)
-  , V2(..)
-  , V3(..)
-  , V4(..)
-  , M44(..)
-  , v2
-  , v3
-  , v4
-  , v3Cross
-  , Vector(..)
-  , Matrix4(..)
+  , module Slop.Math
   , camera2D
   , camera2DWindow
   , camera2DScreen
@@ -187,6 +211,7 @@ module Slop
   , camera3DMVP
   , Vertex3D(..)
   , rect
+  , fullscreenRect
   , point
   , rgb
   , rgba
@@ -242,6 +267,21 @@ module Slop
   , shaderUniformSized
   , shaderUniformBytesChecked
   , shaderUniformBytesSized
+  , SlopError(..)
+  , SlopResult
+  , expect
+  , expectE
+  , shaderUniformCheckedE
+  , shaderUniformSizedE
+  , shaderUniformBytesCheckedE
+  , shaderUniformBytesSizedE
+  , Patch(..)
+  , TextStylePatch(..)
+  , textStylePatch
+  , patchTextColor
+  , patchTextEffect
+  , patchTextBlend
+  , applyTextStylePatch
   , ShaderStage(..)
   , ShaderBinding(..)
   , NamedShaderBinding(..)
@@ -272,9 +312,11 @@ module Slop
   , MusicAsset(..)
   , ChunkAsset(..)
   , loadAsset
+  , loadAssetE
   , loadAssetAsync
   , processMainAssets
   , awaitAsset
+  , awaitAssetE
   , getAsset
   , getAssetReady
   , assetReady
@@ -287,6 +329,7 @@ module Slop
   , disableHotReload
   , reloadAssetAsync
   , awaitAssetUpdate
+  , awaitAssetUpdateE
   , playMusic
   , playMusicLoop
   , playSound
@@ -339,6 +382,10 @@ module Slop
   , withShader
   , setShaderUniformCached
   , setShaderUniformBytesCached
+  , UniformCache
+  , newUniformCache
+  , shaderUniformCache
+  , setShaderUniformBytesCachedWith
   , withShaderUniform
   ) where
 
@@ -354,9 +401,9 @@ import Control.Concurrent.STM
   , newTQueueIO
   , newTVarIO
   , modifyTVar'
+  , orElse
   , putTMVar
   , readTMVar
-  , tryReadTMVar
   , readTQueue
   , readTVar
   , tryReadTQueue
@@ -368,10 +415,12 @@ import Control.Monad.Reader (MonadReader (..), ReaderT (..))
 import Control.Monad.Writer.Strict (Writer, execWriter, runWriter, tell)
 import Control.Monad.IO.Class (MonadIO (..))
 import Data.Bits ((.&.), (.|.), shiftL)
+import Data.Bifunctor (first)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
 import Data.Dynamic (Dynamic, fromDynamic, toDyn)
+import qualified Data.IntMap.Strict as IntMap
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
 import Data.Kind (Type)
@@ -379,6 +428,7 @@ import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef,
 import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Monoid (Last (..))
 import qualified Data.Map.Strict as Map
+import qualified Data.Text as T
 import Data.Proxy (Proxy (..))
 import Data.Time.Clock (UTCTime)
 import Data.Typeable (TypeRep, Typeable, typeOf, typeRep)
@@ -392,6 +442,7 @@ import Foreign.Marshal.Utils (copyBytes)
 import System.Directory (getModificationTime)
 
 import Slop.Internal.DList (DList, singleton, toList)
+import Slop.Math
 import qualified Slop.SDL.Raw as SDL
 import Slop.SDL.Raw
   ( FPoint (..)
@@ -537,6 +588,7 @@ import Slop.SDL.Raw
   , sdlInitAudio
   , sdlInitVideo
   , sdlGetWindowSize
+  , sdlGetWindowSizeInPixels
   , sdlGetMouseState
   , sdlPollEvent
   , sdlPumpEvents
@@ -610,6 +662,7 @@ data Config = Config
   , windowResizable :: Bool
   , textAtlasSize :: Maybe Int
   , assetWorkers :: Int
+  , debugLog :: Bool
   }
   deriving (Eq, Show)
 
@@ -620,15 +673,16 @@ data ConfigPatch = ConfigPatch
   , patchWindowResizable :: Last Bool
   , patchTextAtlasSize :: Last (Maybe Int)
   , patchAssetWorkers :: Last Int
+  , patchDebugLog :: Last Bool
   }
   deriving (Eq, Show)
 
 instance Semigroup ConfigPatch where
-  ConfigPatch a b c d e f <> ConfigPatch a' b' c' d' e' f' =
-    ConfigPatch (a <> a') (b <> b') (c <> c') (d <> d') (e <> e') (f <> f')
+  ConfigPatch a b c d e f g <> ConfigPatch a' b' c' d' e' f' g' =
+    ConfigPatch (a <> a') (b <> b') (c <> c') (d <> d') (e <> e') (f <> f') (g <> g')
 
 instance Monoid ConfigPatch where
-  mempty = ConfigPatch mempty mempty mempty mempty mempty mempty
+  mempty = ConfigPatch mempty mempty mempty mempty mempty mempty mempty
 
 applyConfigPatch :: Config -> ConfigPatch -> Config
 applyConfigPatch cfg patch =
@@ -639,6 +693,7 @@ applyConfigPatch cfg patch =
     , windowResizable = pick cfg.windowResizable patch.patchWindowResizable
     , textAtlasSize = pick cfg.textAtlasSize patch.patchTextAtlasSize
     , assetWorkers = pick cfg.assetWorkers patch.patchAssetWorkers
+    , debugLog = pick cfg.debugLog patch.patchDebugLog
     }
   where
     pick def (Last value) = fromMaybe def value
@@ -651,6 +706,7 @@ defaultConfig = Config
   , windowResizable = True
   , textAtlasSize = Nothing
   , assetWorkers = 0
+  , debugLog = False
   }
 
 data HotReloadConfig = HotReloadConfig
@@ -672,7 +728,7 @@ data Window = Window
   , appAssets :: AssetManager
   , appMainAssetQueue :: TQueue AssetCommand
   , appTargets :: IORef (Map.Map (Ptr ()) Texture)
-  , appPipelineTargets :: IORef (Map.Map Int (RenderTarget, (Int, Int)))
+  , appPipelineTargets :: IORef (IntMap.IntMap (RenderTarget, (Int, Int)))
   , appDepthFormat :: SDL_GPUTextureFormat
   , appDepthTarget :: IORef (Maybe DepthTarget)
   , appDepthTargets :: IORef (Map.Map (Ptr ()) DepthTarget)
@@ -681,12 +737,15 @@ data Window = Window
   , appFrameContext :: RecordingContext
   , appRecording :: IORef (Maybe Recording)
   , appWindowSize :: IORef (Int, Int)
+  , appDrawableSize :: IORef (Int, Int)
   , appWhiteTexture :: Texture
   , appVertexShader :: GPUShader
   , appVertexShader3D :: GPUShader
   , appDefaultShader :: Shader
   , appPipelines :: IORef (Map.Map PipelineKey GPUGraphicsPipeline)
   , appDrawColor :: IORef Color
+  , appDebugLog :: Bool
+  , appGlobalsUniform :: IORef (Maybe ByteString)
   }
 
 newtype WindowM a = WindowM (ReaderT Window IO a)
@@ -699,12 +758,29 @@ instance MonadReader Window Loop where
   ask = Loop ask
   local f (Loop action) = Loop (local f action)
 
+data Resource a = Resource
+  { resourceValue :: a
+  , resourceRelease :: WindowM ()
+  }
+
+releaseResource :: Resource a -> WindowM ()
+releaseResource = (.resourceRelease)
+
+withResource :: WindowM (Resource a) -> (a -> WindowM b) -> WindowM b
+withResource acquire use = do
+  window <- ask
+  liftIO $
+    bracket
+      (runWindowM window acquire)
+      (\res -> runWindowM window (releaseResource res))
+      (\res -> runWindowM window (use res.resourceValue))
+
 data RenderState = RenderState
   { rsTextCache :: !(Map.Map TextCacheKey CachedText)
   , rsFrameId :: !Word64
   }
 
-type TextCacheKey = (Ptr (), String)
+type TextCacheKey = (Ptr (), T.Text)
 
 data CachedText = CachedText
   { ctText :: !Text
@@ -870,7 +946,7 @@ data ComputeDesc = ComputeDesc
   , computeReadwriteStorageTextures :: Word32
   , computeReadwriteStorageBuffers :: Word32
   , computeUniformBuffers :: Word32
-  , computeThreads :: (Word32, Word32, Word32)
+  , computeThreads :: Threads3D
   }
   deriving (Eq, Show)
 
@@ -893,28 +969,28 @@ data PipelineKey = PipelineKey
   deriving (Eq, Ord, Show)
 
 data Vertex = Vertex
-  { vertexX :: CFloat
-  , vertexY :: CFloat
-  , vertexU :: CFloat
-  , vertexV :: CFloat
-  , vertexR :: CFloat
-  , vertexG :: CFloat
-  , vertexB :: CFloat
-  , vertexA :: CFloat
+  { vertexX :: !CFloat
+  , vertexY :: !CFloat
+  , vertexU :: !CFloat
+  , vertexV :: !CFloat
+  , vertexR :: !CFloat
+  , vertexG :: !CFloat
+  , vertexB :: !CFloat
+  , vertexA :: !CFloat
   }
   deriving (Eq, Show)
 
 data Vertex3D = Vertex3D
-  { vertex3DX :: CFloat
-  , vertex3DY :: CFloat
-  , vertex3DZ :: CFloat
-  , vertex3DW :: CFloat
-  , vertex3DU :: CFloat
-  , vertex3DV :: CFloat
-  , vertex3DR :: CFloat
-  , vertex3DG :: CFloat
-  , vertex3DB :: CFloat
-  , vertex3DA :: CFloat
+  { vertex3DX :: !CFloat
+  , vertex3DY :: !CFloat
+  , vertex3DZ :: !CFloat
+  , vertex3DW :: !CFloat
+  , vertex3DU :: !CFloat
+  , vertex3DV :: !CFloat
+  , vertex3DR :: !CFloat
+  , vertex3DG :: !CFloat
+  , vertex3DB :: !CFloat
+  , vertex3DA :: !CFloat
   }
   deriving (Eq, Show)
 
@@ -942,6 +1018,11 @@ liftLoop = Loop
 withWindowLoop :: (Window -> IO a) -> Loop a
 withWindowLoop f = Loop (liftWindow f)
 
+logDebug :: T.Text -> WindowM ()
+logDebug msg = do
+  window <- ask
+  when window.appDebugLog (liftIO (putStrLn (T.unpack msg)))
+
 startTextInput :: WindowM Bool
 startTextInput = liftWindow (\window -> SDL.sdlStartTextInput window.appWindow)
 
@@ -961,6 +1042,32 @@ data AssetStatus a
   | AssetReady a
   | AssetFailed String
   deriving (Eq, Show)
+
+data SlopError
+  = SlopErrorAsset T.Text
+  | SlopErrorUniform T.Text
+  | SlopErrorIO T.Text
+  deriving (Eq, Show)
+
+type SlopResult a = Either SlopError a
+
+slopErrorFromString :: (T.Text -> SlopError) -> String -> SlopError
+slopErrorFromString ctor msg = ctor (T.pack msg)
+
+slopErrorMessage :: SlopError -> String
+slopErrorMessage err =
+  case err of
+    SlopErrorAsset msg -> "asset: " <> T.unpack msg
+    SlopErrorUniform msg -> "uniform: " <> T.unpack msg
+    SlopErrorIO msg -> "io: " <> T.unpack msg
+
+expect :: MonadIO m => String -> Either String a -> m a
+expect label =
+  either (liftIO . ioError . userError . (\msg -> label <> ": " <> msg)) pure
+
+expectE :: MonadIO m => String -> SlopResult a -> m a
+expectE label =
+  either (liftIO . ioError . userError . (\msg -> label <> ": " <> msg) . slopErrorMessage) pure
 
 newtype AssetUpdate = AssetUpdate (TMVar (Either String ()))
 
@@ -994,7 +1101,7 @@ data NoiseTexture3DAsset = NoiseTexture3DAsset Int Int Int NoiseSettings
 data FontAsset = FontAsset FilePath Float
   deriving (Eq, Show)
 
-data TextAsset = TextAsset Font String
+data TextAsset = TextAsset Font T.Text
   deriving (Eq, Show)
 
 data MusicAsset = MusicAsset FilePath
@@ -1089,12 +1196,12 @@ instance AssetLoader FontAsset where
 instance AssetLoader TextAsset where
   type AssetType TextAsset = Text
   loadAssetIO app (TextAsset font str) = do
-    result <- ttfCreateText (app.appTextEngine) font str
+    result <- ttfCreateText (app.appTextEngine) font (T.unpack str)
     case result of
       Nothing -> Left <$> sdlGetError
       Just textObj -> pure (Right textObj)
   unloadAssetIO _ _ = ttfDestroyText
-  assetLabel (TextAsset _ str) = str
+  assetLabel (TextAsset _ str) = T.unpack str
   assetThread _ = AssetMain
 
 instance AssetLoader MusicAsset where
@@ -1217,7 +1324,7 @@ data AssetManager = AssetManager
 
 data ManagerState = ManagerState
   { msNextId :: !Int
-  , msAssets :: !(Map.Map Int AssetSlot)
+  , msAssets :: !(IntMap.IntMap AssetSlot)
   }
 
 data HotReloadInfo = HotReloadInfo
@@ -1245,7 +1352,7 @@ data AssetCommand where
 
 initAssetManager :: Window -> Int -> IO AssetManager
 initAssetManager app workerCount = do
-  stateVar <- newTVarIO ManagerState { msNextId = 0, msAssets = Map.empty }
+  stateVar <- newTVarIO ManagerState { msNextId = 0, msAssets = IntMap.empty }
   queue <- newTQueueIO
   let count = max 1 workerCount
   tids <- replicateM count (forkIO (assetWorker app stateVar queue))
@@ -1270,8 +1377,8 @@ removeAllAssetsIO :: Window -> AssetManager -> IO ()
 removeAllAssetsIO app mgr = do
   entries <- atomically $ do
     st <- readTVar (mgr.amState)
-    writeTVar (mgr.amState) st { msAssets = Map.empty }
-    pure (Map.elems (st.msAssets))
+    writeTVar (mgr.amState) st { msAssets = IntMap.empty }
+    pure (IntMap.elems (st.msAssets))
   mapM_ (finalizeEntry app) entries
   where
     finalizeEntry _ (AssetSlot _ (SlotFailed _) _) = pure ()
@@ -1312,10 +1419,10 @@ finishLoad app stateVar assetId spec result _ = case result of
   Left err -> do
     atomically $ do
       st <- readTVar stateVar
-      case Map.lookup assetId (st.msAssets) of
+      case IntMap.lookup assetId (st.msAssets) of
         Just slot@AssetSlot { slotState = SlotLoading var } -> do
           let slot' = slot { slotState = SlotFailed err }
-          writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
+          writeTVar stateVar st { msAssets = IntMap.insert assetId slot' (st.msAssets) }
           void (tryPutTMVar var (Left err))
         _ -> pure ()
   Right asset -> do
@@ -1324,10 +1431,10 @@ finishLoad app stateVar assetId spec result _ = case result of
     let typ = typeOf asset
     cancelled <- atomically $ do
       st <- readTVar stateVar
-      case Map.lookup assetId (st.msAssets) of
+      case IntMap.lookup assetId (st.msAssets) of
         Just slot@AssetSlot { slotState = SlotLoading var } -> do
           let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
-          writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
+          writeTVar stateVar st { msAssets = IntMap.insert assetId slot' (st.msAssets) }
           void (tryPutTMVar var (Right ()))
           pure False
         Nothing -> pure True
@@ -1347,19 +1454,19 @@ finishReload app stateVar assetId spec result notify = case result of
     let typ = typeOf asset
     (_replaced, oldFinalizer, missing) <- atomically $ do
       st <- readTVar stateVar
-      case Map.lookup assetId (st.msAssets) of
+      case IntMap.lookup assetId (st.msAssets) of
         Nothing -> pure (False, Nothing, True)
         Just slot@AssetSlot { slotState = SlotReady _ oldFin } -> do
           let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
-          writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
+          writeTVar stateVar st { msAssets = IntMap.insert assetId slot' (st.msAssets) }
           pure (True, Just oldFin, False)
         Just slot@AssetSlot { slotState = SlotFailed _ } -> do
           let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
-          writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
+          writeTVar stateVar st { msAssets = IntMap.insert assetId slot' (st.msAssets) }
           pure (True, Nothing, False)
         Just slot@AssetSlot { slotState = SlotLoading _ } -> do
           let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
-          writeTVar stateVar st { msAssets = Map.insert assetId slot' (st.msAssets) }
+          writeTVar stateVar st { msAssets = IntMap.insert assetId slot' (st.msAssets) }
           pure (True, Nothing, False)
     if missing
       then do
@@ -1379,7 +1486,7 @@ registerLoading mgr = atomically $ do
   var <- newEmptyTMVar
   let newId = st.msNextId
   let slot = AssetSlot (typeRep (Proxy :: Proxy a)) (SlotLoading var) Nothing
-  writeTVar (mgr.amState) st { msNextId = newId + 1, msAssets = Map.insert newId slot (st.msAssets) }
+  writeTVar (mgr.amState) st { msNextId = newId + 1, msAssets = IntMap.insert newId slot (st.msAssets) }
   pure (AssetId newId, var)
 
 loadAsset :: forall spec. AssetLoader spec => spec -> WindowM (Either String (AssetId (AssetType spec)))
@@ -1396,10 +1503,10 @@ loadAsset spec = do
     Left err -> do
       atomically $ do
         st <- readTVar (mgr.amState)
-        case Map.lookup (assetId.unAssetId) (st.msAssets) of
+        case IntMap.lookup (assetId.unAssetId) (st.msAssets) of
           Just slot@AssetSlot { slotState = SlotLoading var } -> do
             let slot' = slot { slotState = SlotFailed err }
-            writeTVar (mgr.amState) st { msAssets = Map.insert (assetId.unAssetId) slot' (st.msAssets) }
+            writeTVar (mgr.amState) st { msAssets = IntMap.insert (assetId.unAssetId) slot' (st.msAssets) }
             void (tryPutTMVar var (Left err))
           _ -> pure ()
     Right asset -> do
@@ -1408,16 +1515,20 @@ loadAsset spec = do
       let typ = typeOf asset
       cancelled <- atomically $ do
         st <- readTVar (mgr.amState)
-        case Map.lookup (assetId.unAssetId) (st.msAssets) of
+        case IntMap.lookup (assetId.unAssetId) (st.msAssets) of
           Just slot@AssetSlot { slotState = SlotLoading var } -> do
             let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
-            writeTVar (mgr.amState) st { msAssets = Map.insert (assetId.unAssetId) slot' (st.msAssets) }
+            writeTVar (mgr.amState) st { msAssets = IntMap.insert (assetId.unAssetId) slot' (st.msAssets) }
             void (tryPutTMVar var (Right ()))
             pure False
           Nothing -> pure True
           _ -> pure False
       if cancelled then finalizer else pure ()
   pure (fmap (const assetId) resolved)
+
+loadAssetE :: forall spec. AssetLoader spec => spec -> WindowM (SlopResult (AssetId (AssetType spec)))
+loadAssetE spec =
+  first (slopErrorFromString SlopErrorAsset) <$> loadAsset spec
 
 loadAssetAsync :: forall spec. AssetLoader spec => spec -> WindowM (AssetId (AssetType spec))
 loadAssetAsync spec = do
@@ -1456,6 +1567,24 @@ processMainAssets = do
             _ -> void (handleAssetCommand app stateVar cmd)
           drain app stateVar queue
 
+awaitWithMainQueue :: Window -> TMVar a -> IO a
+awaitWithMainQueue app var = go
+  where
+    queue = app.appMainAssetQueue
+    stateVar = app.appAssets.amState
+    go = do
+      next <- atomically $
+        (Right <$> readTMVar var)
+          `orElse`
+        (Left <$> readTQueue queue)
+      case next of
+        Right value -> pure value
+        Left cmd -> do
+          case cmd of
+            StopCommand _ -> pure ()
+            _ -> void (handleAssetCommand app stateVar cmd)
+          go
+
 reloadAssetAsync :: forall spec. AssetLoader spec => AssetId (AssetType spec) -> spec -> WindowM AssetUpdate
 reloadAssetAsync assetId spec = do
   app <- ask
@@ -1463,7 +1592,7 @@ reloadAssetAsync assetId spec = do
   notify <- liftIO (atomically newEmptyTMVar)
   exists <- liftIO $ atomically $ do
     st <- readTVar (mgr.amState)
-    pure (Map.member (assetId.unAssetId) (st.msAssets))
+    pure (IntMap.member (assetId.unAssetId) (st.msAssets))
   if exists
     then do
       liftIO (installHotReloadInfo app assetId spec)
@@ -1478,15 +1607,12 @@ reloadAssetAsync assetId spec = do
 
 awaitAssetUpdate :: AssetUpdate -> WindowM (Either String ())
 awaitAssetUpdate (AssetUpdate var) = do
-  let step = do
-        mValue <- liftIO (atomically (tryReadTMVar var))
-        case mValue of
-          Just value -> pure value
-          Nothing -> do
-            processMainAssets
-            liftIO (threadDelay 1000)
-            step
-  step
+  app <- ask
+  liftIO (awaitWithMainQueue app var)
+
+awaitAssetUpdateE :: AssetUpdate -> WindowM (SlopResult ())
+awaitAssetUpdateE update =
+  first (slopErrorFromString SlopErrorAsset) <$> awaitAssetUpdate update
 
 awaitAsset :: forall a. Typeable a => AssetId a -> WindowM (Either String a)
 awaitAsset assetId = do
@@ -1494,20 +1620,13 @@ awaitAsset assetId = do
   let mgr = app.appAssets
   mWait <- liftIO $ atomically $ do
     st <- readTVar (mgr.amState)
-    case Map.lookup (assetId.unAssetId) (st.msAssets) of
+    case IntMap.lookup (assetId.unAssetId) (st.msAssets) of
       Just (AssetSlot _ (SlotLoading var) _) -> pure (Just var)
       _ -> pure Nothing
   case mWait of
     Just var -> do
-      let step = do
-            mValue <- liftIO (atomically (tryReadTMVar var))
-            case mValue of
-              Just _ -> getAfterWait
-              Nothing -> do
-                processMainAssets
-                liftIO (threadDelay 1000)
-                step
-      step
+      _ <- liftIO (awaitWithMainQueue app var)
+      getAfterWait
     Nothing -> getAfterWait
   where
     getAfterWait = do
@@ -1517,6 +1636,10 @@ awaitAsset assetId = do
         Just AssetLoading -> pure (Left "asset still loading")
         Just (AssetFailed err) -> pure (Left err)
         Just (AssetReady value) -> pure (Right value)
+
+awaitAssetE :: forall a. Typeable a => AssetId a -> WindowM (SlopResult a)
+awaitAssetE assetId =
+  first (slopErrorFromString SlopErrorAsset) <$> awaitAsset assetId
 
 getAsset :: forall (a :: Type). Typeable a => AssetId a -> WindowM (Maybe a)
 getAsset assetId = do
@@ -1538,7 +1661,7 @@ getAssetStatus assetId = do
   liftIO $ atomically $ do
     st <- readTVar (mgr.amState)
     pure $ do
-      slot <- Map.lookup (assetId.unAssetId) (st.msAssets)
+      slot <- IntMap.lookup (assetId.unAssetId) (st.msAssets)
       let typ = slot.slotType
       let slotState' = slot.slotState
       if typ /= typeRep (Proxy :: Proxy a)
@@ -1554,10 +1677,10 @@ removeAsset assetId = do
   let mgr = app.appAssets
   toFinalize <- liftIO $ atomically $ do
     st <- readTVar (mgr.amState)
-    case Map.lookup (assetId.unAssetId) (st.msAssets) of
+    case IntMap.lookup (assetId.unAssetId) (st.msAssets) of
       Nothing -> pure (Left False)
       Just slot -> do
-        writeTVar (mgr.amState) st { msAssets = Map.delete (assetId.unAssetId) (st.msAssets) }
+        writeTVar (mgr.amState) st { msAssets = IntMap.delete (assetId.unAssetId) (st.msAssets) }
         case slot.slotState of
           SlotLoading var -> do
             void (tryPutTMVar var (Left "asset removed"))
@@ -1614,7 +1737,7 @@ installHotReloadInfo app assetId spec = do
         , hrReload = reloadAction
         })
   atomically $ modifyTVar' (mgr.amState) $ \st ->
-    st { msAssets = Map.adjust (\slot -> slot { slotHotReload = info }) (assetId.unAssetId) (st.msAssets) }
+    st { msAssets = IntMap.adjust (\slot -> slot { slotHotReload = info }) (assetId.unAssetId) (st.msAssets) }
 
 loadHotReloadTimes :: [FilePath] -> IO (Map.Map FilePath (Maybe UTCTime))
 loadHotReloadTimes files = do
@@ -1648,12 +1771,12 @@ hotReloadAssets = do
   let mgr = app.appAssets
   entries <- liftIO $ atomically $ do
     st <- readTVar (mgr.amState)
-    pure (Map.toList (st.msAssets))
+    pure (IntMap.toList (st.msAssets))
   updates <- liftIO $ mapM checkEntry entries
   let updates' = catMaybes updates
   liftIO $ atomically $ modifyTVar' (mgr.amState) $ \st ->
     let assets' = foldl'
-          (\assets (assetId, info) -> Map.adjust (\slot -> slot { slotHotReload = Just info }) assetId assets)
+          (\assets (assetId, info) -> IntMap.adjust (\slot -> slot { slotHotReload = Just info }) assetId assets)
           (st.msAssets)
           updates'
     in st { msAssets = assets' }
@@ -1670,14 +1793,61 @@ hotReloadAssets = do
 
 
 data Frame = Frame
-  { delta :: Float
-  , time :: Float
-  , ticks :: Word64
-  , quitRequested :: Bool
-  , size :: (Int, Int)
-  , input :: InputFrame
+  { delta :: !Float
+  , time :: !Float
+  , ticks :: !Word64
+  , quitRequested :: !Bool
+  , size :: !(Int, Int)
+  , renderSize :: !(Int, Int)
+  , dpiScale :: !(V2 Float)
+  , input :: !InputFrame
   }
   deriving (Eq, Show)
+
+data SlopGlobals = SlopGlobals
+  { globalsTime :: !Float
+  , globalsRenderSize :: !(V2 Float)
+  , globalsDpiScale :: !(V2 Float)
+  }
+  deriving (Eq, Show)
+
+instance Storable SlopGlobals where
+  sizeOf _ = 32
+  alignment _ = 16
+  peek ptr = do
+    time <- peekByteOff ptr 0
+    renderW <- peekByteOff ptr 8
+    renderH <- peekByteOff ptr 12
+    dpiX <- peekByteOff ptr 16
+    dpiY <- peekByteOff ptr 20
+    pure SlopGlobals
+      { globalsTime = time
+      , globalsRenderSize = V2 renderW renderH
+      , globalsDpiScale = V2 dpiX dpiY
+      }
+  poke ptr SlopGlobals { globalsTime = time, globalsRenderSize = V2 renderW renderH, globalsDpiScale = V2 dpiX dpiY } = do
+    pokeByteOff ptr 0 time
+    pokeByteOff ptr 4 (0 :: Float)
+    pokeByteOff ptr 8 renderW
+    pokeByteOff ptr 12 renderH
+    pokeByteOff ptr 16 dpiX
+    pokeByteOff ptr 20 dpiY
+    pokeByteOff ptr 24 (0 :: Float)
+    pokeByteOff ptr 28 (0 :: Float)
+
+slopGlobals :: Frame -> SlopGlobals
+slopGlobals frame =
+  let (rw, rh) = frame.renderSize
+  in SlopGlobals
+      { globalsTime = frame.time
+      , globalsRenderSize = V2 (fromIntegral rw) (fromIntegral rh)
+      , globalsDpiScale = frame.dpiScale
+      }
+
+updateGlobalsUniform :: Window -> Frame -> IO ()
+updateGlobalsUniform window frame = do
+  bytes <- toBytes (slopGlobals frame)
+  writeIORef window.appGlobalsUniform (Just bytes)
 
 data LoopControl a
   = Continue a
@@ -1768,10 +1938,17 @@ data Modifiers = Modifiers
 data InputFrame = InputFrame
   { inputPrev :: !InputState
   , inputNow :: !InputState
-  , inputText :: !String
+  , inputText :: !T.Text
   , inputWheel :: !(V2 Float)
   , inputMods :: !Modifiers
+  , inputEvents :: ![InputEvent]
   }
+  deriving (Eq, Show)
+
+data InputEvent
+  = EventText T.Text
+  | EventMouseWheel (V2 Float)
+  | EventQuit
   deriving (Eq, Show)
 
 inputPrev :: InputFrame -> InputState
@@ -1780,7 +1957,7 @@ inputPrev = (.inputPrev)
 inputNow :: InputFrame -> InputState
 inputNow = (.inputNow)
 
-inputText :: InputFrame -> String
+inputText :: InputFrame -> T.Text
 inputText = (.inputText)
 
 inputWheel :: InputFrame -> V2 Float
@@ -1788,6 +1965,9 @@ inputWheel = (.inputWheel)
 
 inputMods :: InputFrame -> Modifiers
 inputMods = (.inputMods)
+
+inputEvents :: InputFrame -> [InputEvent]
+inputEvents = (.inputEvents)
 
 mouseLeft :: MouseButton
 mouseLeft = MouseButton 1
@@ -1907,10 +2087,10 @@ modifiersFromKeymod mods =
 
 
 data Color = Color
-  { colorR :: Float
-  , colorG :: Float
-  , colorB :: Float
-  , colorA :: Float
+  { colorR :: !Float
+  , colorG :: !Float
+  , colorB :: !Float
+  , colorA :: !Float
   }
   deriving (Eq, Show)
 
@@ -1939,6 +2119,85 @@ data TextureDesc = TextureDesc
   }
   deriving (Eq, Show)
 
+newtype Positive = Positive { unPositive :: Int }
+  deriving (Eq, Ord, Show)
+
+mkPositive :: Int -> Maybe Positive
+mkPositive value
+  | value > 0 = Just (Positive value)
+  | otherwise = Nothing
+
+positive :: Int -> Positive
+positive value = Positive (max 1 value)
+
+data Size2D = Size2D
+  { sizeWidth :: Positive
+  , sizeHeight :: Positive
+  }
+  deriving (Eq, Show)
+
+data Size3D = Size3D
+  { sizeWidth :: Positive
+  , sizeHeight :: Positive
+  , sizeDepth :: Positive
+  }
+  deriving (Eq, Show)
+
+mkSize2D :: Int -> Int -> Maybe Size2D
+mkSize2D width height =
+  Size2D <$> mkPositive width <*> mkPositive height
+
+mkSize3D :: Int -> Int -> Int -> Maybe Size3D
+mkSize3D width height depth =
+  Size3D <$> mkPositive width <*> mkPositive height <*> mkPositive depth
+
+size2D :: Int -> Int -> Size2D
+size2D width height = Size2D (positive width) (positive height)
+
+size3D :: Int -> Int -> Int -> Size3D
+size3D width height depth = Size3D (positive width) (positive height) (positive depth)
+
+size2DToTuple :: Size2D -> (Int, Int)
+size2DToTuple (Size2D (Positive width) (Positive height)) = (width, height)
+
+size3DToTuple :: Size3D -> (Int, Int, Int)
+size3DToTuple (Size3D (Positive width) (Positive height) (Positive depth)) = (width, height, depth)
+
+data Threads2D = Threads2D
+  { threadsX :: Positive
+  , threadsY :: Positive
+  }
+  deriving (Eq, Show)
+
+data Threads3D = Threads3D
+  { threadsX :: Positive
+  , threadsY :: Positive
+  , threadsZ :: Positive
+  }
+  deriving (Eq, Show)
+
+mkThreads2D :: Int -> Int -> Maybe Threads2D
+mkThreads2D x y = Threads2D <$> mkPositive x <*> mkPositive y
+
+mkThreads3D :: Int -> Int -> Int -> Maybe Threads3D
+mkThreads3D x y z = Threads3D <$> mkPositive x <*> mkPositive y <*> mkPositive z
+
+threads2D :: Int -> Int -> Threads2D
+threads2D x y = Threads2D (positive x) (positive y)
+
+threads3D :: Int -> Int -> Int -> Threads3D
+threads3D x y z = Threads3D (positive x) (positive y) (positive z)
+
+threads2DToInts :: Threads2D -> (Int, Int)
+threads2DToInts (Threads2D (Positive x) (Positive y)) = (x, y)
+
+threads3DToInts :: Threads3D -> (Int, Int, Int)
+threads3DToInts (Threads3D (Positive x) (Positive y) (Positive z)) = (x, y, z)
+
+threads3DToWord32 :: Threads3D -> (Word32, Word32, Word32)
+threads3DToWord32 (Threads3D (Positive x) (Positive y) (Positive z)) =
+  (fromIntegral x, fromIntegral y, fromIntegral z)
+
 data NoiseType
   = NoiseWhite
   | NoiseValue
@@ -1960,8 +2219,8 @@ data NoiseSettings = NoiseSettings
   , noisePeriod3D :: Maybe (Int, Int, Int)
   , noiseComputeShader2D :: Maybe ByteString
   , noiseComputeShader3D :: Maybe ByteString
-  , noiseComputeThreads2D :: V2 Int
-  , noiseComputeThreads3D :: V3 Int
+  , noiseComputeThreads2D :: Threads2D
+  , noiseComputeThreads3D :: Threads3D
   }
   deriving (Eq, Show)
 
@@ -1981,8 +2240,34 @@ defaultNoiseSettings =
     , noisePeriod3D = Nothing
     , noiseComputeShader2D = Nothing
     , noiseComputeShader3D = Nothing
-    , noiseComputeThreads2D = V2 8 8
-    , noiseComputeThreads3D = V3 4 4 4
+    , noiseComputeThreads2D = threads2D 8 8
+    , noiseComputeThreads3D = threads3D 4 4 4
+    }
+
+noisePeriodFromScale :: Int -> Float -> Int
+noisePeriodFromScale size scale =
+  let safeScale = max 0.0001 scale
+  in max 1 (round (fromIntegral size / safeScale))
+
+loopNoise2D :: Int -> Int -> NoiseSettings -> NoiseSettings
+loopNoise2D width height settings =
+  settings
+    { noisePeriod2D =
+        Just
+          ( noisePeriodFromScale width settings.noiseScale
+          , noisePeriodFromScale height settings.noiseScale
+          )
+    }
+
+loopNoise3D :: Int -> Int -> Int -> NoiseSettings -> NoiseSettings
+loopNoise3D width height depth settings =
+  settings
+    { noisePeriod3D =
+        Just
+          ( noisePeriodFromScale width settings.noiseScale
+          , noisePeriodFromScale height settings.noiseScale
+          , noisePeriodFromScale depth settings.noiseScale
+          )
     }
 
 data NoiseParams = NoiseParams
@@ -2078,304 +2363,16 @@ textureDesc width height =
     , texUsage = [TextureSampled]
     }
 
+textureDescSize :: Size2D -> TextureDesc
+textureDescSize size =
+  let (width, height) = size2DToTuple size
+  in textureDesc width height
+
 rgb :: Float -> Float -> Float -> Color
 rgb r g b = Color r g b 1
 
 rgba :: Float -> Float -> Float -> Float -> Color
 rgba = Color
-
-
-data V2 a = V2 !a !a deriving (Eq, Show)
-
-data V3 a = V3 !a !a !a deriving (Eq, Show)
-
-data V4 a = V4 !a !a !a !a deriving (Eq, Show)
-
-data M44 a
-  = M44 !a !a !a !a
-         !a !a !a !a
-         !a !a !a !a
-         !a !a !a !a
-  deriving (Eq, Show)
-
-v2 :: (a, a) -> V2 a
-v2 (x, y) = V2 x y
-
-v3 :: (a, a, a) -> V3 a
-v3 (x, y, z) = V3 x y z
-
-v4 :: (a, a, a, a) -> V4 a
-v4 (x, y, z, w) = V4 x y z w
-
-class Vector v where
-  dot :: Num a => v a -> v a -> a
-  len :: Floating a => v a -> a
-  normalize :: (Eq a, Floating a) => v a -> v a
-
-instance Num a => Num (V2 a) where
-  (+) (V2 ax ay) (V2 bx by) = V2 (ax + bx) (ay + by)
-  (-) (V2 ax ay) (V2 bx by) = V2 (ax - bx) (ay - by)
-  (*) (V2 ax ay) (V2 bx by) = V2 (ax * bx) (ay * by)
-  negate (V2 x y) = V2 (negate x) (negate y)
-  abs (V2 x y) = V2 (abs x) (abs y)
-  signum (V2 x y) = V2 (signum x) (signum y)
-  fromInteger n =
-    let a = fromInteger n
-    in V2 a a
-
-instance Fractional a => Fractional (V2 a) where
-  (/) (V2 ax ay) (V2 bx by) = V2 (ax / bx) (ay / by)
-  recip (V2 x y) = V2 (recip x) (recip y)
-  fromRational r =
-    let a = fromRational r
-    in V2 a a
-
-instance Vector V2 where
-  dot (V2 ax ay) (V2 bx by) = ax * bx + ay * by
-  len v = sqrt (dot v v)
-  normalize v@(V2 x y) =
-    let l = len v
-        inv = if l == 0 then 1 else 1 / l
-    in V2 (x * inv) (y * inv)
-
-instance Num a => Num (V3 a) where
-  (+) (V3 ax ay az) (V3 bx by bz) = V3 (ax + bx) (ay + by) (az + bz)
-  (-) (V3 ax ay az) (V3 bx by bz) = V3 (ax - bx) (ay - by) (az - bz)
-  (*) (V3 ax ay az) (V3 bx by bz) = V3 (ax * bx) (ay * by) (az * bz)
-  negate (V3 x y z) = V3 (negate x) (negate y) (negate z)
-  abs (V3 x y z) = V3 (abs x) (abs y) (abs z)
-  signum (V3 x y z) = V3 (signum x) (signum y) (signum z)
-  fromInteger n =
-    let a = fromInteger n
-    in V3 a a a
-
-instance Fractional a => Fractional (V3 a) where
-  (/) (V3 ax ay az) (V3 bx by bz) = V3 (ax / bx) (ay / by) (az / bz)
-  recip (V3 x y z) = V3 (recip x) (recip y) (recip z)
-  fromRational r =
-    let a = fromRational r
-    in V3 a a a
-
-instance Vector V3 where
-  dot (V3 ax ay az) (V3 bx by bz) = ax*bx + ay*by + az*bz
-  len v = sqrt (dot v v)
-  normalize v@(V3 x y z) =
-    let l = len v
-        inv = if l == 0 then 1 else 1 / l
-    in V3 (x*inv) (y*inv) (z*inv)
-
-instance Num a => Num (V4 a) where
-  (+) (V4 ax ay az aw) (V4 bx by bz bw) = V4 (ax + bx) (ay + by) (az + bz) (aw + bw)
-  (-) (V4 ax ay az aw) (V4 bx by bz bw) = V4 (ax - bx) (ay - by) (az - bz) (aw - bw)
-  (*) (V4 ax ay az aw) (V4 bx by bz bw) = V4 (ax * bx) (ay * by) (az * bz) (aw * bw)
-  negate (V4 x y z w) = V4 (negate x) (negate y) (negate z) (negate w)
-  abs (V4 x y z w) = V4 (abs x) (abs y) (abs z) (abs w)
-  signum (V4 x y z w) = V4 (signum x) (signum y) (signum z) (signum w)
-  fromInteger n =
-    let a = fromInteger n
-    in V4 a a a a
-
-instance Fractional a => Fractional (V4 a) where
-  (/) (V4 ax ay az aw) (V4 bx by bz bw) = V4 (ax / bx) (ay / by) (az / bz) (aw / bw)
-  recip (V4 x y z w) = V4 (recip x) (recip y) (recip z) (recip w)
-  fromRational r =
-    let a = fromRational r
-    in V4 a a a a
-
-instance Vector V4 where
-  dot (V4 ax ay az aw) (V4 bx by bz bw) = ax*bx + ay*by + az*bz + aw*bw
-  len v = sqrt (dot v v)
-  normalize v@(V4 x y z w) =
-    let l = len v
-        inv = if l == 0 then 1 else 1 / l
-    in V4 (x*inv) (y*inv) (z*inv) (w*inv)
-
-v3Cross :: Num a => V3 a -> V3 a -> V3 a
-v3Cross (V3 ax ay az) (V3 bx by bz) =
-  V3 (ay*bz - az*by) (az*bx - ax*bz) (ax*by - ay*bx)
-
-class Matrix4 m where
-  identity :: m Float
-  transpose :: m Float -> m Float
-  transformPoint :: m Float -> V3 Float -> V3 Float
-  transformDir :: m Float -> V3 Float -> V3 Float
-  ortho :: Float -> Float -> Float -> Float -> Float -> Float -> m Float
-  perspective :: Float -> Float -> Float -> Float -> m Float
-  lookAt :: V3 Float -> V3 Float -> V3 Float -> m Float
-
-m44MulV4 :: M44 Float -> V4 Float -> V4 Float
-m44MulV4 (M44 m00 m01 m02 m03
-                   m10 m11 m12 m13
-                   m20 m21 m22 m23
-                   m30 m31 m32 m33)
-            (V4 x y z w) =
-  V4
-    (m00*x + m01*y + m02*z + m03*w)
-    (m10*x + m11*y + m12*z + m13*w)
-    (m20*x + m21*y + m22*z + m23*w)
-    (m30*x + m31*y + m32*z + m33*w)
-
-instance Matrix4 M44 where
-  identity = fromInteger 1
-  transpose (M44 m00 m01 m02 m03
-                   m10 m11 m12 m13
-                   m20 m21 m22 m23
-                   m30 m31 m32 m33) =
-    M44 m00 m10 m20 m30
-         m01 m11 m21 m31
-         m02 m12 m22 m32
-         m03 m13 m23 m33
-  transformPoint mat (V3 x y z) =
-    let V4 tx ty tz tw = m44MulV4 mat (V4 x y z 1)
-        inv = if tw == 0 then 1 else 1 / tw
-    in V3 (tx * inv) (ty * inv) (tz * inv)
-  transformDir mat (V3 x y z) =
-    let V4 tx ty tz _ = m44MulV4 mat (V4 x y z 0)
-    in V3 tx ty tz
-  ortho l r b t n f =
-    let rl = r - l
-        tb = t - b
-        fn = f - n
-    in M44
-        (2 / rl) 0 0 (-(r + l) / rl)
-        0 (2 / tb) 0 (-(t + b) / tb)
-        0 0 (1 / fn) (-n / fn)
-        0 0 0 1
-  perspective fovY aspect n f =
-    let t = 1 / tan (fovY / 2)
-        fn = f - n
-    in M44
-        (t / aspect) 0 0 0
-        0 t 0 0
-        0 0 (f / fn) 1
-        0 0 ((-n * f) / fn) 0
-  lookAt eye target up =
-    let f = normalize (target - eye)
-        s = normalize (v3Cross f up)
-        u = v3Cross s f
-        V3 sx sy sz = s
-        V3 ux uy uz = u
-        V3 fx fy fz = f
-    in M44
-        sx ux (-fx) 0
-        sy uy (-fy) 0
-        sz uz (-fz) 0
-        (-dot s eye) (-dot u eye) (dot f eye) 1
-
-instance Num a => Num (M44 a) where
-  (+) (M44 a00 a01 a02 a03
-            a10 a11 a12 a13
-            a20 a21 a22 a23
-            a30 a31 a32 a33)
-      (M44 b00 b01 b02 b03
-            b10 b11 b12 b13
-            b20 b21 b22 b23
-            b30 b31 b32 b33) =
-    M44 (a00 + b00) (a01 + b01) (a02 + b02) (a03 + b03)
-         (a10 + b10) (a11 + b11) (a12 + b12) (a13 + b13)
-         (a20 + b20) (a21 + b21) (a22 + b22) (a23 + b23)
-         (a30 + b30) (a31 + b31) (a32 + b32) (a33 + b33)
-  (-) (M44 a00 a01 a02 a03
-            a10 a11 a12 a13
-            a20 a21 a22 a23
-            a30 a31 a32 a33)
-      (M44 b00 b01 b02 b03
-            b10 b11 b12 b13
-            b20 b21 b22 b23
-            b30 b31 b32 b33) =
-    M44 (a00 - b00) (a01 - b01) (a02 - b02) (a03 - b03)
-         (a10 - b10) (a11 - b11) (a12 - b12) (a13 - b13)
-         (a20 - b20) (a21 - b21) (a22 - b22) (a23 - b23)
-         (a30 - b30) (a31 - b31) (a32 - b32) (a33 - b33)
-  (*) (M44 a00 a01 a02 a03
-            a10 a11 a12 a13
-            a20 a21 a22 a23
-            a30 a31 a32 a33)
-      (M44 b00 b01 b02 b03
-            b10 b11 b12 b13
-            b20 b21 b22 b23
-            b30 b31 b32 b33) =
-    M44
-      (a00*b00 + a01*b10 + a02*b20 + a03*b30)
-      (a00*b01 + a01*b11 + a02*b21 + a03*b31)
-      (a00*b02 + a01*b12 + a02*b22 + a03*b32)
-      (a00*b03 + a01*b13 + a02*b23 + a03*b33)
-      (a10*b00 + a11*b10 + a12*b20 + a13*b30)
-      (a10*b01 + a11*b11 + a12*b21 + a13*b31)
-      (a10*b02 + a11*b12 + a12*b22 + a13*b32)
-      (a10*b03 + a11*b13 + a12*b23 + a13*b33)
-      (a20*b00 + a21*b10 + a22*b20 + a23*b30)
-      (a20*b01 + a21*b11 + a22*b21 + a23*b31)
-      (a20*b02 + a21*b12 + a22*b22 + a23*b32)
-      (a20*b03 + a21*b13 + a22*b23 + a23*b33)
-      (a30*b00 + a31*b10 + a32*b20 + a33*b30)
-      (a30*b01 + a31*b11 + a32*b21 + a33*b31)
-      (a30*b02 + a31*b12 + a32*b22 + a33*b32)
-      (a30*b03 + a31*b13 + a32*b23 + a33*b33)
-  negate (M44 a00 a01 a02 a03
-               a10 a11 a12 a13
-               a20 a21 a22 a23
-               a30 a31 a32 a33) =
-    M44 (negate a00) (negate a01) (negate a02) (negate a03)
-         (negate a10) (negate a11) (negate a12) (negate a13)
-         (negate a20) (negate a21) (negate a22) (negate a23)
-         (negate a30) (negate a31) (negate a32) (negate a33)
-  abs (M44 a00 a01 a02 a03
-            a10 a11 a12 a13
-            a20 a21 a22 a23
-            a30 a31 a32 a33) =
-    M44 (abs a00) (abs a01) (abs a02) (abs a03)
-         (abs a10) (abs a11) (abs a12) (abs a13)
-         (abs a20) (abs a21) (abs a22) (abs a23)
-         (abs a30) (abs a31) (abs a32) (abs a33)
-  signum (M44 a00 a01 a02 a03
-               a10 a11 a12 a13
-               a20 a21 a22 a23
-               a30 a31 a32 a33) =
-    M44 (signum a00) (signum a01) (signum a02) (signum a03)
-         (signum a10) (signum a11) (signum a12) (signum a13)
-         (signum a20) (signum a21) (signum a22) (signum a23)
-         (signum a30) (signum a31) (signum a32) (signum a33)
-  fromInteger n =
-    let a = fromInteger n
-    in M44 a 0 0 0
-           0 a 0 0
-           0 0 a 0
-           0 0 0 a
-
-instance Fractional a => Fractional (M44 a) where
-  (/) (M44 a00 a01 a02 a03
-            a10 a11 a12 a13
-            a20 a21 a22 a23
-            a30 a31 a32 a33)
-      (M44 b00 b01 b02 b03
-            b10 b11 b12 b13
-            b20 b21 b22 b23
-            b30 b31 b32 b33) =
-    M44 (a00 / b00) (a01 / b01) (a02 / b02) (a03 / b03)
-         (a10 / b10) (a11 / b11) (a12 / b12) (a13 / b13)
-         (a20 / b20) (a21 / b21) (a22 / b22) (a23 / b23)
-         (a30 / b30) (a31 / b31) (a32 / b32) (a33 / b33)
-  recip (M44 a00 a01 a02 a03
-              a10 a11 a12 a13
-              a20 a21 a22 a23
-              a30 a31 a32 a33) =
-    M44 (recip a00) (recip a01) (recip a02) (recip a03)
-         (recip a10) (recip a11) (recip a12) (recip a13)
-         (recip a20) (recip a21) (recip a22) (recip a23)
-         (recip a30) (recip a31) (recip a32) (recip a33)
-  fromRational r =
-    let a = fromRational r
-    in M44 a 0 0 0
-           0 a 0 0
-           0 0 a 0
-           0 0 0 a
-
-instance Semigroup (M44 Float) where
-  (<>) = (*)
-
-instance Monoid (M44 Float) where
-  mempty = identity
 
 data Camera2D = Camera2D
   { camera2DPosition :: V2 Float
@@ -2483,33 +2480,6 @@ camera3DMVP :: Camera3D -> M44 Float -> M44 Float
 camera3DMVP cam model =
   camera3DViewProj cam * model
 
-instance Storable (V2 Float) where
-  sizeOf _ = 2 * sizeOf (undefined :: CFloat)
-  alignment _ = alignment (undefined :: CFloat)
-  peek ptr = do
-    x <- peekByteOff ptr 0 :: IO CFloat
-    y <- peekByteOff ptr (sizeOf (undefined :: CFloat)) :: IO CFloat
-    pure (V2 (realToFrac x) (realToFrac y))
-  poke ptr (V2 x y) = do
-    pokeByteOff ptr 0 (realToFrac x :: CFloat)
-    pokeByteOff ptr (sizeOf (undefined :: CFloat)) (realToFrac y :: CFloat)
-
-instance Storable (V4 Float) where
-  sizeOf _ = 4 * sizeOf (undefined :: CFloat)
-  alignment _ = alignment (undefined :: CFloat)
-  peek ptr = do
-    let step = sizeOf (undefined :: CFloat)
-    x <- peekByteOff ptr 0 :: IO CFloat
-    y <- peekByteOff ptr step :: IO CFloat
-    z <- peekByteOff ptr (2 * step) :: IO CFloat
-    w <- peekByteOff ptr (3 * step) :: IO CFloat
-    pure (V4 (realToFrac x) (realToFrac y) (realToFrac z) (realToFrac w))
-  poke ptr (V4 x y z w) = do
-    let step = sizeOf (undefined :: CFloat)
-    pokeByteOff ptr 0 (realToFrac x :: CFloat)
-    pokeByteOff ptr step (realToFrac y :: CFloat)
-    pokeByteOff ptr (2 * step) (realToFrac z :: CFloat)
-    pokeByteOff ptr (3 * step) (realToFrac w :: CFloat)
 
 instance Storable NoiseParams where
   sizeOf _ = 4 * sizeOf (undefined :: V4 Float)
@@ -2528,36 +2498,6 @@ instance Storable NoiseParams where
     pokeByteOff ptr (2 * step) extras
     pokeByteOff ptr (3 * step) period
 
-instance Storable (M44 Float) where
-  sizeOf _ = 16 * sizeOf (undefined :: CFloat)
-  alignment _ = alignment (undefined :: CFloat)
-  peek ptr = do
-    let step = sizeOf (undefined :: CFloat)
-        at n = realToFrac <$> (peekByteOff ptr (n * step) :: IO CFloat)
-    M44
-      <$> at 0 <*> at 1 <*> at 2 <*> at 3
-      <*> at 4 <*> at 5 <*> at 6 <*> at 7
-      <*> at 8 <*> at 9 <*> at 10 <*> at 11
-      <*> at 12 <*> at 13 <*> at 14 <*> at 15
-  poke ptr (M44 m00 m01 m02 m03 m10 m11 m12 m13 m20 m21 m22 m23 m30 m31 m32 m33) = do
-    let step = sizeOf (undefined :: CFloat)
-        pokeAt n value = pokeByteOff ptr (n * step) (realToFrac value :: CFloat)
-    pokeAt 0 m00
-    pokeAt 1 m01
-    pokeAt 2 m02
-    pokeAt 3 m03
-    pokeAt 4 m10
-    pokeAt 5 m11
-    pokeAt 6 m12
-    pokeAt 7 m13
-    pokeAt 8 m20
-    pokeAt 9 m21
-    pokeAt 10 m22
-    pokeAt 11 m23
-    pokeAt 12 m30
-    pokeAt 13 m31
-    pokeAt 14 m32
-    pokeAt 15 m33
 
 instance Storable Vertex where
   sizeOf _ = 8 * sizeOf (undefined :: CFloat)
@@ -2615,6 +2555,9 @@ instance Storable Vertex3D where
 
 rect :: Float -> Float -> Float -> Float -> FRect
 rect x y w h = FRect (realToFrac x) (realToFrac y) (realToFrac w) (realToFrac h)
+
+fullscreenRect :: (Int, Int) -> FRect
+fullscreenRect (w, h) = rect 0 0 (fromIntegral w) (fromIntegral h)
 
 point :: Float -> Float -> FPoint
 point x y = FPoint (realToFrac x) (realToFrac y)
@@ -2688,6 +2631,9 @@ spriteEffectNamed shader named = do
   uniforms <- liftIO (resolveNamedUniforms table named)
   pure (SpriteEffect shader uniforms)
 
+instance Semigroup SpriteEffect where
+  _ <> effect = effect
+
 data TextStyle = TextStyle
   { textColor :: Color
   , textEffect :: Maybe SpriteEffect
@@ -2700,6 +2646,65 @@ defaultTextStyle =
     { textColor = rgb 1 1 1
     , textEffect = Nothing
     , textBlend = Nothing
+    }
+
+instance Semigroup TextStyle where
+  TextStyle _ effect blend <> TextStyle color' effect' blend' =
+    TextStyle
+      color'
+      (if isJust effect' then effect' else effect)
+      (if isJust blend' then blend' else blend)
+
+data Patch a
+  = Keep
+  | Set a
+  deriving (Eq, Show)
+
+instance Semigroup (Patch a) where
+  Keep <> b = b
+  Set a <> Keep = Set a
+  Set _ <> Set b = Set b
+
+instance Monoid (Patch a) where
+  mempty = Keep
+
+data TextStylePatch = TextStylePatch
+  { patchTextColor :: Patch Color
+  , patchTextEffect :: Patch (Maybe SpriteEffect)
+  , patchTextBlend :: Patch (Maybe BlendMode)
+  }
+
+instance Semigroup TextStylePatch where
+  TextStylePatch c e b <> TextStylePatch c' e' b' =
+    TextStylePatch (c <> c') (e <> e') (b <> b')
+
+instance Monoid TextStylePatch where
+  mempty = TextStylePatch mempty mempty mempty
+
+textStylePatch :: TextStylePatch
+textStylePatch = mempty
+
+patchTextColor :: Color -> TextStylePatch
+patchTextColor color = mempty { patchTextColor = Set color }
+
+patchTextEffect :: Maybe SpriteEffect -> TextStylePatch
+patchTextEffect effect = mempty { patchTextEffect = Set effect }
+
+patchTextBlend :: Maybe BlendMode -> TextStylePatch
+patchTextBlend blend = mempty { patchTextBlend = Set blend }
+
+applyPatch :: Patch a -> a -> a
+applyPatch patch value =
+  case patch of
+    Keep -> value
+    Set newValue -> newValue
+
+applyTextStylePatch :: TextStyle -> TextStylePatch -> TextStyle
+applyTextStylePatch style patch =
+  TextStyle
+    { textColor = applyPatch patch.patchTextColor style.textColor
+    , textEffect = applyPatch patch.patchTextEffect style.textEffect
+    , textBlend = applyPatch patch.patchTextBlend style.textBlend
     }
 
 textStyle :: TextStyle
@@ -2716,12 +2721,12 @@ textBlend blend style = style { textBlend = Just blend }
 
 data Label = Label Text Float Float TextStyle
 
-data TextDraw = TextDraw Font String Float Float TextStyle
+data TextDraw = TextDraw Font T.Text Float Float TextStyle
 
-text :: Font -> String -> Float -> Float -> TextDraw
+text :: Font -> T.Text -> Float -> Float -> TextDraw
 text font str x y = TextDraw font str x y defaultTextStyle
 
-textWith :: TextStyle -> Font -> String -> Float -> Float -> TextDraw
+textWith :: TextStyle -> Font -> T.Text -> Float -> Float -> TextDraw
 textWith style font str x y = TextDraw font str x y style
 
 data ShaderUniform where
@@ -2750,6 +2755,22 @@ shaderUniformBytesChecked slot expectedBytes bytes =
 
 shaderUniformBytesSized :: Word32 -> Int -> ByteString -> Either String ShaderUniform
 shaderUniformBytesSized = shaderUniformBytesChecked
+
+shaderUniformCheckedE :: Storable a => Word32 -> Int -> a -> SlopResult ShaderUniform
+shaderUniformCheckedE slot expectedBytes =
+  first (slopErrorFromString SlopErrorUniform) . shaderUniformChecked slot expectedBytes
+
+shaderUniformSizedE :: Storable a => Word32 -> Int -> a -> SlopResult ShaderUniform
+shaderUniformSizedE slot expectedBytes =
+  first (slopErrorFromString SlopErrorUniform) . shaderUniformSized slot expectedBytes
+
+shaderUniformBytesCheckedE :: Word32 -> Int -> ByteString -> SlopResult ShaderUniform
+shaderUniformBytesCheckedE slot expectedBytes =
+  first (slopErrorFromString SlopErrorUniform) . shaderUniformBytesChecked slot expectedBytes
+
+shaderUniformBytesSizedE :: Word32 -> Int -> ByteString -> SlopResult ShaderUniform
+shaderUniformBytesSizedE slot expectedBytes =
+  first (slopErrorFromString SlopErrorUniform) . shaderUniformBytesSized slot expectedBytes
 
 data ShaderStage
   = ShaderFragment
@@ -2892,10 +2913,22 @@ instance Monoid RenderPlan where
   mempty = RenderPlan []
 
 newtype PassM a = PassM (Writer (DList Op) a)
-  deriving (Functor, Applicative, Monad)
+  deriving (Functor, Applicative)
 
 newtype PlanM a = PlanM (Writer (DList Pass) a)
-  deriving (Functor, Applicative, Monad)
+  deriving (Functor, Applicative)
+
+instance Semigroup a => Semigroup (PassM a) where
+  PassM a <> PassM b = PassM (liftA2 (<>) a b)
+
+instance Monoid a => Monoid (PassM a) where
+  mempty = pure mempty
+
+instance Semigroup a => Semigroup (PlanM a) where
+  PlanM a <> PlanM b = PlanM (liftA2 (<>) a b)
+
+instance Monoid a => Monoid (PlanM a) where
+  mempty = pure mempty
 
 instance Draw As2D Line where
   draw ctx (Line color p1 p2) =
@@ -2981,7 +3014,7 @@ withBlendTransform :: BlendMode -> Maybe Transform2D -> Loop a -> Loop a
 withBlendTransform blend transform (Loop action) =
   Loop $ do
     window <- ask
-    merged <- liftIO (mergeUniformBindings window.appDefaultShader [])
+    merged <- liftIO (mergeUniformBindings window window.appDefaultShader [])
     let ctx = ShaderContext window.appDefaultShader merged [] [] blend transform
     liftIO (withShaderContext window ctx (runWindowM window action))
 
@@ -3045,7 +3078,7 @@ runWindowIO cfg action =
                           blendPools <- newIORef []
                           mainAssetQueue <- newTQueueIO
                           targets <- newIORef Map.empty
-                          pipelineTargets <- newIORef Map.empty
+                          pipelineTargets <- newIORef IntMap.empty
                           depthTarget <- newIORef Nothing
                           depthTargets <- newIORef Map.empty
                           renderState <- newIORef (RenderState Map.empty 0)
@@ -3054,7 +3087,10 @@ runWindowIO cfg action =
                           frameShaders <- newIORef []
                           recording <- newIORef Nothing
                           winSize <- sdlGetWindowSize win
+                          drawableSize <- sdlGetWindowSizeInPixels win
                           windowSize <- newIORef winSize
+                          drawableSizeRef <- newIORef drawableSize
+                          globalsUniform <- newIORef Nothing
                           pipelines <- newIORef Map.empty
                           drawColor <- newIORef (rgba 1 1 1 1)
                           let frameContext = RecordingContext frameCommands frameShaders
@@ -3080,12 +3116,15 @@ runWindowIO cfg action =
                                 , appFrameContext = frameContext
                                 , appRecording = recording
                                 , appWindowSize = windowSize
+                                , appDrawableSize = drawableSizeRef
                                 , appWhiteTexture = whiteTexture
                                 , appVertexShader = vertShader
                                 , appVertexShader3D = vertShader3D
                                 , appDefaultShader = defShader
                                 , appPipelines = pipelines
                                 , appDrawColor = drawColor
+                                , appDebugLog = cfg.debugLog
+                                , appGlobalsUniform = globalsUniform
                                 }
                           workerCount <-
                             if cfg.assetWorkers <= 0
@@ -3385,6 +3424,11 @@ createNoiseTexture2D :: Int -> Int -> NoiseSettings -> WindowM Texture
 createNoiseTexture2D width height settings =
   liftWindow (\window -> createNoiseTexture2DIO window width height settings)
 
+createNoiseTexture2DSize :: Size2D -> NoiseSettings -> WindowM Texture
+createNoiseTexture2DSize size settings =
+  let (width, height) = size2DToTuple size
+  in createNoiseTexture2D width height settings
+
 ceilDiv :: Int -> Int -> Word32
 ceilDiv numerator denom =
   let d = max 1 denom
@@ -3394,16 +3438,14 @@ createNoiseTexture2DIO :: Window -> Int -> Int -> NoiseSettings -> IO Texture
 createNoiseTexture2DIO window width height settings = do
   let texUsage = sdlGPUTextureUsageSampler .|. sdlGPUTextureUsageComputeStorageSimultaneousReadWrite
   tex <- createTexture window.appGPUDevice sdlGPUTextureFormatRGBA8 texUsage width height
-  let V2 threadsX0 threadsY0 = settings.noiseComputeThreads2D
-  let threadsX = max 1 threadsX0
-  let threadsY = max 1 threadsY0
+  let (threadsX, threadsY) = threads2DToInts settings.noiseComputeThreads2D
   let shaderCode = fromMaybe noise2DComputeSpirv settings.noiseComputeShader2D
   let desc =
         defaultCompute
           { computeShaderCode = shaderCode
           , computeReadwriteStorageTextures = 1
           , computeUniformBuffers = 1
-          , computeThreads = (fromIntegral threadsX, fromIntegral threadsY, 1)
+          , computeThreads = threads3D threadsX threadsY 1
           }
   pipeline <- createComputePipelineIO window desc
   let params = noiseParams2D width height settings
@@ -3421,21 +3463,23 @@ createNoiseTexture3D :: Int -> Int -> Int -> NoiseSettings -> WindowM Texture
 createNoiseTexture3D width height depth settings =
   liftWindow (\window -> createNoiseTexture3DIO window width height depth settings)
 
+createNoiseTexture3DSize :: Size3D -> NoiseSettings -> WindowM Texture
+createNoiseTexture3DSize size settings =
+  let (width, height, depth) = size3DToTuple size
+  in createNoiseTexture3D width height depth settings
+
 createNoiseTexture3DIO :: Window -> Int -> Int -> Int -> NoiseSettings -> IO Texture
 createNoiseTexture3DIO window width height depth settings = do
   let texUsage = sdlGPUTextureUsageSampler .|. sdlGPUTextureUsageComputeStorageSimultaneousReadWrite
   tex <- createTexture3D window.appGPUDevice sdlGPUTextureFormatRGBA8 texUsage width height depth
-  let V3 threadsX0 threadsY0 threadsZ0 = settings.noiseComputeThreads3D
-  let threadsX = max 1 threadsX0
-  let threadsY = max 1 threadsY0
-  let threadsZ = max 1 threadsZ0
+  let (threadsX, threadsY, threadsZ) = threads3DToInts settings.noiseComputeThreads3D
   let shaderCode = fromMaybe noise3DComputeSpirv settings.noiseComputeShader3D
   let desc =
         defaultCompute
           { computeShaderCode = shaderCode
           , computeReadwriteStorageTextures = 1
           , computeUniformBuffers = 1
-          , computeThreads = (fromIntegral threadsX, fromIntegral threadsY, fromIntegral threadsZ)
+          , computeThreads = threads3D threadsX threadsY threadsZ
           }
   pipeline <- createComputePipelineIO window desc
   let params = noiseParams3D width height depth settings
@@ -3576,8 +3620,9 @@ loadFontSDFIO path size = do
   setFontSDF font True
   pure font
 
-createTextIO :: Window -> Font -> String -> IO Text
-createTextIO window font str = require "TTF_CreateText" (ttfCreateText (window.appTextEngine) font str)
+createTextIO :: Window -> Font -> T.Text -> IO Text
+createTextIO window font str =
+  require "TTF_CreateText" (ttfCreateText (window.appTextEngine) font (T.unpack str))
 
 destroyTextIO :: Text -> IO ()
 destroyTextIO = ttfDestroyText
@@ -3878,7 +3923,7 @@ resolveShaderContext window ctx =
   case ctx of
     Just value -> pure value
     Nothing -> do
-      defaults <- mergeUniformBindings window.appDefaultShader []
+      defaults <- mergeUniformBindings window window.appDefaultShader []
       pure ShaderContext
         { ctxShader = window.appDefaultShader
         , ctxUniforms = defaults
@@ -4426,15 +4471,25 @@ loop initialState onFrame = do
   let go previous frameId prevInput state = do
         liftIO sdlPumpEvents
         liftIO (resetRecording window.appFrameContext)
-        (quitRequested, inputText', inputWheel') <- liftIO pollInputEvents
+        (quitRequested, inputText', inputWheel', inputEvents') <- liftIO pollInputEvents
         now <- liftIO sdlGetTicks
         currentInput <- liftIO readInputState
         inputMods' <- liftIO (modifiersFromKeymod <$> SDL.sdlGetModState)
         (winW, winH) <- liftIO (sdlGetWindowSize (window.appWindow))
+        (drawW, drawH) <- liftIO (sdlGetWindowSizeInPixels (window.appWindow))
         liftIO (writeIORef window.appWindowSize (winW, winH))
+        liftIO (writeIORef window.appDrawableSize (drawW, drawH))
         let dt = fromIntegral (now - previous) / 1000
             t = fromIntegral (now - start) / 1000
             nextFrame = frameId + 1
+            dpiX =
+              if winW > 0
+                then fromIntegral drawW / fromIntegral winW
+                else 1
+            dpiY =
+              if winH > 0
+                then fromIntegral drawH / fromIntegral winH
+                else 1
         liftIO (setFrameId window nextFrame)
         let frame = Frame
               { delta = dt
@@ -4442,8 +4497,11 @@ loop initialState onFrame = do
               , ticks = now
               , quitRequested = quitRequested
               , size = (winW, winH)
-              , input = InputFrame prevInput currentInput inputText' inputWheel' inputMods'
+              , renderSize = (drawW, drawH)
+              , dpiScale = V2 dpiX dpiY
+              , input = InputFrame prevInput currentInput inputText' inputWheel' inputMods' inputEvents'
               }
+        liftIO (updateGlobalsUniform window frame)
         autoUpdateBlendPools dt
         autoHotReload dt
         processMainAssets
@@ -4459,21 +4517,22 @@ loop initialState onFrame = do
   go start 0 initialInput initialState
   where
     pollInputEvents = allocaEvent $ \eventPtr ->
-      let step quitSeen textChunks wheelAcc = do
+      let step quitSeen textChunks wheelAcc events = do
             has <- sdlPollEvent eventPtr
             if not has
-              then pure (quitSeen, concat (reverse textChunks), wheelAcc)
+              then pure (quitSeen, T.concat (reverse textChunks), wheelAcc, reverse events)
               else do
                 eventType <- peekEventType eventPtr
                 let quitNow = quitSeen || eventType == sdlEventQuit
+                let events' = if eventType == sdlEventQuit then EventQuit : events else events
                 if eventType == sdlEventTextInput
                   then do
                     ev <- peekTextInputEvent eventPtr
                     chunk <-
                       if ev.textInputText == nullPtr
-                        then pure ""
-                        else peekCString ev.textInputText
-                    step quitNow (chunk : textChunks) wheelAcc
+                        then pure T.empty
+                        else T.pack <$> peekCString ev.textInputText
+                    step quitNow (chunk : textChunks) wheelAcc (EventText chunk : events')
                   else if eventType == sdlEventMouseWheel
                     then do
                       ev <- peekMouseWheelEvent eventPtr
@@ -4481,9 +4540,9 @@ loop initialState onFrame = do
                       let dy = realToFrac ev.mouseWheelY
                       let flipped = ev.mouseWheelDirection == sdlMouseWheelFlipped
                       let delta = if flipped then V2 (-dx) (-dy) else V2 dx dy
-                      step quitNow textChunks (wheelAcc + delta)
-                    else step quitNow textChunks wheelAcc
-      in step False [] (V2 0 0)
+                      step quitNow textChunks (wheelAcc + delta) (EventMouseWheel delta : events')
+                    else step quitNow textChunks wheelAcc events'
+      in step False [] (V2 0 0) []
 
 autoUpdateBlendPools :: Float -> WindowM ()
 autoUpdateBlendPools delta = do
@@ -4568,6 +4627,10 @@ createTexture2D desc = do
   window <- ask
   liftIO (createTexture2DIO window desc)
 
+createTexture2DSize :: Size2D -> WindowM Texture
+createTexture2DSize size =
+  createTexture2D (textureDescSize size)
+
 drawMesh :: Pipeline -> Mesh -> [Binding] -> Loop ()
 drawMesh pipeline mesh bindings =
   withWindowLoop (\window -> recordMesh window pipeline mesh bindings)
@@ -4631,6 +4694,11 @@ createRenderTarget width height = do
   liftIO (registerRenderTarget window tex)
   liftIO (registerDepthTarget window tex depth)
   pure (RenderTarget tex)
+
+createRenderTargetSize :: Size2D -> WindowM RenderTarget
+createRenderTargetSize size =
+  let (width, height) = size2DToTuple size
+  in createRenderTarget width height
 
 withRenderTarget :: Int -> Int -> (RenderTarget -> WindowM a) -> WindowM a
 withRenderTarget width height action = do
@@ -4735,7 +4803,7 @@ loadFontSDF path size = liftIO (loadFontSDFIO path size)
 closeFont :: Font -> WindowM ()
 closeFont font = liftIO (closeFontIO font)
 
-createText :: Font -> String -> WindowM Text
+createText :: Font -> T.Text -> WindowM Text
 createText font str = do
   window <- ask
   liftIO (createTextIO window font str)
@@ -4756,10 +4824,10 @@ drawTextRawWith style textObj x y =
       Just (SpriteEffect shader uniforms) ->
         withShaderBindingsBlendTransform blend shader uniforms Nothing action
 
-drawText :: Font -> String -> Float -> Float -> Loop ()
+drawText :: Font -> T.Text -> Float -> Float -> Loop ()
 drawText font str x y = drawTextWith defaultTextStyle font str x y
 
-drawTextWith :: TextStyle -> Font -> String -> Float -> Float -> Loop ()
+drawTextWith :: TextStyle -> Font -> T.Text -> Float -> Float -> Loop ()
 drawTextWith style font str x y =
   let action = drawTextCachedWith font str x y style.textColor
       blend = fromMaybe BlendAlpha style.textBlend
@@ -4768,7 +4836,7 @@ drawTextWith style font str x y =
       Just (SpriteEffect shader uniforms) ->
         withShaderBindingsBlendTransform blend shader uniforms Nothing action
 
-drawTextCachedWith :: Font -> String -> Float -> Float -> Color -> Loop ()
+drawTextCachedWith :: Font -> T.Text -> Float -> Float -> Color -> Loop ()
 drawTextCachedWith font str x y color =
   Loop $ do
     window <- ask
@@ -4792,13 +4860,13 @@ drawTextCachedWith font str x y color =
         pure t
     liftIO (recordDraw window (ShapeText textObj x y color))
 
-measureText :: Font -> String -> WindowM (V2 Float)
+measureText :: Font -> T.Text -> WindowM (V2 Float)
 measureText = measureTextCached
 
-measureTextCached :: Font -> String -> WindowM (V2 Float)
+measureTextCached :: Font -> T.Text -> WindowM (V2 Float)
 measureTextCached font str = liftWindow (\window -> measureTextCachedIO window font str)
 
-measureTextCachedIO :: Window -> Font -> String -> IO (V2 Float)
+measureTextCachedIO :: Window -> Font -> T.Text -> IO (V2 Float)
 measureTextCachedIO window font str = do
   frameId <- atomicModifyIORef' (window.appRenderState) (\st -> (st, st.rsFrameId))
   let Font fontPtr = font
@@ -5204,6 +5272,14 @@ data Shader = Shader
   , shaderBindingTable :: IORef ShaderBindings
   }
 
+newtype UniformCache = UniformCache (IORef (Map.Map Word32 ByteString))
+
+newUniformCache :: IO UniformCache
+newUniformCache = UniformCache <$> newIORef Map.empty
+
+shaderUniformCache :: Shader -> UniformCache
+shaderUniformCache shader = UniformCache shader.shaderUniformDefaults
+
 defaultSamplerDesc :: SamplerDesc
 defaultSamplerDesc = SamplerDesc
   { samplerMinFilter = SamplerLinear
@@ -5371,7 +5447,7 @@ createComputePipelineIO window desc = do
   let device = window.appGPUDevice
   BS.useAsCStringLen desc.computeShaderCode $ \(ptr, byteLen) ->
     withCString "main" $ \entry -> do
-      let (threadsX, threadsY, threadsZ) = desc.computeThreads
+      let (threadsX, threadsY, threadsZ) = threads3DToWord32 desc.computeThreads
       let createInfo =
             GPUComputePipelineCreateInfo
             { gpuComputeCodeSize = fromIntegral byteLen
@@ -5409,7 +5485,7 @@ defaultCompute =
     , computeReadwriteStorageTextures = 0
     , computeReadwriteStorageBuffers = 0
     , computeUniformBuffers = 0
-    , computeThreads = (1, 1, 1)
+    , computeThreads = threads3D 1 1 1
     }
 
 computePipeline :: ComputeDesc -> WindowM ComputePipeline
@@ -5461,8 +5537,7 @@ destroyShaderIO shader =
 
 withShaderIO :: Window -> Shader -> IO a -> IO a
 withShaderIO window shader action = do
-  defaults <- readIORef shader.shaderUniformDefaults
-  let uniforms = map (uncurry UniformBinding) (Map.toList defaults)
+  uniforms <- mergeUniformBindings window shader []
   let ctx = ShaderContext shader uniforms [] [] BlendAlpha Nothing
   withShaderContext window ctx action
 
@@ -5622,11 +5697,16 @@ collectComputeBindings bindings = do
         ComputeStorageTextureRW slot tex ->
           pure (uAcc, sAcc, roAcc, (slot, tex) : rwAcc)
 
-mergeUniformBindings :: Shader -> [UniformBinding] -> IO [UniformBinding]
-mergeUniformBindings shader explicit = do
+mergeUniformBindings :: Window -> Shader -> [UniformBinding] -> IO [UniformBinding]
+mergeUniformBindings window shader explicit = do
   defaults <- readIORef shader.shaderUniformDefaults
+  globals <- readIORef window.appGlobalsUniform
+  let defaults' =
+        case globals of
+          Just bytes | shader.shaderUniformBufferCount > 0 -> Map.insertWith (\_ old -> old) 0 bytes defaults
+          _ -> defaults
   let explicitMap = Map.fromList [ (slot, bytes) | UniformBinding slot bytes <- explicit ]
-  let merged = Map.union explicitMap defaults
+  let merged = Map.union explicitMap defaults'
   pure (map (uncurry UniformBinding) (Map.toAscList merged))
 
 ensureFragmentStage :: ShaderStage -> IO ()
@@ -5742,6 +5822,15 @@ setShaderUniformBytesCached :: Shader -> Word32 -> ByteString -> Loop ()
 setShaderUniformBytesCached shader slot bytes =
   Loop (liftIO (setShaderUniformBytesIO shader slot bytes))
 
+setShaderUniformBytesCachedWith :: UniformCache -> Shader -> Word32 -> ByteString -> Loop ()
+setShaderUniformBytesCachedWith (UniformCache cacheRef) shader slot bytes =
+  Loop $ do
+    changed <- liftIO $ atomicModifyIORef' cacheRef $ \cache ->
+      case Map.lookup slot cache of
+        Just prev | prev == bytes -> (cache, False)
+        _ -> (Map.insert slot bytes cache, True)
+    when changed (liftIO (setShaderUniformBytesIO shader slot bytes))
+
 createShaderFromSpirv :: ByteString -> WindowM Shader
 createShaderFromSpirv spirv = liftWindow (\window -> createShaderFromSpirvIO window spirv)
 
@@ -5785,7 +5874,7 @@ withShaderBindingsInternalBlend :: BlendMode -> Shader -> ([UniformBinding], [Sa
 withShaderBindingsInternalBlend blend shader (uniforms, samplers, storage) transform (Loop action) =
   Loop $ do
     window <- ask
-    merged <- liftIO (mergeUniformBindings shader uniforms)
+    merged <- liftIO (mergeUniformBindings window shader uniforms)
     let ctx = ShaderContext shader merged samplers storage blend transform
     liftIO (withShaderContext window ctx (runWindowM window action))
 
@@ -5793,7 +5882,7 @@ withShader :: Shader -> Loop a -> Loop a
 withShader shader (Loop action) =
   Loop $ do
     window <- ask
-    merged <- liftIO (mergeUniformBindings shader [])
+    merged <- liftIO (mergeUniformBindings window shader [])
     let ctx = ShaderContext shader merged [] [] BlendAlpha Nothing
     liftIO (withShaderContext window ctx (runWindowM window action))
 

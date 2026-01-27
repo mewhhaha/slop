@@ -32,6 +32,7 @@ flag demo
 library
     import:           warnings
     exposed-modules:  Slop
+                      Slop.Math
                       Slop.SDL.Raw
                       Slop.Pipeline
                       Slop.Pipeline.Graph
@@ -45,6 +46,7 @@ library
         directory,
         mtl,
         stm,
+        text,
         time
     pkgconfig-depends:
         sdl3 >= 3.4,
@@ -66,7 +68,8 @@ executable slop
         bytestring,
         containers,
         slop,
-        spirdo
+        spirdo,
+        text
     pkgconfig-depends:
         sdl3-mixer
 

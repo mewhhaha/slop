@@ -5,7 +5,9 @@
 module Slop.Pipeline.Graph
   ( Node
   , Graph
+  , GraphPlan
   , PassM
+  , compile
   , pass
   , clear
   , draw
@@ -14,20 +16,25 @@ module Slop.Pipeline.Graph
   , blit
   , withShader
   , postProcess
+  , postProcessOf
   , merge
+  , mergeOf
   , output
+  , outputOf
   , fork
   , join
   , linear
+  , renderPlan
   , render
   ) where
 
-import Control.Monad (foldM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (StateT, evalStateT, get, modify')
 import Control.Monad.Writer.Strict (Writer, execWriter, runWriter, tell)
-import Data.IORef (readIORef, writeIORef)
-import qualified Data.Map.Strict as Map
+import Data.Foldable (traverse_)
+import Data.IORef (atomicModifyIORef', readIORef, writeIORef)
+import qualified Data.IntMap.Strict as IntMap
+import qualified Data.Set as Set
 
 import qualified Slop as S
 import Slop.Internal.DList (DList, singleton, toList)
@@ -67,10 +74,24 @@ data Step
   | StepCompute ComputePipeline [ComputeBinding] (Word32, Word32, Word32)
 
 newtype PassM a = PassM (Writer (DList Op) a)
-  deriving (Functor, Applicative, Monad)
+  deriving (Functor, Applicative)
 
 newtype Graph a = Graph (StateT Int (Writer (DList Step)) a)
-  deriving (Functor, Applicative, Monad)
+  deriving (Functor, Applicative)
+
+newtype GraphPlan = GraphPlan [Step]
+
+instance Semigroup a => Semigroup (PassM a) where
+  PassM a <> PassM b = PassM (liftA2 (<>) a b)
+
+instance Monoid a => Monoid (PassM a) where
+  mempty = pure mempty
+
+instance Semigroup a => Semigroup (Graph a) where
+  Graph a <> Graph b = Graph (liftA2 (<>) a b)
+
+instance Monoid a => Monoid (Graph a) where
+  mempty = pure mempty
 
 pass :: PassM a -> Graph Node
 pass (PassM action) = Graph $ do
@@ -108,31 +129,54 @@ postProcess :: Node -> Shader -> [ShaderUniform] -> Maybe FRect -> FRect -> Grap
 postProcess input shader uniforms src dst =
   pass (withShader shader uniforms (blit input src dst))
 
+postProcessOf :: Graph Node -> Shader -> [ShaderUniform] -> Maybe FRect -> FRect -> Graph Node
+postProcessOf input shader uniforms src dst =
+  withNodeGraph input (\node -> postProcess node shader uniforms src dst)
+
 merge :: [Node] -> Maybe FRect -> FRect -> Graph Node
 merge inputs src dst =
-  pass (mapM_ (\node -> blit node src dst) inputs)
+  pass (traverse_ (\node -> blit node src dst) inputs)
+
+mergeOf :: [Graph Node] -> Maybe FRect -> FRect -> Graph Node
+mergeOf inputs src dst =
+  withNodeGraph (sequenceA inputs) (\nodes -> merge nodes src dst)
 
 output :: Node -> Maybe FRect -> FRect -> Graph ()
 output node src dst = Graph (tell (singleton (StepOutput node src dst)))
 
+outputOf :: Graph Node -> Maybe FRect -> FRect -> Graph ()
+outputOf input src dst =
+  withNodeGraph input (\node -> output node src dst)
+
 fork :: Graph a -> Graph b -> Graph (a, b)
 fork (Graph left) (Graph right) =
-  Graph $ do
-    a <- left
-    b <- right
-    pure (a, b)
+  Graph (liftA2 (,) left right)
 
 join :: [Node] -> Maybe FRect -> FRect -> Graph Node
 join = merge
 
 linear :: Node -> [(Shader, [ShaderUniform])] -> Maybe FRect -> FRect -> Graph Node
 linear start passes src dst =
-  foldM (\node (shader, uniforms) -> postProcess node shader uniforms src dst) start passes
+  Graph (go start passes)
+  where
+    go current [] = pure current
+    go current ((shader, uniforms) : rest) = do
+      let Graph step = postProcess current shader uniforms src dst
+      next <- step
+      go next rest
+
+compile :: Graph a -> GraphPlan
+compile (Graph action) =
+  GraphPlan (toList (execWriter (evalStateT action 0)))
+
+renderPlan :: (Int, Int) -> GraphPlan -> Loop ()
+renderPlan size (GraphPlan steps) = do
+  mapM_ (runStep size) steps
+  pruneTargets (collectNodes steps)
 
 render :: (Int, Int) -> Graph a -> Loop ()
-render size (Graph action) = do
-  let steps = toList (execWriter (evalStateT action 0))
-  mapM_ (runStep size) steps
+render size graph =
+  renderPlan size (compile graph)
 
 runStep :: (Int, Int) -> Step -> Loop ()
 runStep size step =
@@ -166,17 +210,17 @@ ensureTarget :: Node -> (Int, Int) -> Loop RenderTarget
 ensureTarget (Node nodeId) size = do
   window <- liftLoop askWindow
   targets <- liftLoop (liftIO (readIORef window.appPipelineTargets))
-  case Map.lookup nodeId targets of
+  case IntMap.lookup nodeId targets of
     Just (target, targetSize)
       | targetSize == size -> pure target
       | otherwise -> do
           _ <- liftLoop (S.destroyTarget target)
           target' <- liftLoop (S.createRenderTarget (fst size) (snd size))
-          liftLoop (liftIO (writeIORef window.appPipelineTargets (Map.insert nodeId (target', size) targets)))
+          liftLoop (liftIO (writeIORef window.appPipelineTargets (IntMap.insert nodeId (target', size) targets)))
           pure target'
     Nothing -> do
       target' <- liftLoop (S.createRenderTarget (fst size) (snd size))
-      liftLoop (liftIO (writeIORef window.appPipelineTargets (Map.insert nodeId (target', size) targets)))
+      liftLoop (liftIO (writeIORef window.appPipelineTargets (IntMap.insert nodeId (target', size) targets)))
       pure target'
 
 clearTarget :: Color -> Loop ()
@@ -191,3 +235,38 @@ blitTarget = S.output
 passWithShader :: Shader -> [ShaderUniform] -> Loop a -> Loop a
 passWithShader shader uniforms action =
   withShaderBindings shader uniforms action
+
+withNodeGraph :: Graph a -> (a -> Graph b) -> Graph b
+withNodeGraph (Graph action) f =
+  Graph $ do
+    value <- action
+    let Graph action' = f value
+    action'
+
+collectNodes :: [Step] -> Set.Set Int
+collectNodes = foldl' stepNodes Set.empty
+  where
+    stepNodes acc step =
+      case step of
+        StepPass (Node nodeId) opsList ->
+          Set.insert nodeId (acc <> collectOps opsList)
+        StepOutput (Node nodeId) _ _ ->
+          Set.insert nodeId acc
+        StepCompute {} -> acc
+    collectOps opsList = foldl' opNodes Set.empty opsList
+    opNodes acc op =
+      case op of
+        OpBlit (Node nodeId) _ _ ->
+          Set.insert nodeId acc
+        OpShader _ _ opsList ->
+          acc <> collectOps opsList
+        _ -> acc
+
+pruneTargets :: Set.Set Int -> Loop ()
+pruneTargets used = do
+  window <- liftLoop askWindow
+  stale <- liftLoop $ liftIO $
+    atomicModifyIORef' window.appPipelineTargets $ \targets ->
+      let (keep, dropTargets) = IntMap.partitionWithKey (\k _ -> Set.member k used) targets
+      in (keep, IntMap.elems dropTargets)
+  mapM_ (\(target, _) -> liftLoop (S.destroyTarget target)) stale
