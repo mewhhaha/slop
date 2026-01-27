@@ -85,6 +85,29 @@ fn main(@location(0) uv: vec2<f32>, @location(1) inColor: vec4<f32>) -> @locatio
 }
 |]
 
+noise3dShader =
+  [wesl|
+struct Params {
+  time: f32,
+  width: f32,
+  height: f32,
+  _pad: f32,
+};
+
+@group(3) @binding(0) var<uniform> params: Params;
+@group(2) @binding(0) var noiseTex3D: texture_3d<f32>;
+@group(2) @binding(1) var noiseSamp: sampler;
+
+@fragment
+fn main(@location(0) uv: vec2<f32>, @location(1) inColor: vec4<f32>) -> @location(0) vec4<f32> {
+  let t = fract(params.time / 6.0);
+  let n = textureSample(noiseTex3D, noiseSamp, vec3(uv.x, uv.y, t)).r;
+  let v = smoothstep(0.35, 0.65, n);
+  let col = vec3(v, v, v);
+  return vec4(col.r * inColor.r, col.g * inColor.g, col.b * inColor.b, inColor.a);
+}
+|]
+
 computeShader =
   [wesl|
 struct Params {
@@ -95,7 +118,7 @@ struct Params {
 };
 
 @group(1) @binding(0)
-var<storage, read_write> out_tex: texture_storage_2d<rgba8unorm, write>;
+var<storage> out_tex: texture_storage_2d<rgba8unorm, write>;
 
 @group(2) @binding(0)
 var<uniform> params: Params;
@@ -130,6 +153,7 @@ main = do
     let inputsOrCrash label prepared builder = orCrash label (inputsFromPrepared prepared builder)
 
     demoPrepared <- prepareOrCrash "demoShader" demoShader
+    noise3dPrepared <- prepareOrCrash "noise3dShader" noise3dShader
     computePrepared <- prepareOrCrash "computeShader" computeShader
 
     computePipe <-
@@ -156,9 +180,11 @@ main = do
       load "sampler" (SamplerAsset defaultSamplerDesc
         { samplerAddressU = SamplerRepeat
         , samplerAddressV = SamplerRepeat
+        , samplerAddressW = SamplerRepeat
         })
 
     shader <- load "effect shader" (ShaderAsset (shaderSpirv demoShader) 2 0 0 1)
+    noise3dShaderHandle <- load "noise3d shader" (ShaderAsset (shaderSpirv noise3dShader) 1 0 0 1)
     let noiseSettings =
           defaultNoiseSettings
             { noiseType = NoisePerlin
@@ -166,6 +192,12 @@ main = do
             , noiseOctaves = 4
             }
     noiseTex <- load "noise" (NoiseTexture2DAsset 256 256 noiseSettings)
+    let volumeSettings =
+          noiseSettings
+            { noiseScale = 32
+            , noisePeriod3D = Just (4, 4, 4)
+            }
+    noiseVolume <- load "noise3d" (NoiseTexture3DAsset 128 128 128 volumeSettings)
 
     blend <- createTrackPool PoolBlend 2
     sfxPool <- createTrackPool PoolRoundRobin 8
@@ -203,6 +235,13 @@ main = do
               <> Inputs.sampler @"noiseSamp" (toSamplerHandle sampler)
           )
       let effect = spriteEffectFrom shader effectInputs
+      volumeInputs <-
+        inputsOrCrash "noise3d inputs" noise3dPrepared
+          ( Inputs.uniform @"params" params
+              <> Inputs.texture @"noiseTex3D" (toTextureHandle noiseVolume)
+              <> Inputs.sampler @"noiseSamp" (toSamplerHandle sampler)
+          )
+      let volumeEffect = spriteEffectFrom noise3dShaderHandle volumeInputs
 
       let pipeline = do
             compute computePipe (computeBindingsFrom computeInputs) computeGroups
@@ -214,6 +253,7 @@ main = do
               draw basicUI (Sprite texture Nothing (rect 80 320 160 160) Nothing)
               draw basicUI (Sprite computeTex Nothing (rect 520 70 180 180) Nothing)
               draw basicUI (Sprite noiseTex Nothing (rect 720 70 180 180) Nothing)
+              draw basicUI (Sprite noiseVolume Nothing (rect 520 260 180 180) (Just volumeEffect))
               draw basicUI (Sprite texture Nothing (rect 320 320 200 160) (Just effect))
               let titleStyle = defaultTextStyle { textColor = rgb 0.95 0.9 0.6 }
               draw basicUI (textWith titleStyle font "Slop + SDL3.4" 80 40)

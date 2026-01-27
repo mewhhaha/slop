@@ -295,7 +295,7 @@ Use `getAsset`/`awaitAsset` to see the refreshed values if you cached a value lo
 
 ## Noise Textures
 
-Generate procedural noise on the CPU and upload it to a GPU texture:
+Generate procedural noise on the GPU (compute) into a texture:
 
 ```haskell
 let noiseSettings = defaultNoiseSettings
@@ -332,13 +332,76 @@ noiseId <- loadAssetAsync (NoiseTexture2DAsset 256 256 defaultNoiseSettings)
 noiseTex <- awaitAsset noiseId >>= either (error . ("noise: " <>)) pure
 ```
 
+Looping (tiled) noise:
+
+```haskell
+let settings =
+      defaultNoiseSettings
+        { noiseType = NoisePerlin
+        , noiseScale = 64
+        , noisePeriod2D = Just (4, 4) -- period in noise space (after scale)
+        }
+noiseTex <- createNoiseTexture2D 256 256 settings
+```
+
+If you want the texture to tile across its full width/height, pick a scale that divides the size,
+and set `noisePeriod2D` to `(width / noiseScale, height / noiseScale)`.
+
+When `noisePeriod2D/3D` is set, Slop generates noise over a half-open domain `[0,1)` so the
+texture tiles without duplicate endpoints. Use repeat wrap in your sampler for seamless loops.
+
 3D noise textures are also supported:
 
 ```haskell
 volume <- createNoiseTexture3D 64 64 64 defaultNoiseSettings
 ```
 
-Sampling 3D noise requires a custom shader that uses `texture_3d`.
+Looping 3D volumes:
+
+```haskell
+let volumeSettings =
+      defaultNoiseSettings
+        { noiseType = NoisePerlin
+        , noiseScale = 32
+        , noisePeriod3D = Just (4, 4, 4)
+        }
+volume <- createNoiseTexture3D 64 64 64 volumeSettings
+```
+
+Higher resolution looks smoother (more slices):
+
+```haskell
+let hiRes =
+      defaultNoiseSettings
+        { noiseType = NoisePerlin
+        , noiseScale = 32
+        , noisePeriod3D = Just (4, 4, 4)
+        }
+volume <- createNoiseTexture3D 128 128 128 hiRes
+```
+
+Use a custom shader to sample `texture_3d` (pass time or a slice as Z):
+
+```haskell
+volumeId <- loadAssetAsync (NoiseTexture3DAsset 64 64 64 defaultNoiseSettings)
+volume <- awaitAsset volumeId >>= either (error . ("noise3d: " <>)) pure
+
+let effect =
+      SpriteEffect shader
+        [ NamedSamplerWith "noiseTex3D" volume sampler
+        , NamedUniform "time" time
+        ]
+
+draw (basic2D cam) (Sprite tex Nothing (rect 40 80 256 256) (Just effect))
+```
+In your fragment shader, sample with `texture_3d`:
+
+```haskell
+-- WESL-ish (spirdo)
+-- @group(0) @binding(0) var noiseTex3D: texture_3d<f32>;
+-- @group(0) @binding(1) var noiseSampler: sampler;
+-- let n = textureSample(noiseTex3D, noiseSampler, vec3(in.uv, time));
+```
 
 ## Audio
 
