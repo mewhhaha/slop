@@ -44,8 +44,8 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 - `basic2D` requires a camera (use `camera2DScreen` / `camera2DWindow`). `basicUI` stays raw screen space.
 - Depth/stencil is enabled for `basic3D` (depth test + write). The renderer allocates a depth target per swapchain/render target as needed.
 - 2D camera helpers are CPU-side transforms via `camera2DMatrix`.
-- `SpriteEffect` is a typed wrapper for per-sprite shader overrides.
-- `SlopGlobals` uniform (slot 0) is auto-bound for fragment shaders with uniform buffers (time, renderSize, dpiScale).
+- `SpriteEffect` wraps a `Shader2D` for per-sprite shader overrides (2D ABI).
+- `SlopGlobals` uniform (slot 0) is auto-bound for fragment shaders with uniform buffers (time, renderSize, dpiScale). Fragment uniforms live in SPIR-V `@group(3)`, samplers/textures in `@group(2)`.
 - Declarative pipeline builders: `defaultGraphics`/`graphicsPipeline` and `defaultCompute`/`computePipeline`.
 - Compute pipelines use `computePipeline` + `dispatchCompute`, or `compute` steps inside the graph DSL.
 
@@ -61,7 +61,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 - `drawText`/`drawTextWith`/`measureText` use the text cache and prune unused entries each frame.
 - Configure text atlas size via `Config.textAtlasSize` to reduce GPU memory if needed.
 - Public text APIs take `Data.Text.Text` (`OverloadedStrings` recommended).
-- `TextStylePatch` gives compositional style changes (`Monoid`).
+- `TextStylePatch` gives compositional style changes (`Monoid`), including `patchTextShader`.
 
 ## Input
 

@@ -204,16 +204,44 @@ draw (basic3D cam) (mesh3D mesh identity [])
 Slop supports custom graphics and compute pipelines (`Pipeline`, `Binding`, `ComputeBinding`).
 The demo uses Spirdo to compile WESL -> SPIR-V. Slop itself is Spirdo-free.
 
-### Sprite shader override (fragment)
+### Slop shader ABI (predictable bindings)
+
+Slop’s custom fragment path follows SDL_gpu’s SPIR-V descriptor-set conventions:
+
+- **Fragment samplers / textures / storage textures** live in `@group(2)`.
+- **Fragment uniform buffers** live in `@group(3)`.
+- Slop binds uniforms by **binding slot index** (`0..3`), not by name.
+- Slop binds samplers as a **combined sampler array** starting at slot 0.
+- Use `Shader2D` / `Shader2DAsset` for sprite/text overrides (this path enforces the ABI).
+
+If these don’t match your shader, you’ll now get a clear runtime error instead of a black frame.
+Keep custom shader bindings aligned with these rules for predictable results.
+
+Minimal fragment ABI example:
+
+```wgsl
+struct Params { time: f32; _pad0: f32; renderSize: vec2<f32>; dpiScale: vec2<f32>; _pad1: vec2<f32>; };
+@group(3) @binding(0) var<uniform> slop: Params;
+@group(2) @binding(0) var tex0: texture_2d<f32>;
+@group(2) @binding(1) var samp0: sampler;
+```
+
+### Sprite shader override (Shader2D)
 
 ```haskell
-effect <- spriteEffectNamed fx
+shader2d <- load "fx" (Shader2DAsset (shaderSpirv shaderSource) (ShaderCounts 2 0 0 1))
+setShader2DBindings shader2d shaderBindingTable
+
+-- Make sure your WESL shader uses group(3) for uniforms and group(2) for samplers.
+fx <- spriteEffectNamed shader2d
   [ NamedUniform "params" params
   , NamedSamplerWith "noiseTex" noiseTex sampler
   ]
 
-draw (basic2D cam) (Sprite tex Nothing dst (Just effect))
+draw (basic2D cam) (Sprite tex Nothing dst (Just fx))
 ```
+`spriteEffectNamed` requires a binding table (e.g. from Spirdo) to be set via
+`setShaderBindings` so names map to binding slots.
 
 ### Uniform safety
 
@@ -226,20 +254,21 @@ let u' = shaderUniformBytesSized 0 16 bytes -- Either String ShaderUniform
 
 ### Sampler bindings (contiguous slots)
 
-Slop treats samplers as a contiguous array of slots starting at 0. Always bind samplers
-densely (0..N-1) to avoid binding errors:
+Slop treats samplers as an array of slots starting at 0. Slots can be sparse (gaps are
+filled with a safe placeholder), but for clarity most examples bind densely (0..N-1):
 
 ```haskell
-let effect =
-      SpriteEffect shader
+let fx =
+      SpriteEffect shader2d
         [ ShaderSamplerWith 0 albedoTex sampler
         , ShaderSamplerWith 1 noiseTex sampler
         ]
-draw basicUI (Sprite albedoTex Nothing (rect 40 40 256 256) (Just effect))
+draw basicUI (Sprite albedoTex Nothing (rect 40 40 256 256) (Just fx))
 ```
 
-If a shader has optional textures, still bind a valid placeholder (e.g. a 1x1 white texture)
-to keep slots contiguous.
+If a shader has optional textures, you can either skip the slot (Slop fills it) or bind
+an explicit placeholder (e.g. a 1x1 white texture).
+These samplers correspond to `@group(2)` in your fragment shader.
 
 ### SlopGlobals (auto-bound uniform)
 
@@ -255,32 +284,32 @@ struct SlopGlobals {
   _pad1: vec2<f32>,
 };
 
-@group(0) @binding(0) var<uniform> slop: SlopGlobals;
+@group(3) @binding(0) var<uniform> slop: SlopGlobals;
 ```
 
 You can still override slot 0 explicitly via `withShaderBindings` if needed.
-If you add your own uniforms, start them at `@binding(1)` to avoid clobbering `SlopGlobals`.
+If you add your own uniforms, start them at `@binding(1)` (group 3) to avoid clobbering `SlopGlobals`.
 
 ### Fullscreen UV helper
 
-Sprites already provide a canonical `uv` in `[0..1]`. For screen-space effects, draw a full
+Sprites already provide a canonical `uv` in `[0..1]`. For screen-space overrides, draw a full
 screen sprite using the drawable size:
 
 ```haskell
 let dst = fullscreenRect frame.renderSize
-draw basicUI (Sprite tex Nothing dst (Just effect))
+draw basicUI (Sprite tex Nothing dst (Just fx))
 ```
 
 This avoids manual `frag_coord` math in shaders.
 
 ## Text
 
-Use `TextStyle` to control color or override the fragment shader for text.
+Use `TextStyle` to control color or override the fragment shader for text via `textShader`.
 Text created via `text`/`textWith` is cached automatically per frame. `drawText` and
 `measureText` use the same cache.
 Text helpers take `Data.Text.Text` (enable `OverloadedStrings` or use `Data.Text.pack`).
 
-If you want compositional style changes, use `TextStylePatch`:
+If you want compositional style changes, use `TextStylePatch` (e.g. `patchTextShader`):
 
 ```haskell
 let patch =
@@ -532,20 +561,20 @@ Use a custom shader to sample `texture_3d` (pass time or a slice as Z):
 let load label spec = loadAssetAsync spec >>= awaitAsset >>= expect label
 volume <- load "noise3d" (NoiseTexture3DAsset 64 64 64 defaultNoiseSettings)
 
-let effect =
-      SpriteEffect shader
+let fx =
+      SpriteEffect shader2d
         [ NamedSamplerWith "noiseTex3D" volume sampler
         , NamedUniform "time" time
         ]
 
-draw (basic2D cam) (Sprite tex Nothing (rect 40 80 256 256) (Just effect))
+draw (basic2D cam) (Sprite tex Nothing (rect 40 80 256 256) (Just fx))
 ```
 In your fragment shader, sample with `texture_3d`:
 
 ```haskell
 -- WESL-ish (spirdo)
--- @group(0) @binding(0) var noiseTex3D: texture_3d<f32>;
--- @group(0) @binding(1) var noiseSampler: sampler;
+-- @group(2) @binding(0) var noiseTex3D: texture_3d<f32>;
+-- @group(2) @binding(1) var noiseSampler: sampler;
 -- let n = textureSample(noiseTex3D, noiseSampler, vec3(in.uv, time));
 ```
 
@@ -593,7 +622,7 @@ _ <- playPoolPriority pool sfx (Just 10)
 Do:
 - Use `basic2D` + a camera for most 2D work.
 - Keep UI/text in `basicUI` (screen-space, premultiplied alpha).
-- Use the Graph DSL for post-process chains and multi-pass effects.
+- Use the Graph DSL for post-process chains and multi-pass overrides.
 - Use `frame.renderSize` for rendering math (HiDPI swapchains can differ from `frame.size`).
 
 Don't:
@@ -635,7 +664,7 @@ Don't:
 Do:
 - Keep sprite overrides fragment-only unless you define a custom pipeline.
 - Prefer `shaderUniformSized` to avoid mismatch crashes.
-- Keep fragment samplers contiguous (Slop expects combined sampler slots 0..N-1).
+- Keep sampler slots stable and explicit; Slop will fill gaps if you use sparse slots.
 
 Don't:
 - Assume the swapchain/backbuffer can be sampled directly (it can't).

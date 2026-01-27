@@ -80,6 +80,7 @@ module Slop
   , Pipeline(..)
   , VertexShader(..)
   , FragmentShader
+  , Shader2D
   , ShaderCounts(..)
   , TargetFormat(..)
   , BlendMode(..)
@@ -105,6 +106,8 @@ module Slop
   , destroyVertexShader
   , createFragmentShader
   , destroyFragmentShader
+  , createShader2D
+  , destroyShader2D
   , createComputePipeline
   , destroyComputePipeline
   , dispatchCompute
@@ -162,7 +165,7 @@ module Slop
   , measureText
   , textStyle
   , textColor
-  , textEffect
+  , textShader
   , textBlend
   , TextStyle(..)
   , defaultTextStyle
@@ -219,6 +222,7 @@ module Slop
   , Font (..)
   , Track(..)
   , ShaderAsset(..)
+  , Shader2DAsset(..)
   , VertexShaderAsset(..)
   , ComputePipelineAsset(..)
   , PipelineAsset(..)
@@ -279,7 +283,7 @@ module Slop
   , TextStylePatch(..)
   , textStylePatch
   , patchTextColor
-  , patchTextEffect
+  , patchTextShader
   , patchTextBlend
   , applyTextStylePatch
   , ShaderStage(..)
@@ -289,13 +293,16 @@ module Slop
   , NamedUniform(..)
   , emptyShaderBindings
   , setShaderBindings
+  , setShader2DBindings
   , getShaderBindings
   , resolveNamedUniforms
   , withShaderBindingsStage
   , withShaderBindingsNamed
   , normalizeBindings
+  , normalizeBindingsSparse
   , normalizeUniforms
   , normalizeBindingsIO
+  , normalizeBindingsSparseIO
   , normalizeUniformsIO
   , AssetId(..)
   , AnyAssetId(..)
@@ -425,7 +432,7 @@ import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
 import Data.Kind (Type)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
-import Data.Maybe (catMaybes, fromMaybe, isJust)
+import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe)
 import Data.Monoid (Last (..))
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
@@ -867,6 +874,11 @@ data VertexShader = VertexShader
 
 type FragmentShader = Shader
 
+newtype Shader2D = Shader2D Shader
+
+unwrapShader2D :: Shader2D -> Shader
+unwrapShader2D (Shader2D shader) = shader
+
 data ShaderCounts = ShaderCounts
   { shaderSamplers :: Word32
   , shaderStorageTextures :: Word32
@@ -1125,6 +1137,11 @@ data ShaderAsset = ShaderAsset
   , shaderStorageBuffers :: !Word32
   , shaderUniformBuffers :: !Word32
   }
+
+data Shader2DAsset = Shader2DAsset
+  { shader2DSpirvBytes :: !ByteString
+  , shader2DCounts :: !ShaderCounts
+  }
   deriving (Eq, Show)
 
 data VertexShaderAsset = VertexShaderAsset
@@ -1248,6 +1265,20 @@ instance AssetLoader ShaderAsset where
     Right <$> createShaderFromSpirvWithIO app bytes samplers storageTextures storageBuffers uniformBuffers
   unloadAssetIO _ _ = destroyShaderIO
   assetLabel _ = "shader"
+  assetThread _ = AssetMain
+
+instance AssetLoader Shader2DAsset where
+  type AssetType Shader2DAsset = Shader2D
+  loadAssetIO app spec = do
+    validateShader2DCounts spec.shader2DCounts
+    Right . Shader2D <$>
+      createShaderFromSpirvWithIO app spec.shader2DSpirvBytes
+        spec.shader2DCounts.shaderSamplers
+        spec.shader2DCounts.shaderStorageTextures
+        spec.shader2DCounts.shaderStorageBuffers
+        spec.shader2DCounts.shaderUniformBuffers
+  unloadAssetIO _ _ (Shader2D shader) = destroyShaderIO shader
+  assetLabel _ = "shader-2d"
   assetThread _ = AssetMain
 
 instance AssetLoader VertexShaderAsset where
@@ -2565,17 +2596,17 @@ point x y = FPoint (realToFrac x) (realToFrac y)
 data As2D
   = As2DCamera Camera2D
   | AsUI
-  | AsUIWith Shader [ShaderUniform]
+  | AsUIWith Shader2D [ShaderUniform]
   | AsUIView (M44 Float)
-  | AsUIWithView Shader [ShaderUniform] (M44 Float)
+  | AsUIWithView Shader2D [ShaderUniform] (M44 Float)
   | AsUICamera Camera2D
-  | AsUIWithCamera Shader [ShaderUniform] Camera2D
+  | AsUIWithCamera Shader2D [ShaderUniform] Camera2D
   | AsParticle
-  | AsParticleWith Shader [ShaderUniform]
+  | AsParticleWith Shader2D [ShaderUniform]
   | AsParticleView (M44 Float)
-  | AsParticleWithView Shader [ShaderUniform] (M44 Float)
+  | AsParticleWithView Shader2D [ShaderUniform] (M44 Float)
   | AsParticleCamera Camera2D
-  | AsParticleWithCamera Shader [ShaderUniform] Camera2D
+  | AsParticleWithCamera Shader2D [ShaderUniform] Camera2D
 
 newtype As3D = As3D Camera3D
 
@@ -2585,7 +2616,7 @@ basic2D = As2DCamera
 basicUI :: As2D
 basicUI = AsUI
 
-basicUIWith :: Shader -> [ShaderUniform] -> As2D
+basicUIWith :: Shader2D -> [ShaderUniform] -> As2D
 basicUIWith = AsUIWith
 
 basicUIWithCamera :: Camera2D -> As2D
@@ -2594,7 +2625,7 @@ basicUIWithCamera = AsUICamera
 basicParticle :: As2D
 basicParticle = AsParticle
 
-basicParticleWith :: Shader -> [ShaderUniform] -> As2D
+basicParticleWith :: Shader2D -> [ShaderUniform] -> As2D
 basicParticleWith = AsParticleWith
 
 basicParticleWithCamera :: Camera2D -> As2D
@@ -2620,23 +2651,23 @@ data RectFill = RectFill Color FRect
 
 data Sprite = Sprite Texture (Maybe FRect) FRect (Maybe SpriteEffect)
 
-data SpriteEffect = SpriteEffect Shader [ShaderUniform]
+data SpriteEffect = SpriteEffect Shader2D [ShaderUniform]
 
-spriteEffect :: Shader -> [ShaderUniform] -> SpriteEffect
+spriteEffect :: Shader2D -> [ShaderUniform] -> SpriteEffect
 spriteEffect = SpriteEffect
 
-spriteEffectNamed :: Shader -> [NamedUniform] -> WindowM SpriteEffect
-spriteEffectNamed shader named = do
-  table <- getShaderBindings shader
+spriteEffectNamed :: Shader2D -> [NamedUniform] -> WindowM SpriteEffect
+spriteEffectNamed shader2d named = do
+  table <- getShaderBindings (unwrapShader2D shader2d)
   uniforms <- liftIO (resolveNamedUniforms table named)
-  pure (SpriteEffect shader uniforms)
+  pure (SpriteEffect shader2d uniforms)
 
 instance Semigroup SpriteEffect where
   _ <> effect = effect
 
 data TextStyle = TextStyle
   { textColor :: Color
-  , textEffect :: Maybe SpriteEffect
+  , textShader :: Maybe SpriteEffect
   , textBlend :: Maybe BlendMode
   }
 
@@ -2644,15 +2675,15 @@ defaultTextStyle :: TextStyle
 defaultTextStyle =
   TextStyle
     { textColor = rgb 1 1 1
-    , textEffect = Nothing
+    , textShader = Nothing
     , textBlend = Nothing
     }
 
 instance Semigroup TextStyle where
-  TextStyle _ effect blend <> TextStyle color' effect' blend' =
+  TextStyle _ shader blend <> TextStyle color' shader' blend' =
     TextStyle
       color'
-      (if isJust effect' then effect' else effect)
+      (if isJust shader' then shader' else shader)
       (if isJust blend' then blend' else blend)
 
 data Patch a
@@ -2670,13 +2701,13 @@ instance Monoid (Patch a) where
 
 data TextStylePatch = TextStylePatch
   { patchTextColor :: Patch Color
-  , patchTextEffect :: Patch (Maybe SpriteEffect)
+  , patchTextShader :: Patch (Maybe SpriteEffect)
   , patchTextBlend :: Patch (Maybe BlendMode)
   }
 
 instance Semigroup TextStylePatch where
-  TextStylePatch c e b <> TextStylePatch c' e' b' =
-    TextStylePatch (c <> c') (e <> e') (b <> b')
+  TextStylePatch c s b <> TextStylePatch c' s' b' =
+    TextStylePatch (c <> c') (s <> s') (b <> b')
 
 instance Monoid TextStylePatch where
   mempty = TextStylePatch mempty mempty mempty
@@ -2687,8 +2718,8 @@ textStylePatch = mempty
 patchTextColor :: Color -> TextStylePatch
 patchTextColor color = mempty { patchTextColor = Set color }
 
-patchTextEffect :: Maybe SpriteEffect -> TextStylePatch
-patchTextEffect effect = mempty { patchTextEffect = Set effect }
+patchTextShader :: Maybe SpriteEffect -> TextStylePatch
+patchTextShader shader = mempty { patchTextShader = Set shader }
 
 patchTextBlend :: Maybe BlendMode -> TextStylePatch
 patchTextBlend blend = mempty { patchTextBlend = Set blend }
@@ -2703,7 +2734,7 @@ applyTextStylePatch :: TextStyle -> TextStylePatch -> TextStyle
 applyTextStylePatch style patch =
   TextStyle
     { textColor = applyPatch patch.patchTextColor style.textColor
-    , textEffect = applyPatch patch.patchTextEffect style.textEffect
+    , textShader = applyPatch patch.patchTextShader style.textShader
     , textBlend = applyPatch patch.patchTextBlend style.textBlend
     }
 
@@ -2713,8 +2744,8 @@ textStyle = defaultTextStyle
 textColor :: Color -> TextStyle -> TextStyle
 textColor color style = style { textColor = color }
 
-textEffect :: SpriteEffect -> TextStyle -> TextStyle
-textEffect effect style = style { textEffect = Just effect }
+textShader :: SpriteEffect -> TextStyle -> TextStyle
+textShader shader style = style { textShader = Just shader }
 
 textBlend :: BlendMode -> TextStyle -> TextStyle
 textBlend blend style = style { textBlend = Just blend }
@@ -2947,7 +2978,7 @@ instance Draw As2D Sprite where
     case effect of
       Nothing -> withAs2D ctx (drawTexture texture src dst)
       Just (SpriteEffect sh uniforms) ->
-        withShaderBindings sh uniforms (drawTexture texture src dst)
+        withShaderBindings (unwrapShader2D sh) uniforms (drawTexture texture src dst)
 
 instance Draw As2D Label where
   draw ctx (Label textObj x y style) =
@@ -2968,19 +2999,19 @@ withAs2D ctx action =
   case ctx of
     As2DCamera cam -> withBlendTransform BlendAlpha (Just (TransformCamera cam)) action
     AsUI -> withBlendTransform BlendPremultiplied Nothing action
-    AsUIWith shader uniforms -> withShaderBindingsBlendTransform BlendPremultiplied shader uniforms Nothing action
+    AsUIWith shader uniforms -> withShaderBindingsBlendTransform BlendPremultiplied (unwrapShader2D shader) uniforms Nothing action
     AsUIView view -> withBlendTransform BlendPremultiplied (Just (TransformMatrix view)) action
-    AsUIWithView shader uniforms view -> withShaderBindingsBlendTransform BlendPremultiplied shader uniforms (Just (TransformMatrix view)) action
+    AsUIWithView shader uniforms view -> withShaderBindingsBlendTransform BlendPremultiplied (unwrapShader2D shader) uniforms (Just (TransformMatrix view)) action
     AsUICamera cam -> withBlendTransform BlendPremultiplied (Just (TransformCamera cam)) action
-    AsUIWithCamera shader uniforms cam -> withShaderBindingsBlendTransform BlendPremultiplied shader uniforms (Just (TransformCamera cam)) action
+    AsUIWithCamera shader uniforms cam -> withShaderBindingsBlendTransform BlendPremultiplied (unwrapShader2D shader) uniforms (Just (TransformCamera cam)) action
     AsParticle -> withBlendTransform BlendAdditive Nothing action
-    AsParticleWith shader uniforms -> withShaderBindingsBlendTransform BlendAdditive shader uniforms Nothing action
+    AsParticleWith shader uniforms -> withShaderBindingsBlendTransform BlendAdditive (unwrapShader2D shader) uniforms Nothing action
     AsParticleView view -> withBlendTransform BlendAdditive (Just (TransformMatrix view)) action
-    AsParticleWithView shader uniforms view -> withShaderBindingsBlendTransform BlendAdditive shader uniforms (Just (TransformMatrix view)) action
+    AsParticleWithView shader uniforms view -> withShaderBindingsBlendTransform BlendAdditive (unwrapShader2D shader) uniforms (Just (TransformMatrix view)) action
     AsParticleCamera cam -> withBlendTransform BlendAdditive (Just (TransformCamera cam)) action
-    AsParticleWithCamera shader uniforms cam -> withShaderBindingsBlendTransform BlendAdditive shader uniforms (Just (TransformCamera cam)) action
+    AsParticleWithCamera shader uniforms cam -> withShaderBindingsBlendTransform BlendAdditive (unwrapShader2D shader) uniforms (Just (TransformCamera cam)) action
 
-as2DContext :: As2D -> (BlendMode, Maybe Transform2D, Maybe (Shader, [ShaderUniform]))
+as2DContext :: As2D -> (BlendMode, Maybe Transform2D, Maybe (Shader2D, [ShaderUniform]))
 as2DContext ctx =
   case ctx of
     As2DCamera cam -> (BlendAlpha, Just (TransformCamera cam), Nothing)
@@ -3002,13 +3033,13 @@ withAs2DStyle ctx style action =
   let (baseBlend, transform, baseShader) = as2DContext ctx
       blend = fromMaybe baseBlend style.textBlend
       effect =
-        case style.textEffect of
+        case style.textShader of
           Just custom -> Just custom
           Nothing -> fmap (uncurry SpriteEffect) baseShader
   in case effect of
       Nothing -> withBlendTransform blend transform action
       Just (SpriteEffect shader uniforms) ->
-        withShaderBindingsBlendTransform blend shader uniforms transform action
+        withShaderBindingsBlendTransform blend (unwrapShader2D shader) uniforms transform action
 
 withBlendTransform :: BlendMode -> Maybe Transform2D -> Loop a -> Loop a
 withBlendTransform blend transform (Loop action) =
@@ -4174,21 +4205,47 @@ destroyMesh mesh = do
 
 buildSamplerBindings :: Window -> ShaderContext -> GPUTexture -> IO [GPUTextureSamplerBinding]
 buildSamplerBindings window ctx baseTexture = do
-  extras <- normalizeBindingsIO "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) ctx.ctxSamplers)
-  let baseSampler = window.appDefaultSampler
-  let baseBinding = GPUTextureSamplerBinding baseTexture (unwrapSampler baseSampler)
-  let extraBindings = map (\(tex, sampler) ->
-        GPUTextureSamplerBinding tex.textureHandle (unwrapSampler (fromMaybe baseSampler sampler))) extras
-  pure (baseBinding : extraBindings)
+  let samplerCount = fromIntegral ctx.ctxShader.shaderSamplerCount :: Int
+  if samplerCount <= 0
+    then do
+      unless (null ctx.ctxSamplers) $
+        ioError (userError "shader declares no samplers, but sampler bindings were provided")
+      pure []
+    else do
+      extras <- normalizeBindingsSparseIO "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) ctx.ctxSamplers)
+      when (any (\(slot, _) -> slot >= samplerCount) extras) $
+        ioError (userError "sampler binding slot exceeds shader sampler count")
+      let baseSampler = window.appDefaultSampler
+      let baseBinding = GPUTextureSamplerBinding baseTexture (unwrapSampler baseSampler)
+      let extraMap = Map.fromList extras
+      let bindings =
+            [ if slot == 0
+                then baseBinding
+                else case Map.lookup slot extraMap of
+                  Just (tex, sampler) ->
+                    GPUTextureSamplerBinding tex.textureHandle (unwrapSampler (fromMaybe baseSampler sampler))
+                  Nothing -> baseBinding
+            | slot <- [0 .. samplerCount - 1]
+            ]
+      pure bindings
   where
     unwrapSampler (Sampler s) = s
 
 buildSamplerBindingsExplicit :: Window -> [SamplerBindingSpec] -> IO [GPUTextureSamplerBinding]
 buildSamplerBindingsExplicit window specs = do
-  bindings <- normalizeBindingsIO "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) specs)
+  bindings <- normalizeBindingsSparseIO "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) specs)
   let baseSampler = window.appDefaultSampler
-  pure (map (\(tex, sampler) ->
-    GPUTextureSamplerBinding tex.textureHandle (unwrapSampler (fromMaybe baseSampler sampler))) bindings)
+  let fallback = window.appWhiteTexture.textureHandle
+  let fallbackBinding = GPUTextureSamplerBinding fallback (unwrapSampler baseSampler)
+  let mapBindings = Map.fromList bindings
+  let maxSlot = maybe 0 fst (listToMaybe (reverse bindings))
+  pure
+    [ case Map.lookup slot mapBindings of
+        Just (tex, sampler) ->
+          GPUTextureSamplerBinding tex.textureHandle (unwrapSampler (fromMaybe baseSampler sampler))
+        Nothing -> fallbackBinding
+    | slot <- [0 .. maxSlot]
+    ]
   where
     unwrapSampler (Sampler s) = s
 
@@ -4819,10 +4876,10 @@ drawTextRawWith :: TextStyle -> Text -> Float -> Float -> Loop ()
 drawTextRawWith style textObj x y =
   let action = withWindowLoop (\window -> drawTextIO window textObj x y style.textColor)
       blend = fromMaybe BlendAlpha style.textBlend
-  in case style.textEffect of
+  in case style.textShader of
       Nothing -> withBlendTransform blend Nothing action
       Just (SpriteEffect shader uniforms) ->
-        withShaderBindingsBlendTransform blend shader uniforms Nothing action
+        withShaderBindingsBlendTransform blend (unwrapShader2D shader) uniforms Nothing action
 
 drawText :: Font -> T.Text -> Float -> Float -> Loop ()
 drawText font str x y = drawTextWith defaultTextStyle font str x y
@@ -4831,10 +4888,10 @@ drawTextWith :: TextStyle -> Font -> T.Text -> Float -> Float -> Loop ()
 drawTextWith style font str x y =
   let action = drawTextCachedWith font str x y style.textColor
       blend = fromMaybe BlendAlpha style.textBlend
-  in case style.textEffect of
+  in case style.textShader of
       Nothing -> withBlendTransform blend Nothing action
       Just (SpriteEffect shader uniforms) ->
-        withShaderBindingsBlendTransform blend shader uniforms Nothing action
+        withShaderBindingsBlendTransform blend (unwrapShader2D shader) uniforms Nothing action
 
 drawTextCachedWith :: Font -> T.Text -> Float -> Float -> Color -> Loop ()
 drawTextCachedWith font str x y color =
@@ -5367,6 +5424,10 @@ setShaderBindings :: Shader -> ShaderBindings -> WindowM ()
 setShaderBindings shader bindings =
   liftIO (writeIORef shader.shaderBindingTable bindings)
 
+setShader2DBindings :: Shader2D -> ShaderBindings -> WindowM ()
+setShader2DBindings shader bindings =
+  setShaderBindings (unwrapShader2D shader) bindings
+
 getShaderBindings :: Shader -> WindowM ShaderBindings
 getShaderBindings shader =
   liftIO (readIORef shader.shaderBindingTable)
@@ -5381,6 +5442,8 @@ createShaderFromSpirvWithIO window spirv numSamplers numStorageTextures numStora
 
 createShaderFromSpirvWithDevice :: GPUDevice -> ByteString -> Word32 -> Word32 -> Word32 -> Word32 -> IO Shader
 createShaderFromSpirvWithDevice device spirv numSamplers numStorageTextures numStorageBuffers numUniformBuffers = do
+  when (numUniformBuffers > 4) $
+    ioError (userError "SDL_gpu supports at most 4 uniform buffers per fragment shader")
   shader <- require "SDL_CreateGPUShader" (createRawShader device spirv sdlGPUShaderStageFragment numSamplers numStorageTextures numStorageBuffers numUniformBuffers)
   defaults <- newIORef Map.empty
   bindingsRef <- newIORef emptyShaderBindings
@@ -5394,6 +5457,15 @@ createShaderFromSpirvWithDevice device spirv numSamplers numStorageTextures numS
     , shaderUniformDefaults = defaults
     , shaderBindingTable = bindingsRef
     }
+
+validateShader2DCounts :: ShaderCounts -> IO ()
+validateShader2DCounts counts = do
+  when (counts.shaderStorageTextures /= 0) $
+    ioError (userError "2D shaders do not support storage textures")
+  when (counts.shaderStorageBuffers /= 0) $
+    ioError (userError "2D shaders do not support storage buffers")
+  when (counts.shaderUniformBuffers > 4) $
+    ioError (userError "SDL_gpu supports at most 4 uniform buffers per fragment shader")
 
 createRawShader :: GPUDevice -> ByteString -> SDL_GPUShaderStage -> Word32 -> Word32 -> Word32 -> Word32 -> IO (Maybe GPUShader)
 createRawShader device spirv stage numSamplers numStorageTextures numStorageBuffers numUniformBuffers =
@@ -5441,6 +5513,14 @@ createFragmentShader spirv counts =
 
 destroyFragmentShader :: FragmentShader -> WindowM ()
 destroyFragmentShader = destroyShader
+
+createShader2D :: ByteString -> ShaderCounts -> WindowM Shader2D
+createShader2D spirv counts = do
+  liftIO (validateShader2DCounts counts)
+  Shader2D <$> createFragmentShader spirv counts
+
+destroyShader2D :: Shader2D -> WindowM ()
+destroyShader2D (Shader2D shader) = destroyShader shader
 
 createComputePipelineIO :: Window -> ComputeDesc -> IO ComputePipeline
 createComputePipelineIO window desc = do
@@ -5706,7 +5786,16 @@ mergeUniformBindings window shader explicit = do
           Just bytes | shader.shaderUniformBufferCount > 0 -> Map.insertWith (\_ old -> old) 0 bytes defaults
           _ -> defaults
   let explicitMap = Map.fromList [ (slot, bytes) | UniformBinding slot bytes <- explicit ]
+  when (shader.shaderUniformBufferCount == 0 && not (Map.null explicitMap)) $
+    ioError (userError "shader declares no uniform buffers, but uniform data was provided")
   let merged = Map.union explicitMap defaults'
+  case Map.keys merged of
+    [] -> pure ()
+    keys ->
+      let maxSlot = last keys
+          count = shader.shaderUniformBufferCount
+      in when (fromIntegral maxSlot >= count) $
+        ioError (userError "uniform binding slot exceeds shader uniform buffer count")
   pure (map (uncurry UniformBinding) (Map.toAscList merged))
 
 ensureFragmentStage :: ShaderStage -> IO ()
@@ -5734,9 +5823,25 @@ normalizeBindings label bindings =
         Left ("non-contiguous " <> label <> " binding slots; expected 0.." <> show maxSlot)
       pure (map snd (Map.toAscList mapSlots))
 
+normalizeBindingsSparse :: String -> [(Word32, a)] -> Either String [(Int, a)]
+normalizeBindingsSparse label bindings =
+  case bindings of
+    [] -> Right []
+    _ -> do
+      let pairs = map (\(slot, value) -> (fromIntegral slot :: Int, value)) bindings
+      let mapSlots = Map.fromList pairs
+      when (Map.size mapSlots /= length pairs) $
+        Left ("duplicate " <> label <> " binding slot")
+      let slots = Map.keys mapSlots
+      pure (map (\slot -> (slot, mapSlots Map.! slot)) slots)
+
 normalizeBindingsIO :: String -> [(Word32, a)] -> IO [a]
 normalizeBindingsIO label bindings =
   either (ioError . userError) pure (normalizeBindings label bindings)
+
+normalizeBindingsSparseIO :: String -> [(Word32, a)] -> IO [(Int, a)]
+normalizeBindingsSparseIO label bindings =
+  either (ioError . userError) pure (normalizeBindingsSparse label bindings)
 
 normalizeUniforms :: String -> [UniformBinding] -> Either String [UniformBinding]
 normalizeUniforms label bindings =
