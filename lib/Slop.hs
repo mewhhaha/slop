@@ -22,6 +22,8 @@ module Slop
   , liftWindow
   , runLoop
   , liftLoop
+  , startTextInput
+  , stopTextInput
   , loop
   , clear
   , setDrawColor
@@ -34,11 +36,11 @@ module Slop
   , TextureDesc(..)
   , textureDesc
   , createTexture2D
+  , createNoiseTexture2D
+  , createNoiseTexture3D
   , NoiseType(..)
   , NoiseSettings(..)
   , defaultNoiseSettings
-  , createNoiseTexture2D
-  , createNoiseTexture3D
   , VertexAttrFormat(..)
   , VertexAttr(..)
   , VertexLayout(..)
@@ -125,8 +127,14 @@ module Slop
   , destroyText
   , drawText
   , drawTextWith
-  , drawTextCached
+  , drawTextRaw
+  , drawTextRawWith
   , measureText
+  , measureTextCached
+  , textStyle
+  , textColor
+  , textEffect
+  , textBlend
   , TextStyle(..)
   , defaultTextStyle
   , textWith
@@ -136,6 +144,11 @@ module Slop
   , InputState(..)
   , InputFrame(..)
   , Modifiers(..)
+  , inputPrev
+  , inputNow
+  , inputText
+  , inputWheel
+  , inputMods
   , Key(..)
   , MouseButton(..)
   , mouseLeft
@@ -252,6 +265,8 @@ module Slop
   , AssetThread(..)
   , TextureAsset(..)
   , TextureDescAsset(..)
+  , NoiseTexture2DAsset(..)
+  , NoiseTexture3DAsset(..)
   , FontAsset(..)
   , TextAsset(..)
   , MusicAsset(..)
@@ -927,6 +942,12 @@ liftLoop = Loop
 withWindowLoop :: (Window -> IO a) -> Loop a
 withWindowLoop f = Loop (liftWindow f)
 
+startTextInput :: WindowM Bool
+startTextInput = liftWindow (\window -> SDL.sdlStartTextInput window.appWindow)
+
+stopTextInput :: WindowM Bool
+stopTextInput = liftWindow (\window -> SDL.sdlStopTextInput window.appWindow)
+
 -- Asset manager
 
 newtype AssetId a = AssetId { unAssetId :: Int }
@@ -962,6 +983,12 @@ data TextureAsset = TextureAsset FilePath
   deriving (Eq, Show)
 
 data TextureDescAsset = TextureDescAsset TextureDesc
+  deriving (Eq, Show)
+
+data NoiseTexture2DAsset = NoiseTexture2DAsset Int Int NoiseSettings
+  deriving (Eq, Show)
+
+data NoiseTexture3DAsset = NoiseTexture3DAsset Int Int Int NoiseSettings
   deriving (Eq, Show)
 
 data FontAsset = FontAsset FilePath Float
@@ -1030,6 +1057,22 @@ instance AssetLoader TextureDescAsset where
   loadAssetIO app (TextureDescAsset desc) = Right <$> createTexture2DIO app desc
   unloadAssetIO _ _ = destroyTextureIO
   assetLabel _ = "texture-desc"
+  assetThread _ = AssetMain
+
+instance AssetLoader NoiseTexture2DAsset where
+  type AssetType NoiseTexture2DAsset = Texture
+  loadAssetIO app (NoiseTexture2DAsset width height settings) =
+    Right <$> createNoiseTexture2DIO app width height settings
+  unloadAssetIO _ _ = destroyTextureIO
+  assetLabel _ = "noise-texture-2d"
+  assetThread _ = AssetMain
+
+instance AssetLoader NoiseTexture3DAsset where
+  type AssetType NoiseTexture3DAsset = Texture
+  loadAssetIO app (NoiseTexture3DAsset width height depth settings) =
+    Right <$> createNoiseTexture3DIO app width height depth settings
+  unloadAssetIO _ _ = destroyTextureIO
+  assetLabel _ = "noise-texture-3d"
   assetThread _ = AssetMain
 
 instance AssetLoader FontAsset where
@@ -1731,6 +1774,21 @@ data InputFrame = InputFrame
   }
   deriving (Eq, Show)
 
+inputPrev :: InputFrame -> InputState
+inputPrev = (.inputPrev)
+
+inputNow :: InputFrame -> InputState
+inputNow = (.inputNow)
+
+inputText :: InputFrame -> String
+inputText = (.inputText)
+
+inputWheel :: InputFrame -> V2 Float
+inputWheel = (.inputWheel)
+
+inputMods :: InputFrame -> Modifiers
+inputMods = (.inputMods)
+
 mouseLeft :: MouseButton
 mouseLeft = MouseButton 1
 
@@ -1861,6 +1919,7 @@ data Texture = Texture
   , textureDevice :: GPUDevice
   , textureWidth :: Int
   , textureHeight :: Int
+  , textureDepth :: Int
   }
   deriving (Eq, Show)
 
@@ -2529,6 +2588,18 @@ defaultTextStyle =
     , textEffect = Nothing
     , textBlend = Nothing
     }
+
+textStyle :: TextStyle
+textStyle = defaultTextStyle
+
+textColor :: Color -> TextStyle -> TextStyle
+textColor color style = style { textColor = color }
+
+textEffect :: SpriteEffect -> TextStyle -> TextStyle
+textEffect effect style = style { textEffect = Just effect }
+
+textBlend :: BlendMode -> TextStyle -> TextStyle
+textBlend blend style = style { textBlend = Just blend }
 
 data Label = Label Text Float Float TextStyle
 
@@ -3214,7 +3285,7 @@ createNoiseTexture2DIO window width height settings = do
         , gpuTransferProps = 0
         })
   ptr <- require "SDL_MapGPUTransferBuffer" (sdlMapGPUTransferBuffer window.appGPUDevice transfer False)
-  let bytes = noiseBytes width height settings
+  bytes <- noiseBytes width height settings
   BS.useAsCStringLen bytes $ \(src, _) ->
     copyBytes ptr (castPtr src) byteSize
   sdlUnmapGPUTransferBuffer window.appGPUDevice transfer
@@ -3263,7 +3334,7 @@ createNoiseTexture3DIO window width height depth settings = do
         , gpuTransferProps = 0
         })
   ptr <- require "SDL_MapGPUTransferBuffer" (sdlMapGPUTransferBuffer window.appGPUDevice transfer False)
-  let bytes = noiseBytes3D width height depth settings
+  bytes <- noiseBytes3D width height depth settings
   BS.useAsCStringLen bytes $ \(src, _) ->
     copyBytes ptr (castPtr src) byteSize
   sdlUnmapGPUTransferBuffer window.appGPUDevice transfer
@@ -3315,32 +3386,35 @@ createTexture3D device fmt usage width height depth = do
     , textureDevice = device
     , textureWidth = width
     , textureHeight = height
+    , textureDepth = depth
     }
 
-noiseBytes :: Int -> Int -> NoiseSettings -> ByteString
+noiseBytes :: Int -> Int -> NoiseSettings -> IO ByteString
 noiseBytes width height settings =
-  BS.pack (go 0 0)
-  where
-    go x y
-      | y >= height = []
-      | x >= width = go 0 (y + 1)
-      | otherwise =
-          let v = noiseValue2D settings (fromIntegral x) (fromIntegral y)
-              g = toByte v
-          in g : g : g : 255 : go (x + 1) y
+  BSI.create (width * height * 4) $ \ptr ->
+    forM_ [0 .. height - 1] $ \y ->
+      forM_ [0 .. width - 1] $ \x -> do
+        let v = noiseValue2D settings (fromIntegral x) (fromIntegral y)
+        let g = toByte v
+        let idx = (y * width + x) * 4
+        pokeByteOff ptr idx g
+        pokeByteOff ptr (idx + 1) g
+        pokeByteOff ptr (idx + 2) g
+        pokeByteOff ptr (idx + 3) (255 :: Word8)
 
-noiseBytes3D :: Int -> Int -> Int -> NoiseSettings -> ByteString
+noiseBytes3D :: Int -> Int -> Int -> NoiseSettings -> IO ByteString
 noiseBytes3D width height depth settings =
-  BS.pack (go 0 0 0)
-  where
-    go x y z
-      | z >= depth = []
-      | y >= height = go 0 0 (z + 1)
-      | x >= width = go 0 (y + 1) z
-      | otherwise =
+  BSI.create (width * height * depth * 4) $ \ptr ->
+    forM_ [0 .. depth - 1] $ \z ->
+      forM_ [0 .. height - 1] $ \y ->
+        forM_ [0 .. width - 1] $ \x -> do
           let v = noiseValue3D settings (fromIntegral x) (fromIntegral y) (fromIntegral z)
-              g = toByte v
-          in g : g : g : 255 : go (x + 1) y z
+          let g = toByte v
+          let idx = ((z * height + y) * width + x) * 4
+          pokeByteOff ptr idx g
+          pokeByteOff ptr (idx + 1) g
+          pokeByteOff ptr (idx + 2) g
+          pokeByteOff ptr (idx + 3) (255 :: Word8)
 
 noiseValue2D :: NoiseSettings -> Float -> Float -> Float
 noiseValue2D settings x y =
@@ -3617,6 +3691,7 @@ createTexture device fmt usage width height = do
     , textureDevice = device
     , textureWidth = width
     , textureHeight = height
+    , textureDepth = 1
     }
 
 createRenderTargetTexture :: Window -> Int -> Int -> IO Texture
@@ -4549,10 +4624,10 @@ loop initialState onFrame = do
   let go previous frameId prevInput state = do
         liftIO sdlPumpEvents
         liftIO (resetRecording window.appFrameContext)
-        (quitRequested, inputText, inputWheel) <- liftIO pollInputEvents
+        (quitRequested, inputText', inputWheel') <- liftIO pollInputEvents
         now <- liftIO sdlGetTicks
         currentInput <- liftIO readInputState
-        inputMods <- liftIO (modifiersFromKeymod <$> SDL.sdlGetModState)
+        inputMods' <- liftIO (modifiersFromKeymod <$> SDL.sdlGetModState)
         (winW, winH) <- liftIO (sdlGetWindowSize (window.appWindow))
         liftIO (writeIORef window.appWindowSize (winW, winH))
         let dt = fromIntegral (now - previous) / 1000
@@ -4565,7 +4640,7 @@ loop initialState onFrame = do
               , ticks = now
               , quitRequested = quitRequested
               , size = (winW, winH)
-              , input = InputFrame prevInput currentInput inputText inputWheel inputMods
+              , input = InputFrame prevInput currentInput inputText' inputWheel' inputMods'
               }
         autoUpdateBlendPools dt
         autoHotReload dt
@@ -4683,6 +4758,7 @@ createTexture2DIO window desc = do
     , textureDevice = window.appGPUDevice
     , textureWidth = desc.texWidth
     , textureHeight = desc.texHeight
+    , textureDepth = 1
     }
 
 createTexture2D :: TextureDesc -> WindowM Texture
@@ -4869,11 +4945,8 @@ drawTextRaw :: Text -> Float -> Float -> Color -> Loop ()
 drawTextRaw textObj x y color =
   withWindowLoop (\window -> drawTextIO window textObj x y color)
 
-drawText :: Text -> Float -> Float -> Loop ()
-drawText textObj x y = drawTextWith defaultTextStyle textObj x y
-
-drawTextWith :: TextStyle -> Text -> Float -> Float -> Loop ()
-drawTextWith style textObj x y =
+drawTextRawWith :: TextStyle -> Text -> Float -> Float -> Loop ()
+drawTextRawWith style textObj x y =
   let action = withWindowLoop (\window -> drawTextIO window textObj x y style.textColor)
       blend = fromMaybe BlendAlpha style.textBlend
   in case style.textEffect of
@@ -4881,9 +4954,17 @@ drawTextWith style textObj x y =
       Just (SpriteEffect shader uniforms) ->
         withShaderBindingsBlendTransform blend shader uniforms Nothing action
 
-drawTextCached :: Font -> String -> Float -> Float -> Loop ()
-drawTextCached font str x y =
-  drawTextCachedWith font str x y defaultTextStyle.textColor
+drawText :: Font -> String -> Float -> Float -> Loop ()
+drawText font str x y = drawTextWith defaultTextStyle font str x y
+
+drawTextWith :: TextStyle -> Font -> String -> Float -> Float -> Loop ()
+drawTextWith style font str x y =
+  let action = drawTextCachedWith font str x y style.textColor
+      blend = fromMaybe BlendAlpha style.textBlend
+  in case style.textEffect of
+      Nothing -> withBlendTransform blend Nothing action
+      Just (SpriteEffect shader uniforms) ->
+        withShaderBindingsBlendTransform blend shader uniforms Nothing action
 
 drawTextCachedWith :: Font -> String -> Float -> Float -> Color -> Loop ()
 drawTextCachedWith font str x y color =
@@ -4910,14 +4991,32 @@ drawTextCachedWith font str x y color =
     liftIO (recordDraw window (ShapeText textObj x y color))
 
 measureText :: Font -> String -> WindowM (V2 Float)
-measureText font str = liftWindow (\window -> measureTextIO window font str)
+measureText = measureTextCached
 
-measureTextIO :: Window -> Font -> String -> IO (V2 Float)
-measureTextIO window font str = do
-  textObj <- createTextIO window font str
-  size <- measureTextObj textObj
-  destroyTextIO textObj
-  pure size
+measureTextCached :: Font -> String -> WindowM (V2 Float)
+measureTextCached font str = liftWindow (\window -> measureTextCachedIO window font str)
+
+measureTextCachedIO :: Window -> Font -> String -> IO (V2 Float)
+measureTextCachedIO window font str = do
+  frameId <- atomicModifyIORef' (window.appRenderState) (\st -> (st, st.rsFrameId))
+  let Font fontPtr = font
+  let key = (castPtr fontPtr, str)
+  cached <- atomicModifyIORef' (window.appRenderState) $ \st ->
+    case Map.lookup key (st.rsTextCache) of
+      Just entry ->
+        let entry' = entry { ctLastUsed = frameId }
+            cache' = Map.insert key entry' (st.rsTextCache)
+        in (st { rsTextCache = cache' }, Just (entry.ctText))
+      Nothing -> (st, Nothing)
+  textObj <- case cached of
+    Just t -> pure t
+    Nothing -> do
+      t <- createTextIO window font str
+      atomicModifyIORef' (window.appRenderState) $ \st ->
+        let cache' = Map.insert key (CachedText t frameId) (st.rsTextCache)
+        in (st { rsTextCache = cache' }, ())
+      pure t
+  measureTextObj textObj
 
 measureTextObj :: Text -> IO (V2 Float)
 measureTextObj textObj = do

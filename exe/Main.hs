@@ -5,10 +5,10 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeApplications #-}
+{-# OPTIONS_GHC -Wno-missing-signatures #-}
 
 module Main (main) where
 
-import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Word (Word32)
 import Foreign.Ptr (nullPtr, ptrToWordPtr, wordPtrToPtr)
@@ -43,7 +43,6 @@ data Params = Params
 
 instance ToUniform Params
 
-demoShader :: CompiledShader
 demoShader =
   [wesl|
 struct Params {
@@ -86,7 +85,6 @@ fn main(@location(0) uv: vec2<f32>, @location(1) inColor: vec4<f32>) -> @locatio
 }
 |]
 
-computeShader :: CompiledShader
 computeShader =
   [wesl|
 struct Params {
@@ -126,7 +124,7 @@ main = do
           }
 
   runWindow cfg $ do
-    let orCrash label = either (liftIO . ioError . userError . (label <> ": " <>)) pure
+    let orCrash label = either (liftIO . ioError . userError . (\msg -> label <> ": " <> msg)) pure
     let load label spec = loadAssetAsync spec >>= awaitAsset >>= orCrash label
     let prepareOrCrash label shader = orCrash label (prepareShader shader)
     let inputsOrCrash label prepared builder = orCrash label (inputsFromPrepared prepared builder)
@@ -160,14 +158,14 @@ main = do
         , samplerAddressV = SamplerRepeat
         })
 
-    shader <- load "effect shader" demoShaderAsset
+    shader <- load "effect shader" (ShaderAsset (shaderSpirv demoShader) 2 0 0 1)
     let noiseSettings =
           defaultNoiseSettings
             { noiseType = NoisePerlin
             , noiseScale = 96
             , noiseOctaves = 4
             }
-    noiseTex <- createNoiseTexture2D 256 256 noiseSettings
+    noiseTex <- load "noise" (NoiseTexture2DAsset 256 256 noiseSettings)
 
     blend <- createTrackPool PoolBlend 2
     sfxPool <- createTrackPool PoolRoundRobin 8
@@ -190,20 +188,20 @@ main = do
       let params = Params frame.time winW winH 0
       let computeParams = Params frame.time (fromIntegral computeSize) (fromIntegral computeSize) 0
 
-      let computeInputs =
-            inputsOrCrash "compute inputs" computePrepared
-              ( Inputs.storageTexture @"out_tex" (toStorageHandle computeTex)
-                  <> Inputs.uniform @"params" computeParams
-              )
+      computeInputs <-
+        inputsOrCrash "compute inputs" computePrepared
+          ( Inputs.storageTexture @"out_tex" (toStorageHandle computeTex)
+              <> Inputs.uniform @"params" computeParams
+          )
 
-      let effectInputs =
-            inputsOrCrash "effect inputs" demoPrepared
-              ( Inputs.uniform @"params" params
-                  <> Inputs.texture @"spriteTex" (toTextureHandle texture)
-                  <> Inputs.sampler @"spriteSamp" (toSamplerHandle sampler)
-                  <> Inputs.texture @"noiseTex" (toTextureHandle computeTex)
-                  <> Inputs.sampler @"noiseSamp" (toSamplerHandle sampler)
-              )
+      effectInputs <-
+        inputsOrCrash "effect inputs" demoPrepared
+          ( Inputs.uniform @"params" params
+              <> Inputs.texture @"spriteTex" (toTextureHandle texture)
+              <> Inputs.sampler @"spriteSamp" (toSamplerHandle sampler)
+              <> Inputs.texture @"noiseTex" (toTextureHandle computeTex)
+              <> Inputs.sampler @"noiseSamp" (toSamplerHandle sampler)
+          )
       let effect = spriteEffectFrom shader effectInputs
 
       let pipeline = do
@@ -270,6 +268,7 @@ textureFromHandle (TextureHandle value) =
     , textureDevice = GPUDevice nullPtr
     , textureWidth = 0
     , textureHeight = 0
+    , textureDepth = 1
     }
 
 storageTextureFromHandle :: StorageTextureHandle -> Texture
@@ -279,6 +278,7 @@ storageTextureFromHandle (StorageTextureHandle value) =
     , textureDevice = GPUDevice nullPtr
     , textureWidth = 0
     , textureHeight = 0
+    , textureDepth = 1
     }
 
 samplerFromHandle :: SamplerHandle -> Sampler

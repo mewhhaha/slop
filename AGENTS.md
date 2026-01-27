@@ -55,7 +55,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 ## Text
 
 - Text uses SDL_ttf GPU TextEngine.
-- `drawTextCached` caches text per frame and prunes unused entries each frame.
+- `drawText` uses the text cache and prunes unused entries each frame.
 - Configure text atlas size via `Config.textAtlasSize` to reduce GPU memory if needed.
 
 ## Input

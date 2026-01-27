@@ -10,7 +10,7 @@ and SDL3_mixer audio pools + crossfades.
 - Standard 2D/3D pipelines with camera helpers (`basic2D`, `basicUI`, `basic3D`).
 - Declarative render pipeline DSL (graph or explicit targets).
 - Custom graphics + compute pipelines when you need them.
-- SDL_ttf TextEngine support + caching per frame.
+- SDL_ttf TextEngine support + automatic per-frame text caching.
 - Keycode-based input with just-pressed/just-released.
 - Async asset manager with hot reload on by default.
 - SDL3_mixer pools (round-robin, oldest, priority, blend/crossfade).
@@ -195,10 +195,11 @@ let u' = shaderUniformBytesSized 0 16 bytes -- Either String ShaderUniform
 
 ## Text
 
-Use `TextStyle` to control color or override the fragment shader for text:
+Use `TextStyle` to control color or override the fragment shader for text.
+Text created via `text`/`textWith` is cached automatically per frame. `drawText` uses the same cache.
 
 ```haskell
-let style = defaultTextStyle { textColor = rgb 1 0.6 0.2 }
+let style = textColor (rgb 1 0.6 0.2) textStyle
 draw basicUI (textWith style font "Warm text" 40 40)
 ```
 
@@ -208,6 +209,8 @@ Measure text size for layout:
 size <- measureText font "Measure me"
 -- size :: V2 Float (width, height)
 ```
+
+`measureText` uses the text cache (same cache as `drawText`/`text`).
 
 ## Input
 
@@ -224,6 +227,13 @@ Additional per-frame input:
 let typed = frame.input.text
 let wheel = frame.input.wheel
 let mods = frame.input.mods
+```
+
+Text input is enabled by default; you can control it explicitly:
+
+```haskell
+_ <- startTextInput
+_ <- stopTextInput
 ```
 
 ## Assets
@@ -315,11 +325,20 @@ cell <- createNoiseTexture2D 256 256 defaultNoiseSettings
   }
 ```
 
+Noise textures can also be created as assets for automatic cleanup:
+
+```haskell
+noiseId <- loadAssetAsync (NoiseTexture2DAsset 256 256 defaultNoiseSettings)
+noiseTex <- awaitAsset noiseId >>= either (error . ("noise: " <>)) pure
+```
+
 3D noise textures are also supported:
 
 ```haskell
 volume <- createNoiseTexture3D 64 64 64 defaultNoiseSettings
 ```
+
+Sampling 3D noise requires a custom shader that uses `texture_3d`.
 
 ## Audio
 
