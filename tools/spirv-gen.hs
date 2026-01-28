@@ -6,6 +6,7 @@ import qualified Data.ByteString as BS
 
 vertexSpirv :: BS.ByteString
 vertexSpirv = shaderSpirv [wesl|
+// spirdo:sampler=combined
 struct VsOut {
 @builtin(position) position: vec4<f32>;
 @location(0) uv: vec2<f32>;
@@ -21,6 +22,7 @@ return VsOut(pos, in_uv, in_color);
 
 vertex3DSpirv :: BS.ByteString
 vertex3DSpirv = shaderSpirv [wesl|
+// spirdo:sampler=combined
 struct VsOut {
 @builtin(position) position: vec4<f32>;
 @location(0) uv: vec2<f32>;
@@ -48,6 +50,7 @@ return VsOut(pos, in_uv, in_color);
 
 fragmentSpirv :: BS.ByteString
 fragmentSpirv = shaderSpirv [wesl|
+// spirdo:sampler=combined
 @group(2) @binding(0)
 var spriteTex: texture_2d<f32>;
 @group(2) @binding(1)
@@ -62,6 +65,7 @@ return tex * color;
 
 noise2DSpirv :: BS.ByteString
 noise2DSpirv = shaderSpirv [wesl|
+// spirdo:sampler=combined
 struct Params {
   dims: vec4<f32>;
   scale: vec4<f32>;
@@ -165,6 +169,58 @@ fn perlin2(seed: u32, x: f32, y: f32, px: u32, py: u32) -> f32 {
   return clamp01(lerp(nx0, nx1, fy) * 0.5 + 0.5);
 }
 
+fn simplex2(seed: u32, x: f32, y: f32, px: u32, py: u32) -> f32 {
+  let F2 = 0.3660254038;
+  let G2 = 0.2113248654;
+  let s = (x + y) * F2;
+  let i = i32(floor(x + s));
+  let j = i32(floor(y + s));
+  let t = f32(i + j) * G2;
+  let x0 = x - (f32(i) - t);
+  let y0 = y - (f32(j) - t);
+  var i1 = 0;
+  var j1 = 1;
+  if (x0 > y0) {
+    i1 = 1;
+    j1 = 0;
+  }
+  let x1 = x0 - f32(i1) + G2;
+  let y1 = y0 - f32(j1) + G2;
+  let x2 = x0 - 1.0 + 2.0 * G2;
+  let y2 = y0 - 1.0 + 2.0 * G2;
+
+  var n0 = 0.0;
+  var n1 = 0.0;
+  var n2 = 0.0;
+  let t0 = 0.5 - x0 * x0 - y0 * y0;
+  if (t0 > 0.0) {
+    let g0 = grad2(seed, i, j, px, py);
+    let t0q = t0 * t0;
+    n0 = t0q * t0q * (g0.x * x0 + g0.y * y0);
+  }
+  let t1 = 0.5 - x1 * x1 - y1 * y1;
+  if (t1 > 0.0) {
+    let g1 = grad2(seed, i + i1, j + j1, px, py);
+    let t1q = t1 * t1;
+    n1 = t1q * t1q * (g1.x * x1 + g1.y * y1);
+  }
+  let t2 = 0.5 - x2 * x2 - y2 * y2;
+  if (t2 > 0.0) {
+    let g2 = grad2(seed, i + 1, j + 1, px, py);
+    let t2q = t2 * t2;
+    n2 = t2q * t2q * (g2.x * x2 + g2.y * y2);
+  }
+  let n = (n0 + n1 + n2) * 70.0;
+  return clamp01(n * 0.5 + 0.5);
+}
+
+fn simplex2b(seed: u32, x: f32, y: f32, px: u32, py: u32) -> f32 {
+  let r = 0.7071067812;
+  let xr = (x + y) * r;
+  let yr = (y - x) * r;
+  return simplex2(seed + u32(1297), xr, yr, px, py);
+}
+
 fn cellPoint2(seed: u32, jitter: f32, cx: i32, cy: i32, px: u32, py: u32) -> vec2<f32> {
   let wx = wrapIndexI(cx, i32(px));
   let wy = wrapIndexI(cy, i32(py));
@@ -200,7 +256,13 @@ fn noise2(kind: u32, seed: u32, x: f32, y: f32, px: u32, py: u32, jitter: f32) -
   if (kind == u32(2)) {
     return perlin2(seed, x, y, px, py);
   }
-  return voronoi2(seed, jitter, x, y, px, py);
+  if (kind == u32(3)) {
+    return voronoi2(seed, jitter, x, y, px, py);
+  }
+  if (kind == u32(4)) {
+    return simplex2(seed, x, y, px, py);
+  }
+  return simplex2b(seed, x, y, px, py);
 }
 
 fn fractal2(kind: u32, seed: u32, x: f32, y: f32, scale: f32, octaves: u32, lacun: f32, gain: f32, periodX: f32, periodY: f32, jitter: f32) -> f32 {
@@ -261,6 +323,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 noise3DSpirv :: BS.ByteString
 noise3DSpirv = shaderSpirv [wesl|
+// spirdo:sampler=combined
 struct Params {
   dims: vec4<f32>;
   scale: vec4<f32>;
@@ -392,6 +455,123 @@ fn perlin3(seed: u32, x: f32, y: f32, z: f32, px: u32, py: u32, pz: u32) -> f32 
   return clamp01(lerp(nxy0, nxy1, fz) * 0.5 + 0.5);
 }
 
+fn simplex3(seed: u32, x: f32, y: f32, z: f32, px: u32, py: u32, pz: u32) -> f32 {
+  let F3 = 0.3333333333;
+  let G3 = 0.1666666667;
+  let s = (x + y + z) * F3;
+  let i = i32(floor(x + s));
+  let j = i32(floor(y + s));
+  let k = i32(floor(z + s));
+  let t = f32(i + j + k) * G3;
+  let x0 = x - (f32(i) - t);
+  let y0 = y - (f32(j) - t);
+  let z0 = z - (f32(k) - t);
+  var i1 = 0;
+  var j1 = 0;
+  var k1 = 0;
+  var i2 = 0;
+  var j2 = 0;
+  var k2 = 0;
+  if (x0 >= y0) {
+    if (y0 >= z0) {
+      i1 = 1;
+      j1 = 0;
+      k1 = 0;
+      i2 = 1;
+      j2 = 1;
+      k2 = 0;
+    } else {
+      if (x0 >= z0) {
+        i1 = 1;
+        j1 = 0;
+        k1 = 0;
+        i2 = 1;
+        j2 = 0;
+        k2 = 1;
+      } else {
+        i1 = 0;
+        j1 = 0;
+        k1 = 1;
+        i2 = 1;
+        j2 = 0;
+        k2 = 1;
+      }
+    }
+  } else {
+    if (y0 < z0) {
+      i1 = 0;
+      j1 = 0;
+      k1 = 1;
+      i2 = 0;
+      j2 = 1;
+      k2 = 1;
+    } else {
+      if (x0 < z0) {
+        i1 = 0;
+        j1 = 1;
+        k1 = 0;
+        i2 = 0;
+        j2 = 1;
+        k2 = 1;
+      } else {
+        i1 = 0;
+        j1 = 1;
+        k1 = 0;
+        i2 = 1;
+        j2 = 1;
+        k2 = 0;
+      }
+    }
+  }
+  let x1 = x0 - f32(i1) + G3;
+  let y1 = y0 - f32(j1) + G3;
+  let z1 = z0 - f32(k1) + G3;
+  let x2 = x0 - f32(i2) + 2.0 * G3;
+  let y2 = y0 - f32(j2) + 2.0 * G3;
+  let z2 = z0 - f32(k2) + 2.0 * G3;
+  let x3 = x0 - 1.0 + 3.0 * G3;
+  let y3 = y0 - 1.0 + 3.0 * G3;
+  let z3 = z0 - 1.0 + 3.0 * G3;
+
+  var n0 = 0.0;
+  var n1 = 0.0;
+  var n2 = 0.0;
+  var n3 = 0.0;
+  let t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
+  if (t0 > 0.0) {
+    let g0 = grad3(seed, i, j, k, px, py, pz);
+    let t0q = t0 * t0;
+    n0 = t0q * t0q * (g0.x * x0 + g0.y * y0 + g0.z * z0);
+  }
+  let t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
+  if (t1 > 0.0) {
+    let g1 = grad3(seed, i + i1, j + j1, k + k1, px, py, pz);
+    let t1q = t1 * t1;
+    n1 = t1q * t1q * (g1.x * x1 + g1.y * y1 + g1.z * z1);
+  }
+  let t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
+  if (t2 > 0.0) {
+    let g2 = grad3(seed, i + i2, j + j2, k + k2, px, py, pz);
+    let t2q = t2 * t2;
+    n2 = t2q * t2q * (g2.x * x2 + g2.y * y2 + g2.z * z2);
+  }
+  let t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
+  if (t3 > 0.0) {
+    let g3 = grad3(seed, i + 1, j + 1, k + 1, px, py, pz);
+    let t3q = t3 * t3;
+    n3 = t3q * t3q * (g3.x * x3 + g3.y * y3 + g3.z * z3);
+  }
+  let n = (n0 + n1 + n2 + n3) * 32.0;
+  return clamp01(n * 0.5 + 0.5);
+}
+
+fn simplex3b(seed: u32, x: f32, y: f32, z: f32, px: u32, py: u32, pz: u32) -> f32 {
+  let r = 0.7071067812;
+  let xr = (x + y) * r;
+  let yr = (y - x) * r;
+  return simplex3(seed + u32(1297), xr, yr, z, px, py, pz);
+}
+
 fn cellPoint3(seed: u32, jitter: f32, cx: i32, cy: i32, cz: i32, px: u32, py: u32, pz: u32) -> vec3<f32> {
   let wx = wrapIndexI(cx, i32(px));
   let wy = wrapIndexI(cy, i32(py));
@@ -435,7 +615,13 @@ fn noise3(kind: u32, seed: u32, x: f32, y: f32, z: f32, px: u32, py: u32, pz: u3
   if (kind == u32(2)) {
     return perlin3(seed, x, y, z, px, py, pz);
   }
-  return voronoi3(seed, jitter, x, y, z, px, py, pz);
+  if (kind == u32(3)) {
+    return voronoi3(seed, jitter, x, y, z, px, py, pz);
+  }
+  if (kind == u32(4)) {
+    return simplex3(seed, x, y, z, px, py, pz);
+  }
+  return simplex3b(seed, x, y, z, px, py, pz);
 }
 
 fn fractal3(kind: u32, seed: u32, x: f32, y: f32, z: f32, scale: f32, octaves: u32, lacun: f32, gain: f32, periodX: f32, periodY: f32, periodZ: f32, jitter: f32) -> f32 {

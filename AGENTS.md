@@ -87,6 +87,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 ## Spirdo
 
 - Spirdo is used only by the demo/tools. `cabal.project` pins the git revision.
+- Shader sources in the demo/tools should include `// spirdo:sampler=combined` (combined sampler ABI for Slop).
 - The demo (`exe/Main.hs`) contains the Spirdo adapter helpers (binding conversions + shader counts).
 
 ## Notes

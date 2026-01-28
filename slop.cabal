@@ -69,6 +69,7 @@ executable slop
         containers,
         slop,
         spirdo,
+        template-haskell,
         text
     pkgconfig-depends:
         sdl3-mixer

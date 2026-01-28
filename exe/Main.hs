@@ -23,13 +23,15 @@ import Spirdo.Wesl
   , wesl
   )
 import Spirdo.Wesl.Inputs
-  ( StorageTextureHandle(..)
+  ( ShaderInputs(..)
+  , StorageTextureInput(..)
+  , StorageTextureHandle(..)
   , UniformSlot(..)
-  , ShaderInputs(..)
   , inputsFromPrepared
+  , storageTexture
+  , uniform
   , uniformSlots
   )
-import qualified Spirdo.Wesl.Inputs as Inputs
 
 data Params = Params
   { time :: Float
@@ -53,6 +55,7 @@ instance ToUniform SliceParams
 
 demoShader =
   [wesl|
+// spirdo:sampler=combined
 struct SlopGlobals {
   time: f32,
   _pad0: f32,
@@ -80,8 +83,27 @@ fn main(@location(0) uv: vec2<f32>, @location(1) inColor: vec4<f32>) -> @locatio
 }
 |]
 
+comboShader =
+  [wesl|
+// spirdo:sampler=combined
+@group(2) @binding(0) var spriteTex: texture_2d<f32>;
+@group(2) @binding(2) var spriteSamp: sampler;
+@group(2) @binding(1) var noiseTex: texture_2d<f32>;
+@group(2) @binding(3) var noiseSamp: sampler;
+
+@fragment
+fn main(@location(0) uv: vec2<f32>, @location(1) inColor: vec4<f32>) -> @location(0) vec4<f32> {
+  let base = textureSample(spriteTex, spriteSamp, uv);
+  let noise = textureSample(noiseTex, noiseSamp, uv * 3.0);
+  let boost = vec3(0.6, 0.6, 0.6);
+  let mixed = base.rgb * (boost + noise.rgb * boost);
+  return vec4(mixed.r, mixed.g, mixed.b, base.a) * inColor;
+}
+|]
+
 slice3dShader =
   [wesl|
+// spirdo:sampler=combined
 struct SliceParams {
   time: f32;
   width: f32;
@@ -117,6 +139,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 computeShader =
   [wesl|
+// spirdo:sampler=combined
 struct Params {
   time: f32;
   width: f32;
@@ -188,7 +211,15 @@ main = do
     ambienceAlt <- load "ambience alt" (MusicAsset "assets/ambience - car sedan idling.wav")
     sfx <- load "air duster" (ChunkAsset "assets/air duster 7.wav")
 
+    sampler <-
+      load "sampler" (SamplerAsset defaultSamplerDesc
+        { samplerAddressU = SamplerRepeat
+        , samplerAddressV = SamplerRepeat
+        , samplerAddressW = SamplerRepeat
+        })
+
     shader2d <- load "shader2d" (Shader2DAsset (shaderSpirv demoShader) (ShaderCounts 0 0 0 1))
+    shader2dCombo <- load "shader2d combo" (Shader2DAsset (shaderSpirv comboShader) (ShaderCounts 2 0 0 0))
     let noiseSize = 512
     let noiseSettings =
           loopNoise2D noiseSize noiseSize
@@ -222,6 +253,7 @@ main = do
     let computeGroups = (groupsX, groupsY, 1)
     let sliceGroups = (fromIntegral ((volumeSize + 7) `div` 8), fromIntegral ((volumeSize + 7) `div` 8), 1 :: Word32)
     let fx = spriteEffect shader2d []
+    let fxCombo = spriteEffect shader2dCombo [ShaderSamplerWith 1 noiseTex sampler]
 
     _ <- loop (0 :: Int) $ \frame active -> do
       let (winWInt, winHInt) = frame.renderSize
@@ -238,15 +270,15 @@ main = do
 
       computeInputs <-
         inputs "compute inputs" computePrepared
-          ( Inputs.storageTexture @"out_tex" (toStorageHandle computeTex)
-              <> Inputs.uniform @"params" computeParams
+          ( storageTexture @"out_tex" (toStorageHandle computeTex)
+              <> uniform @"params" computeParams
           )
 
       sliceInputs <-
         inputs "slice inputs" slicePrepared
-          ( Inputs.storageTexture @"noiseVolume" (toStorageHandle noiseVolume)
-              <> Inputs.storageTexture @"out_tex" (toStorageHandle noiseSliceTex)
-              <> Inputs.uniform @"params" sliceParams
+          ( storageTexture @"noiseVolume" (toStorageHandle noiseVolume)
+              <> storageTexture @"out_tex" (toStorageHandle noiseSliceTex)
+              <> uniform @"params" sliceParams
           )
 
       let scene =
@@ -259,7 +291,7 @@ main = do
               , draw basicUI (Sprite computeTex Nothing (rect 520 70 180 180) Nothing)
               , draw basicUI (Sprite noiseTex Nothing (rect 720 70 180 180) Nothing)
               , draw basicUI (Sprite noiseSliceTex Nothing (rect 520 260 180 180) Nothing)
-              , draw basicUI (Sprite texture Nothing (rect 320 320 200 160) (Just fx))
+              , draw basicUI (Sprite texture Nothing (rect 320 320 200 160) (Just fxCombo))
               , draw basicUI (textWith (defaultTextStyle { textColor = rgb 0.95 0.9 0.6 }) font "Slop + SDL3.4" 80 40)
               , draw (basic2D cam2d) (RectFill (rgba 0.1 0.1 0.2 0.9) (rect 60 320 560 180))
               , draw (basic2D cam2d) (RectOutline (rgb 0.15 0.7 0.6) (rect 60 320 560 180))
@@ -323,5 +355,6 @@ computeBindingsFrom inputs =
       storage =
         [ ComputeStorageTextureRW entry.storageTextureBinding (storageTextureFromHandle entry.storageTextureHandle)
         | entry <- inputs.siStorageTextures
+        , entry.storageTextureGroup == 1
         ]
   in uniforms <> storage

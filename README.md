@@ -50,6 +50,7 @@ main :: IO ()
 main = runWindow defaultConfig $ do
   let load label spec = loadAssetAsync spec >>= awaitAsset >>= expect label
   texture <- load "texture" (TextureAsset "assets/sprite.bmp")
+  font <- load "font" (FontAsset "assets/Inter/Inter-VariableFont_opsz,wght.ttf" 28)
 
   loop () $ \frame _ -> do
     when (frame.quitRequested || keyPressed KeyEscape frame.input) $
@@ -199,10 +200,77 @@ draw (basic3D cam) (mesh3D mesh identity [])
 
 `Vertex3D` layout: `vec4 position`, `vec2 uv`, `vec4 color`.
 
+## Game Recipes
+
+### Stateful loop + input (top‑down movement)
+
+```haskell
+data Game = Game
+  { playerPos :: V2 Float
+  } deriving (Eq, Show)
+
+let speed = 220 :: Float
+_ <- loop (Game (V2 200 200)) $ \frame game -> do
+  let now = frame.input.inputNow
+  let dx = (if keyDown KeyD now then 1 else 0) - (if keyDown KeyA now then 1 else 0)
+  let dy = (if keyDown KeyS now then 1 else 0) - (if keyDown KeyW now then 1 else 0)
+  let pos' =
+        game.playerPos
+          + V2 (fromIntegral dx * speed * frame.delta)
+               (fromIntegral dy * speed * frame.delta)
+  let (rw, rh) = frame.renderSize
+  let cam = camera2DScreen (fromIntegral rw, fromIntegral rh)
+  let V2 px py = pos'
+
+  clear (rgb 0.05 0.06 0.1)
+  draw (basic2D cam) (Sprite texture Nothing (rect px py 64 64) Nothing)
+  pure (Continue game { playerPos = pos' })
+```
+
+### Sprite atlas animation (frame‑based)
+
+```haskell
+let frameW = 64
+let frameH = 64
+let frames = 8
+let ix = floor (frame.time * 12) `mod` frames
+let src = rect (fromIntegral (ix * frameW)) 0 (fromIntegral frameW) (fromIntegral frameH)
+draw (basic2D cam) (Sprite atlas (Just src) (rect 120 140 128 128) Nothing)
+```
+
+### Audio pools (music + sfx)
+
+```haskell
+blend <- createTrackPool PoolBlend 2
+sfxPool <- createTrackPool PoolRoundRobin 8
+_ <- runLoop (crossfadeToLoop blend ambience 0)
+
+_ <- loop () $ \frame _ -> do
+  when (keyPressed KeySpace frame.input) $
+    void (playPool sfxPool sfx)
+  when (keyPressed KeyB frame.input) $
+    void (crossfadeToLoop blend ambienceAlt 2.0)
+  pure (Continue ())
+```
+
+### Async assets (non‑blocking)
+
+```haskell
+spriteId <- loadAssetAsync (TextureAsset "assets/sprite.bmp")
+
+_ <- loop () $ \frame _ -> do
+  mSprite <- getAsset spriteId
+  case mSprite of
+    Nothing -> draw basicUI (text font "Loading..." 40 40)
+    Just sprite -> draw (basic2D cam) (Sprite sprite Nothing (rect 80 120 128 128) Nothing)
+  pure (Continue ())
+```
+
 ## Shaders
 
 Slop supports custom graphics and compute pipelines (`Pipeline`, `Binding`, `ComputeBinding`).
 The demo uses Spirdo to compile WESL -> SPIR-V. Slop itself is Spirdo-free.
+For predictable sampler bindings, use `wesl` with the inline pragma `// spirdo:sampler=combined`.
 
 ### Slop shader ABI (predictable bindings)
 
@@ -213,6 +281,7 @@ Slop’s custom fragment path follows SDL_gpu’s SPIR-V descriptor-set conventi
 - Slop binds uniforms by **binding slot index** (`0..3`), not by name.
 - Slop binds samplers as a **combined sampler array** starting at slot 0.
 - Use `Shader2D` / `Shader2DAsset` for sprite/text overrides (this path enforces the ABI).
+- Separate `texture` + `sampler` bindings **must be combined** (add `// spirdo:sampler=combined`) for the 2D override path.
 
 If these don’t match your shader, you’ll now get a clear runtime error instead of a black frame.
 Keep custom shader bindings aligned with these rules for predictable results.
@@ -220,11 +289,16 @@ Keep custom shader bindings aligned with these rules for predictable results.
 Minimal fragment ABI example:
 
 ```wgsl
+// spirdo:sampler=combined
 struct Params { time: f32; _pad0: f32; renderSize: vec2<f32>; dpiScale: vec2<f32>; _pad1: vec2<f32>; };
 @group(3) @binding(0) var<uniform> slop: Params;
 @group(2) @binding(0) var tex0: texture_2d<f32>;
-@group(2) @binding(1) var samp0: sampler;
+@group(2) @binding(1) var tex1: texture_2d<f32>;
+@group(2) @binding(2) var samp0: sampler;
+@group(2) @binding(3) var samp1: sampler;
 ```
+Compile this with `wesl` so texture+sampler pairs collapse into Slop’s combined sampler slots.
+Keep **texture bindings contiguous** (`0..N-1`) so sampler slots are predictable.
 
 ### Sprite shader override (Shader2D)
 
@@ -233,6 +307,7 @@ shader2d <- load "fx" (Shader2DAsset (shaderSpirv shaderSource) (ShaderCounts 2 
 setShader2DBindings shader2d shaderBindingTable
 
 -- Make sure your WESL shader uses group(3) for uniforms and group(2) for samplers.
+-- Add `// spirdo:sampler=combined` to the shader source.
 fx <- spriteEffectNamed shader2d
   [ NamedUniform "params" params
   , NamedSamplerWith "noiseTex" noiseTex sampler
@@ -242,6 +317,40 @@ draw (basic2D cam) (Sprite tex Nothing dst (Just fx))
 ```
 `spriteEffectNamed` requires a binding table (e.g. from Spirdo) to be set via
 `setShaderBindings` so names map to binding slots.
+
+### Spirdo quick recipe (combined sampler mode)
+
+Use the inline pragma and keep texture bindings contiguous:
+
+```haskell
+{-# LANGUAGE QuasiQuotes #-}
+
+import Spirdo.Wesl (wesl, shaderSpirv)
+
+scanlineShader = [wesl|
+// spirdo:sampler=combined
+struct Params { time: f32; _pad0: f32; renderSize: vec2<f32>; _pad1: vec2<f32>; };
+@group(3) @binding(0) var<uniform> params: Params;
+@group(2) @binding(0) var tex0: texture_2d<f32>;
+@group(2) @binding(1) var samp0: sampler;
+
+@fragment
+fn main(@location(0) uv: vec2<f32>, @location(1) color: vec4<f32>) -> @location(0) vec4<f32> {
+  let tex = textureSample(tex0, samp0, uv);
+  let scan = 0.85 + 0.15 * sin(uv.y * params.renderSize.y * 0.25 + params.time * 18.0);
+  return vec4(tex.rgb * scan, tex.a) * color;
+}
+|]
+
+shader2d <- load "scanline" (Shader2DAsset (shaderSpirv scanlineShader) (ShaderCounts 1 0 0 1))
+let fx = spriteEffect shader2d [ShaderUniform 0 params]
+draw (basic2D cam) (Sprite tex Nothing dst (Just fx))
+```
+
+If you’re using Spirdo’s `inputsFromPrepared` for custom pipelines, remember:
+in `SamplerCombined` mode sampler bindings are **not** part of the interface.
+Use `sampledTexture @"tex0" texHandle samplerHandle` in the input builder, or
+bind sampler slots explicitly in Slop with `ShaderSamplerWith`.
 
 ### Uniform safety
 
@@ -256,6 +365,8 @@ let u' = shaderUniformBytesSized 0 16 bytes -- Either String ShaderUniform
 
 Slop treats samplers as an array of slots starting at 0. Slots can be sparse (gaps are
 filled with a safe placeholder), but for clarity most examples bind densely (0..N-1):
+
+If you compile with Spirdo, add `// spirdo:sampler=combined` so sampler slots match Slop.
 
 ```haskell
 let fx =
@@ -473,7 +584,7 @@ Draw it like a normal sprite:
 draw basicUI (Sprite noiseTex Nothing (rect 40 80 256 256) Nothing)
 ```
 
-Noise types supported: `NoiseWhite`, `NoiseValue`, `NoisePerlin`, `NoiseVoronoi`.
+Noise types supported: `NoiseWhite`, `NoiseValue`, `NoisePerlin`, `NoiseVoronoi`, `NoiseSimplex`, `NoiseSimplex2`.
 
 Examples:
 
