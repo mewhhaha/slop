@@ -5,7 +5,6 @@ module Slop.Audio
   , Track
   , TrackPool
   , PoolPolicy(..)
-  , BlendPool
   , playMusic
   , playMusicLoop
   , playSound
@@ -17,7 +16,6 @@ module Slop.Audio
   , playPoolPriorityLoop
   , stopPool
   , trackPlaying
-  , createBlendPool
   , crossfadeTo
   , crossfadeToLoop
   , updateBlend

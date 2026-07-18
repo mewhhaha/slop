@@ -41,7 +41,7 @@ module Slop.GPU
   , VertexLayout(..)
   , Primitive(..)
   , Mesh(..)
-  , Mesh3D(..)
+  , Mesh3D
   , mesh3D
   , Vertex3D(..)
   , Pipeline(..)
@@ -89,7 +89,6 @@ module Slop.GPU
   , createShader2D
   , createShader2DReflected
   , destroyShader2D
-  , createComputePipeline
   , destroyComputePipeline
   , dispatchCompute
   , spriteLayout
@@ -117,13 +116,12 @@ module Slop.GPU
   , withRenderTarget
   , destroyTarget
   , render
-  , drawRender
   , output
   , postProcess
   , TargetRef(..)
   , RenderPlan
-  , PlanM(..)
-  , PassM(..)
+  , PlanM
+  , PassM
   , plan
   , pass
   , runPlan
@@ -141,7 +139,7 @@ module Slop.GPU
   , defaultSamplerDesc
   , createSampler
   , destroySampler
-  , As3D(..)
+  , As3D
   , Camera3D(..)
   , camera3D
   , camera3DView
@@ -149,17 +147,13 @@ module Slop.GPU
   , camera3DViewProj
   , camera3DMVP
   , basic3D
-  , AsMesh(..)
+  , AsMesh
   , asMesh
   , drawMesh
   , ShaderUniform(..)
-  , shaderUniformChecked
   , shaderUniformSized
-  , shaderUniformBytesChecked
   , shaderUniformBytesSized
   , ShaderStage(..)
-  , ShaderBinding(..)
-  , NamedShaderBinding(..)
   , ShaderBindings(..)
   , NamedUniform(..)
   , emptyShaderBindings
@@ -168,8 +162,6 @@ module Slop.GPU
   , getShaderBindings
   , resolveNamedUniforms
   , resolveReflectedUniforms
-  , withShaderBindingsStage
-  , withShaderBindingsNamed
   , normalizeBindings
   , normalizeBindingsSparse
   , normalizeUniforms
@@ -184,18 +176,8 @@ module Slop.GPU
   , TextureDescAsset(..)
   , NoiseTexture2DAsset(..)
   , NoiseTexture3DAsset(..)
-  , createShaderFromSpirv
-  , createShaderFromSpirvWith
-  , destroyShader
   , withShaderBindings
   , withShader
-  , setShaderUniformCached
-  , setShaderUniformBytesCached
-  , UniformCache
-  , newUniformCache
-  , shaderUniformCache
-  , setShaderUniformBytesCachedWith
-  , withShaderUniform
   ) where
 
 import Slop.Internal

@@ -158,7 +158,7 @@ wrongNamedBindingTypeFailsBeforeDrawing = do
 
 uniformSizeMismatchIsTyped :: IO ()
 uniformSizeMismatchIsTyped =
-  case shaderUniformChecked 3 16 (1 :: Int32) of
+  case shaderUniformSized 3 16 (1 :: Int32) of
     Left SlopShaderFailure { errorBinding = Just "3" } -> pure ()
     Left err -> fail ("expected uniform slot evidence, got " <> T.unpack (renderSlopError err))
     Right _ -> fail "uniform size mismatch was accepted"

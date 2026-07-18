@@ -69,11 +69,8 @@ executable slop
         buildable: False
     build-depends:
         base ^>=4.21.0.0 || ^>=4.22.0.0,
-        bytestring <0.13,
-        containers <0.9,
         slop,
         spirdo ^>=0.2.0.0,
-        template-haskell >=2.23 && <2.25,
         text <2.2
     pkgconfig-depends:
         sdl3-mixer
@@ -89,8 +86,7 @@ executable slop-spirv-gen
     build-depends:
         base ^>=4.21.0.0 || ^>=4.22.0.0,
         bytestring <0.13,
-        spirdo ^>=0.2.0.0,
-        template-haskell >=2.23 && <2.25
+        spirdo ^>=0.2.0.0
     hs-source-dirs:   tools
     default-language: GHC2024
 

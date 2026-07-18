@@ -55,7 +55,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 
 - `Binding`/`ComputeBinding` are stage-aware for custom pipelines (`vUniformBytes`, `fSamplerWith`, `computeStorageTextureRW`, etc).
 - Prefer reflected shader layouts and named bindings. Reflection validates descriptor groups, duplicate declarations, missing names, binding kinds, and uniform sizes before GPU submission.
-- Legacy `ShaderUniform` helpers are fragment-only and auto-bind the draw texture at sampler slot 0.
+- `ShaderUniform` helpers are fragment-only and auto-bind the draw texture at sampler slot 0.
 - Positional `ShaderCounts` and slot-based bindings remain available in `Slop.GPU` for shaders without reflection.
 
 ## Text

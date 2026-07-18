@@ -454,12 +454,12 @@ let patch =
         [ patchTextColor (rgb 1 0.6 0.2)
         , patchTextBlend (Just BlendAdditive)
         ]
-let style = applyTextStylePatch textStyle patch
+let style = applyTextStylePatch defaultTextStyle patch
 draw basicUI (textWith style font "Patched text" 40 40)
 ```
 
 ```haskell
-let style = textColor (rgb 1 0.6 0.2) textStyle
+let style = textColor (rgb 1 0.6 0.2) defaultTextStyle
 draw basicUI (textWith style font "Warm text" 40 40)
 ```
 
@@ -483,14 +483,6 @@ withResource
   (do target <- createRenderTarget 512 512
       pure Resource { resourceValue = target, resourceRelease = destroyTarget target })
   (\target -> render target (clear (rgb 0 0 0)))
-```
-
-### Uniform caching (avoid redundant uploads)
-
-```haskell
-cache <- liftIO newUniformCache
-let paramsBytes = ...
-setShaderUniformBytesCachedWith cache shader 0 paramsBytes
 ```
 
 ## Input
@@ -556,7 +548,7 @@ If you're not using `loop`, call `processMainAssets` to progress main-thread loa
 
 ### Non-blocking asset reads in the loop
 
-Use `getAsset` (or the `getAssetReady` alias) to poll without blocking and render a fallback while it loads:
+Use `getAsset` to poll without blocking and render a fallback while it loads:
 
 ```haskell
 data DemoState = DemoState

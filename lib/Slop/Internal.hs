@@ -18,11 +18,8 @@ module Slop.Internal
   , Resource(..)
   , withResource
   , releaseResource
-  , runWindowM
   , runWindow
-  , runWindowIO
   , askWindow
-  , liftWindow
   , logDebug
   , startTextInput
   , stopTextInput
@@ -119,7 +116,6 @@ module Slop.Internal
   , destroyFragmentShader
   , createShader2D
   , destroyShader2D
-  , createComputePipeline
   , destroyComputePipeline
   , dispatchCompute
   , spriteLayout
@@ -147,7 +143,6 @@ module Slop.Internal
   , withRenderTarget
   , destroyTarget
   , render
-  , drawRender
   , output
   , postProcess
   , TargetRef(..)
@@ -174,7 +169,6 @@ module Slop.Internal
   , drawTextRaw
   , drawTextRawWith
   , measureText
-  , textStyle
   , textColor
   , textShader
   , textBlend
@@ -241,8 +235,6 @@ module Slop.Internal
   , PipelineAsset(..)
   , SamplerAsset(..)
   , SdfFontAsset(..)
-  , setFontSDF
-  , getFontSDF
   , Text
   , Audio(..)
   , Shader
@@ -280,9 +272,7 @@ module Slop.Internal
   , TextDraw(..)
   , text
   , ShaderUniform(..)
-  , shaderUniformChecked
   , shaderUniformSized
-  , shaderUniformBytesChecked
   , shaderUniformBytesSized
   , SlopError(..)
   , SlopResult
@@ -296,8 +286,6 @@ module Slop.Internal
   , patchTextBlend
   , applyTextStylePatch
   , ShaderStage(..)
-  , ShaderBinding(..)
-  , NamedShaderBinding(..)
   , ShaderBindings(..)
   , NamedUniform(..)
   , emptyShaderBindings
@@ -306,14 +294,9 @@ module Slop.Internal
   , getShaderBindings
   , resolveNamedUniforms
   , resolveReflectedUniforms
-  , withShaderBindingsStage
-  , withShaderBindingsNamed
   , normalizeBindings
   , normalizeBindingsSparse
   , normalizeUniforms
-  , normalizeBindingsIO
-  , normalizeBindingsSparseIO
-  , normalizeUniformsIO
   , AssetId(..)
   , AnyAssetId(..)
   , AssetStatus(..)
@@ -335,7 +318,6 @@ module Slop.Internal
   , awaitAsset
   , awaitAssetResult
   , getAsset
-  , getAssetReady
   , assetReady
   , getAssetStatus
   , removeAsset
@@ -360,8 +342,6 @@ module Slop.Internal
   , playPoolPriorityLoop
   , stopPool
   , trackPlaying
-  , BlendPool
-  , createBlendPool
   , crossfadeTo
   , crossfadeToLoop
   , updateBlend
@@ -370,40 +350,8 @@ module Slop.Internal
   , playOn
   , playOnLoop
   , stopTrack
-  , clearIO
-  , presentIO
-  , setDrawColorIO
-  , drawLineIO
-  , drawRectIO
-  , fillRectIO
-  , drawTextureIO
-  , createNoiseTexture2DIO
-  , loadTextureIO
-  , destroyTextureIO
-  , loadFontIO
-  , loadFontSDFIO
-  , closeFontIO
-  , createTextIO
-  , destroyTextIO
-  , drawTextIO
-  , createShaderFromSpirvIO
-  , createShaderFromSpirvWithIO
-  , destroyShaderIO
-  , withShaderIO
-  , setShaderUniformIO
-  , setShaderUniformBytesIO
-  , createShaderFromSpirv
-  , createShaderFromSpirvWith
-  , destroyShader
   , withShaderBindings
   , withShader
-  , setShaderUniformCached
-  , setShaderUniformBytesCached
-  , UniformCache
-  , newUniformCache
-  , shaderUniformCache
-  , setShaderUniformBytesCachedWith
-  , withShaderUniform
   ) where
 
 import Control.Exception (Exception (..), SomeAsyncException, SomeException, bracket, bracket_, finally, fromException, onException, throwIO, try)
@@ -415,6 +363,7 @@ import Control.Concurrent.STM
   , TVar
   , atomically
   , newEmptyTMVar
+  , newEmptyTMVarIO
   , newTQueueIO
   , newTVarIO
   , modifyTVar'
@@ -442,6 +391,7 @@ import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
 import Data.Kind (Type)
 import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
+import Data.List (elemIndex)
 import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe)
 import Data.Monoid (Last (..))
 import qualified Data.Map.Strict as Map
@@ -662,7 +612,6 @@ import Slop.SDL.Raw
   , ttfDestroyText
   , ttfGetGPUTextDrawData
   , ttfInit
-  , ttfGetFontSDF
   , ttfOpenFont
   , ttfQuit
   , ttfCloseFont
@@ -1469,10 +1418,10 @@ class (Typeable spec, Typeable (AssetType spec)) => AssetLoader spec where
   assetThread :: spec -> AssetThread
   assetThread _ = AssetAny
 
-data TextureAsset = TextureAsset FilePath
+newtype TextureAsset = TextureAsset FilePath
   deriving (Eq, Show)
 
-data TextureDescAsset = TextureDescAsset TextureDesc
+newtype TextureDescAsset = TextureDescAsset TextureDesc
   deriving (Eq, Show)
 
 data NoiseTexture2DAsset = NoiseTexture2DAsset Int Int NoiseSettings
@@ -1487,10 +1436,10 @@ data FontAsset = FontAsset FilePath Float
 data TextAsset = TextAsset Font T.Text
   deriving (Eq, Show)
 
-data MusicAsset = MusicAsset FilePath
+newtype MusicAsset = MusicAsset FilePath
   deriving (Eq, Show)
 
-data ChunkAsset = ChunkAsset FilePath
+newtype ChunkAsset = ChunkAsset FilePath
   deriving (Eq, Show)
 
 data Audio
@@ -1532,17 +1481,17 @@ data VertexShaderAsset = VertexShaderAsset
   }
   deriving (Eq, Show)
 
-data ComputePipelineAsset = ComputePipelineAsset
-  { computePipelineDesc :: !ComputeDesc
+newtype ComputePipelineAsset = ComputePipelineAsset
+  { computePipelineDesc :: ComputeDesc
   }
   deriving (Eq, Show)
 
-data PipelineAsset = PipelineAsset
-  { pipelineDesc :: !GraphicsDesc
+newtype PipelineAsset = PipelineAsset
+  { pipelineDesc :: GraphicsDesc
   }
 
-data SamplerAsset = SamplerAsset
-  { samplerDesc :: !SamplerDesc
+newtype SamplerAsset = SamplerAsset
+  { samplerDesc :: SamplerDesc
   }
   deriving (Eq, Show)
 
@@ -1817,13 +1766,10 @@ startAssetWorkers app workerCount manager = do
 shutdownAssetManager :: Window -> AssetManager -> IO ()
 shutdownAssetManager app mgr = do
   let workerCount = length mgr.amThreads
-  stopVars <- replicateM workerCount (atomically newEmptyTMVar)
+  stopVars <- replicateM workerCount newEmptyTMVarIO
   atomically $ forM_ stopVars (\var -> writeTQueue (mgr.amQueue) (StopCommand var))
   mapM_ (atomically . readTMVar) stopVars
-  cleanupAssets app mgr
-
-cleanupAssets :: Window -> AssetManager -> IO ()
-cleanupAssets app mgr = removeAllAssetsIO app mgr
+  removeAllAssetsIO app mgr
 
 removeAllAssetsIO :: Window -> AssetManager -> IO ()
 removeAllAssetsIO app mgr = do
@@ -2044,7 +1990,7 @@ reloadAssetAsync :: forall spec. AssetLoader spec => AssetId (AssetType spec) ->
 reloadAssetAsync assetId spec = do
   app <- ask
   let mgr = app.appAssets
-  notify <- liftIO (atomically newEmptyTMVar)
+  notify <- liftIO newEmptyTMVarIO
   exists <- liftIO $ atomically $ do
     st <- readTVar (mgr.amState)
     pure (IntMap.member (assetId.unAssetId) (st.msAssets))
@@ -2104,9 +2050,6 @@ getAsset assetId = do
   case status of
     Just (AssetReady value) -> pure (Just value)
     _ -> pure Nothing
-
-getAssetReady :: forall (a :: Type). Typeable a => AssetId a -> WindowM (Maybe a)
-getAssetReady = getAsset
 
 assetReady :: forall (a :: Type). Typeable a => AssetId a -> WindowM Bool
 assetReady assetId = isJust <$> getAsset assetId
@@ -3173,9 +3116,6 @@ applyTextStylePatch style patch =
     , textBlend = applyPatch patch.patchTextBlend style.textBlend
     }
 
-textStyle :: TextStyle
-textStyle = defaultTextStyle
-
 textColor :: Color -> TextStyle -> TextStyle
 textColor color style = style { textColor = color }
 
@@ -3202,25 +3142,19 @@ data ShaderUniform where
   ShaderSamplerWith :: Word32 -> Texture -> Sampler -> ShaderUniform
   ShaderStorageTexture :: Word32 -> Texture -> ShaderUniform
 
-shaderUniformChecked :: Storable a => Word32 -> Int -> a -> SlopResult ShaderUniform
-shaderUniformChecked slot expectedBytes value =
+shaderUniformSized :: Storable a => Word32 -> Int -> a -> SlopResult ShaderUniform
+shaderUniformSized slot expectedBytes value =
   let actual = sizeOf value
   in if actual /= expectedBytes
       then Left (uniformSizeError slot expectedBytes actual)
       else Right (ShaderUniform slot value)
 
-shaderUniformSized :: Storable a => Word32 -> Int -> a -> SlopResult ShaderUniform
-shaderUniformSized = shaderUniformChecked
-
-shaderUniformBytesChecked :: Word32 -> Int -> ByteString -> SlopResult ShaderUniform
-shaderUniformBytesChecked slot expectedBytes bytes =
+shaderUniformBytesSized :: Word32 -> Int -> ByteString -> SlopResult ShaderUniform
+shaderUniformBytesSized slot expectedBytes bytes =
   let actual = BS.length bytes
   in if actual /= expectedBytes
       then Left (uniformSizeError slot expectedBytes actual)
       else Right (ShaderUniformBytes slot bytes)
-
-shaderUniformBytesSized :: Word32 -> Int -> ByteString -> SlopResult ShaderUniform
-shaderUniformBytesSized = shaderUniformBytesChecked
 
 uniformSizeError :: Word32 -> Int -> Int -> SlopError
 uniformSizeError slot expectedBytes actualBytes =
@@ -3235,20 +3169,6 @@ data ShaderStage
   | ShaderVertex
   | ShaderCompute
   deriving (Eq, Ord, Show)
-
-data ShaderBinding where
-  ShaderBindUniform :: Storable a => ShaderStage -> Word32 -> a -> ShaderBinding
-  ShaderBindUniformBytes :: ShaderStage -> Word32 -> ByteString -> ShaderBinding
-  ShaderBindSampler :: ShaderStage -> Word32 -> Texture -> ShaderBinding
-  ShaderBindSamplerWith :: ShaderStage -> Word32 -> Texture -> Sampler -> ShaderBinding
-  ShaderBindStorageTexture :: ShaderStage -> Word32 -> Texture -> ShaderBinding
-
-data NamedShaderBinding where
-  ShaderBindUniformNamed :: Storable a => ShaderStage -> String -> a -> NamedShaderBinding
-  ShaderBindUniformBytesNamed :: ShaderStage -> String -> ByteString -> NamedShaderBinding
-  ShaderBindSamplerNamed :: ShaderStage -> String -> Texture -> NamedShaderBinding
-  ShaderBindSamplerWithNamed :: ShaderStage -> String -> Texture -> Sampler -> NamedShaderBinding
-  ShaderBindStorageTextureNamed :: ShaderStage -> String -> Texture -> NamedShaderBinding
 
 data ShaderBindings = ShaderBindings
   { shaderUniformSlots :: Map.Map String Word32
@@ -4137,9 +4057,6 @@ setFontSDF font enabled = do
   unless ok $ do
     err <- sdlGetError
     throwIO (SlopSDLFailure "TTF_SetFontSDF" (T.pack err))
-
-getFontSDF :: Font -> IO Bool
-getFontSDF = ttfGetFontSDF
 
 loadFontSDFIO :: FilePath -> Float -> IO Font
 loadFontSDFIO path size = do
@@ -5335,12 +5252,9 @@ render target action = do
         pure result
   liftIO (withRecording window target runWithContext)
 
-drawRender :: RenderTarget -> Maybe FRect -> FRect -> WindowM ()
-drawRender (RenderTarget tex) src dst = do
-  drawTexture tex src dst
-
 output :: RenderTarget -> Maybe FRect -> FRect -> WindowM ()
-output = drawRender
+output (RenderTarget texture) src dst =
+  drawTexture texture src dst
 
 postProcess :: RenderTarget -> RenderTarget -> Shader -> [ShaderUniform] -> Maybe FRect -> FRect -> WindowM ()
 postProcess (RenderTarget inputTex) (RenderTarget outputTex) shader uniforms src dst = do
@@ -5389,7 +5303,7 @@ runPlan (RenderPlan passes) = mapM_ runPass passes
       case op of
         OpClear color -> clear color
         OpDraw item -> drawItem item
-        OpBlit target src dst -> drawRender target src dst
+        OpBlit target src dst -> output target src dst
         OpShader shader uniforms opsList ->
           withShaderBindings shader uniforms (runOps opsList)
 
@@ -5812,13 +5726,7 @@ data BlendState = BlendState
   , bsTo :: !Track
   , bsDuration :: !Float
   , bsElapsed :: !Float
-  , bsLoops :: !Int
   }
-
-type BlendPool = TrackPool
-
-createBlendPool :: WindowM BlendPool
-createBlendPool = createTrackPool PoolBlend 2
 
 crossfadeTo :: TrackPool -> Audio -> Float -> WindowM ()
 crossfadeTo pool audio duration = crossfadeToWith pool audio duration 0
@@ -5898,19 +5806,13 @@ crossfadeToWith pool audio duration loops =
                     , bsTo = toTrack
                     , bsDuration = duration
                     , bsElapsed = 0
-                    , bsLoops = loops
                     }
               requireAudioPlayback "crossfade track pool" audio (toGainSet && okSet && okPlay && okLoop && fromGainSet)
               liftIO (writeIORef pool.poolState state { psBlend = Just blend })
 
 trackIndex :: TrackPool -> Track -> Int
 trackIndex pool track =
-  case pool.poolTracks of
-    (t1 : t2 : _) ->
-      if track == t1 then 0 else if track == t2 then 1 else 0
-    (t1 : _) ->
-      if track == t1 then 0 else 0
-    [] -> 0
+  fromMaybe 0 (elemIndex track pool.poolTracks)
 
 createTrack :: WindowM Track
 createTrack = do
@@ -5960,18 +5862,9 @@ data Shader = Shader
   , shaderStorageTextureCount :: Word32
   , shaderStorageBufferCount :: Word32
   , shaderUniformBufferCount :: Word32
-  , shaderUniformDefaults :: IORef (Map.Map Word32 ByteString)
   , shaderBindingTable :: IORef ShaderBindings
   , shaderReflectedLayout :: Maybe ReflectedShaderLayout
   }
-
-newtype UniformCache = UniformCache (IORef (Map.Map Word32 ByteString))
-
-newUniformCache :: IO UniformCache
-newUniformCache = UniformCache <$> newIORef Map.empty
-
-shaderUniformCache :: Shader -> UniformCache
-shaderUniformCache shader = UniformCache shader.shaderUniformDefaults
 
 defaultSamplerDesc :: SamplerDesc
 defaultSamplerDesc = SamplerDesc
@@ -6071,10 +5964,6 @@ getShaderBindings :: Shader -> WindowM ShaderBindings
 getShaderBindings shader =
   liftIO (readIORef shader.shaderBindingTable)
 
-createShaderFromSpirvIO :: Window -> ByteString -> IO Shader
-createShaderFromSpirvIO window spirv =
-  createShaderFromSpirvWithIO window spirv 0 0 0 0
-
 createShaderFromSpirvWithIO :: Window -> ByteString -> Word32 -> Word32 -> Word32 -> Word32 -> IO Shader
 createShaderFromSpirvWithIO window spirv numSamplers numStorageTextures numStorageBuffers numUniformBuffers =
   createShaderFromSpirvWithDevice window.appGPUDevice spirv numSamplers numStorageTextures numStorageBuffers numUniformBuffers
@@ -6084,7 +5973,6 @@ createShaderFromSpirvWithDevice device spirv numSamplers numStorageTextures numS
   when (numUniformBuffers > 4) $
     throwIO (SlopShaderFailure "create" "unnamed" Nothing "SDL_gpu supports at most 4 uniform buffers per fragment shader")
   shader <- require "SDL_CreateGPUShader" (createRawShader device spirv sdlGPUShaderStageFragment numSamplers numStorageTextures numStorageBuffers numUniformBuffers)
-  defaults <- newIORef Map.empty
   bindingsRef <- newIORef emptyShaderBindings
   pure Shader
     { shaderHandle = shader
@@ -6093,7 +5981,6 @@ createShaderFromSpirvWithDevice device spirv numSamplers numStorageTextures numS
     , shaderStorageTextureCount = numStorageTextures
     , shaderStorageBufferCount = numStorageBuffers
     , shaderUniformBufferCount = numUniformBuffers
-    , shaderUniformDefaults = defaults
     , shaderBindingTable = bindingsRef
     , shaderReflectedLayout = Nothing
     }
@@ -6211,7 +6098,9 @@ createFragmentShaderReflected spirv layout = do
   pure shader { shaderReflectedLayout = Just layout }
 
 destroyFragmentShader :: FragmentShader -> WindowM ()
-destroyFragmentShader = destroyShader
+destroyFragmentShader shader = do
+  window <- ask
+  liftIO (releaseOwnedResource window (fragmentShaderResourceKey shader) (destroyShaderIO shader))
 
 createShader2D :: ByteString -> ShaderCounts -> WindowM Shader2D
 createShader2D spirv counts = do
@@ -6225,7 +6114,7 @@ createShader2DReflected spirv layout = do
   Shader2D <$> createFragmentShaderReflected spirv layout
 
 destroyShader2D :: Shader2D -> WindowM ()
-destroyShader2D (Shader2D shader) = destroyShader shader
+destroyShader2D (Shader2D shader) = destroyFragmentShader shader
 
 createComputePipelineIO :: Window -> ComputeDesc -> IO ComputePipeline
 createComputePipelineIO window desc = do
@@ -6256,8 +6145,8 @@ createComputePipelineIO window desc = do
         , computeDevice = device
         }
 
-createComputePipeline :: ComputeDesc -> WindowM ComputePipeline
-createComputePipeline desc = do
+computePipeline :: ComputeDesc -> WindowM ComputePipeline
+computePipeline desc = do
   window <- ask
   pipeline <- liftIO (createComputePipelineIO window desc)
   liftIO (registerOwnedResource window (computePipelineResourceKey pipeline) (sdlReleaseGPUComputePipeline pipeline.computeDevice pipeline.computeHandle))
@@ -6308,9 +6197,6 @@ reflectedSlotCount layout access =
         | Map.keys (Map.fromList [(slot, ()) | slot <- slots]) == [0 .. maximum slots] -> Right (maximum slots + 1)
         | otherwise -> Left (reflectionError layout.reflectedShaderName Nothing (T.pack (show access) <> " storage texture slots must be contiguous from 0"))
 
-computePipeline :: ComputeDesc -> WindowM ComputePipeline
-computePipeline = createComputePipeline
-
 destroyComputePipeline :: ComputePipeline -> WindowM ()
 destroyComputePipeline pipeline = do
   window <- ask
@@ -6355,21 +6241,6 @@ dispatchComputeIO window pipeline bindings (groupX, groupY, groupZ) = do
 destroyShaderIO :: Shader -> IO ()
 destroyShaderIO shader =
   sdlReleaseGPUShader (shader.shaderDevice) (shader.shaderHandle)
-
-withShaderIO :: Window -> Shader -> IO a -> IO a
-withShaderIO window shader action = do
-  uniforms <- mergeUniformBindings window shader []
-  let ctx = ShaderContext shader uniforms [] [] BlendAlpha Nothing
-  withShaderContext window ctx action
-
-setShaderUniformIO :: Storable a => Shader -> Word32 -> a -> IO ()
-setShaderUniformIO shader slot value =
-  toBytes value >>= setShaderUniformBytesIO shader slot
-
-setShaderUniformBytesIO :: Shader -> Word32 -> ByteString -> IO ()
-setShaderUniformBytesIO shader slot bytes =
-  modifyIORef' shader.shaderUniformDefaults (Map.insert slot bytes)
-
 
 toBytes :: Storable a => a -> IO ByteString
 toBytes value =
@@ -6438,33 +6309,6 @@ collectShaderBindings = foldM step ([], [], [])
         ShaderStorageTexture slot tex ->
           pure (uniforms, samplers, StorageBinding slot tex : storage)
 
-collectStageBindings :: [ShaderBinding] -> IO ([UniformBinding], [SamplerBindingSpec], [StorageBinding])
-collectStageBindings = foldM step ([], [], [])
-  where
-    step acc binding =
-      case binding of
-        ShaderBindUniform stage slot value -> do
-          ensureFragmentStage stage
-          bytes <- toBytes value
-          let (uniforms, samplers, storage) = acc
-          pure (UniformBinding slot bytes : uniforms, samplers, storage)
-        ShaderBindUniformBytes stage slot bytes -> do
-          ensureFragmentStage stage
-          let (uniforms, samplers, storage) = acc
-          pure (UniformBinding slot bytes : uniforms, samplers, storage)
-        ShaderBindSampler stage slot tex -> do
-          ensureFragmentStage stage
-          let (uniforms, samplers, storage) = acc
-          pure (uniforms, SamplerBindingSpec slot tex Nothing : samplers, storage)
-        ShaderBindSamplerWith stage slot tex sampler -> do
-          ensureFragmentStage stage
-          let (uniforms, samplers, storage) = acc
-          pure (uniforms, SamplerBindingSpec slot tex (Just sampler) : samplers, storage)
-        ShaderBindStorageTexture stage slot tex -> do
-          ensureFragmentStage stage
-          let (uniforms, samplers, storage) = acc
-          pure (uniforms, samplers, StorageBinding slot tex : storage)
-
 collectBindings :: [Binding] -> IO DrawBindings
 collectBindings bindings = do
   (vUniforms, fUniforms, samplers, storage) <- foldM step ([], [], [], []) bindings
@@ -6520,16 +6364,15 @@ collectComputeBindings bindings = do
 
 mergeUniformBindings :: Window -> Shader -> [UniformBinding] -> IO [UniformBinding]
 mergeUniformBindings window shader explicit = do
-  defaults <- readIORef shader.shaderUniformDefaults
   globals <- readIORef window.appGlobalsUniform
-  let defaults' =
+  let implicit =
         case globals of
-          Just bytes | shader.shaderUniformBufferCount > 0 -> Map.insertWith (\_ old -> old) 0 bytes defaults
-          _ -> defaults
+          Just bytes | shader.shaderUniformBufferCount > 0 -> Map.singleton 0 bytes
+          _ -> Map.empty
   let explicitMap = Map.fromList [ (slot, bytes) | UniformBinding slot bytes <- explicit ]
   when (shader.shaderUniformBufferCount == 0 && not (Map.null explicitMap)) $
     throwIO (SlopShaderFailure "bind uniform" "unnamed" Nothing "shader declares no uniform buffers")
-  let merged = Map.union explicitMap defaults'
+  let merged = Map.union explicitMap implicit
   case Map.keys merged of
     [] -> pure ()
     keys ->
@@ -6538,15 +6381,6 @@ mergeUniformBindings window shader explicit = do
       in when (fromIntegral maxSlot >= count) $
         throwIO (SlopShaderFailure "bind uniform" "unnamed" (Just (showText maxSlot)) "binding slot exceeds shader uniform buffer count")
   pure (map (uncurry UniformBinding) (Map.toAscList merged))
-
-ensureFragmentStage :: ShaderStage -> IO ()
-ensureFragmentStage stage =
-  case stage of
-    ShaderFragment -> pure ()
-    ShaderVertex ->
-      throwIO (SlopShaderFailure "bind" "unnamed" Nothing "vertex-stage bindings are not supported by the renderer")
-    ShaderCompute ->
-      throwIO (SlopShaderFailure "bind" "unnamed" Nothing "compute-stage bindings require computeBindingsFromReflection")
 
 normalizeBindings :: String -> [(Word32, a)] -> SlopResult [a]
 normalizeBindings label bindings =
@@ -6692,28 +6526,6 @@ namedUniformType value =
     NamedSamplerWith {} -> "sampled texture with sampler"
     NamedStorageTexture {} -> "storage texture"
 
-resolveNamedBindings :: ShaderBindings -> [NamedShaderBinding] -> IO [ShaderBinding]
-resolveNamedBindings bindings =
-  fmap reverse . foldM (step bindings) []
-  where
-    step table acc entry =
-      case entry of
-        ShaderBindUniformNamed stage name value -> do
-          slot <- lookupUniformSlot table name
-          pure (ShaderBindUniform stage slot value : acc)
-        ShaderBindUniformBytesNamed stage name bytes -> do
-          slot <- lookupUniformSlot table name
-          pure (ShaderBindUniformBytes stage slot bytes : acc)
-        ShaderBindSamplerNamed stage name tex -> do
-          slot <- lookupSamplerSlot table name
-          pure (ShaderBindSampler stage slot tex : acc)
-        ShaderBindSamplerWithNamed stage name tex sampler -> do
-          slot <- lookupSamplerSlot table name
-          pure (ShaderBindSamplerWith stage slot tex sampler : acc)
-        ShaderBindStorageTextureNamed stage name tex -> do
-          slot <- lookupStorageTextureSlot table name
-          pure (ShaderBindStorageTexture stage slot tex : acc)
-
 lookupUniformSlot :: ShaderBindings -> String -> IO Word32
 lookupUniformSlot table name =
   case Map.lookup name table.shaderUniformSlots of
@@ -6731,30 +6543,6 @@ lookupStorageTextureSlot table name =
   case Map.lookup name table.shaderStorageTextureSlots of
     Just slot -> pure slot
     Nothing -> throwIO (SlopShaderFailure "bind storage texture" "unnamed" (Just (T.pack name)) "binding name is not present in the shader layout")
-setShaderUniformCached :: Storable a => Shader -> Word32 -> a -> WindowM ()
-setShaderUniformCached shader slot value =
-  liftIO (setShaderUniformIO shader slot value)
-
-setShaderUniformBytesCached :: Shader -> Word32 -> ByteString -> WindowM ()
-setShaderUniformBytesCached shader slot bytes =
-  liftIO (setShaderUniformBytesIO shader slot bytes)
-
-setShaderUniformBytesCachedWith :: UniformCache -> Shader -> Word32 -> ByteString -> WindowM ()
-setShaderUniformBytesCachedWith (UniformCache cacheRef) shader slot bytes = do
-  changed <- liftIO $ atomicModifyIORef' cacheRef $ \cache ->
-    case Map.lookup slot cache of
-      Just prev | prev == bytes -> (cache, False)
-      _ -> (Map.insert slot bytes cache, True)
-  when changed (liftIO (setShaderUniformBytesIO shader slot bytes))
-
-createShaderFromSpirv :: ByteString -> WindowM Shader
-createShaderFromSpirv spirv =
-  createFragmentShader spirv (ShaderCounts 0 0 0 0)
-
-createShaderFromSpirvWith :: ByteString -> Word32 -> Word32 -> Word32 -> Word32 -> WindowM Shader
-createShaderFromSpirvWith spirv numSamplers numStorageTextures numStorageBuffers numUniformBuffers =
-  createFragmentShader spirv (ShaderCounts numSamplers numStorageTextures numStorageBuffers numUniformBuffers)
-
 evictTextCacheForFontIO :: Window -> Font -> IO ()
 evictTextCacheForFontIO window font = do
   let Font fontPtr = font
@@ -6764,26 +6552,10 @@ evictTextCacheForFontIO window font = do
     in (st', map (\ct -> ct.ctText) (Map.elems dropMap))
   mapM_ ttfDestroyText stale
 
-destroyShader :: Shader -> WindowM ()
-destroyShader shader = do
-  window <- ask
-  liftIO (releaseOwnedResource window (fragmentShaderResourceKey shader) (destroyShaderIO shader))
-
 withShaderBindings :: Shader -> [ShaderUniform] -> WindowM a -> WindowM a
 withShaderBindings shader bindings action = do
   collected <- liftIO (collectShaderBindings bindings)
   withShaderBindingsInternalBlend BlendAlpha shader collected Nothing action
-
-withShaderBindingsStage :: Shader -> [ShaderBinding] -> WindowM a -> WindowM a
-withShaderBindingsStage shader bindings action = do
-  collected <- liftIO (collectStageBindings bindings)
-  withShaderBindingsInternalBlend BlendAlpha shader collected Nothing action
-
-withShaderBindingsNamed :: Shader -> [NamedShaderBinding] -> WindowM a -> WindowM a
-withShaderBindingsNamed shader bindings action = do
-  table <- liftIO (readIORef shader.shaderBindingTable)
-  resolved <- liftIO (resolveNamedBindings table bindings)
-  withShaderBindingsStage shader resolved action
 
 withShaderBindingsInternalBlend :: BlendMode -> Shader -> ([UniformBinding], [SamplerBindingSpec], [StorageBinding]) -> Maybe Transform2D -> WindowM a -> WindowM a
 withShaderBindingsInternalBlend blend shader (uniforms, samplers, storage) transform action = do
@@ -6798,11 +6570,6 @@ withShader shader action = do
   merged <- liftIO (mergeUniformBindings window shader [])
   let ctx = ShaderContext shader merged [] [] BlendAlpha Nothing
   liftIO (withShaderContext window ctx (runWindowM window action))
-
-withShaderUniform :: Storable a => Shader -> Word32 -> a -> WindowM b -> WindowM b
-withShaderUniform shader slot value action = do
-  setShaderUniformCached shader slot value
-  withShader shader action
 
 defaultVertexSpirv :: ByteString
 defaultVertexSpirv = BS.pack
