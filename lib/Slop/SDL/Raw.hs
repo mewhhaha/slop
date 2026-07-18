@@ -175,6 +175,7 @@ module Slop.SDL.Raw
   , sdlGetGPUSwapchainTextureFormat
   , sdlWaitAndAcquireGPUSwapchainTexture
   , sdlAcquireGPUCommandBuffer
+  , sdlCancelGPUCommandBuffer
   , sdlSubmitGPUCommandBuffer
   , sdlBeginGPURenderPass
   , sdlEndGPURenderPass
@@ -3005,6 +3006,9 @@ foreign import ccall unsafe "SDL_GetGPUSwapchainTextureFormat" c_SDL_GetGPUSwapc
 foreign import ccall unsafe "SDL_AcquireGPUCommandBuffer" c_SDL_AcquireGPUCommandBuffer
   :: Ptr SDL_GPUDevice -> IO (Ptr SDL_GPUCommandBuffer)
 
+foreign import ccall unsafe "SDL_CancelGPUCommandBuffer" c_SDL_CancelGPUCommandBuffer
+  :: Ptr SDL_GPUCommandBuffer -> IO CBool
+
 foreign import ccall unsafe "SDL_SubmitGPUCommandBuffer" c_SDL_SubmitGPUCommandBuffer
   :: Ptr SDL_GPUCommandBuffer -> IO CBool
 
@@ -3145,6 +3149,10 @@ sdlAcquireGPUCommandBuffer :: GPUDevice -> IO (Maybe GPUCommandBuffer)
 sdlAcquireGPUCommandBuffer (GPUDevice dev) = do
   ptr <- c_SDL_AcquireGPUCommandBuffer dev
   pure $ if ptr == nullPtr then Nothing else Just (GPUCommandBuffer ptr)
+
+sdlCancelGPUCommandBuffer :: GPUCommandBuffer -> IO Bool
+sdlCancelGPUCommandBuffer (GPUCommandBuffer cmd) =
+  fromCBool <$> c_SDL_CancelGPUCommandBuffer cmd
 
 sdlSubmitGPUCommandBuffer :: GPUCommandBuffer -> IO Bool
 sdlSubmitGPUCommandBuffer (GPUCommandBuffer cmd) =

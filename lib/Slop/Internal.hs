@@ -493,6 +493,7 @@ import Slop.SDL.Raw
   , sdlGetGPUSwapchainTextureFormat
   , sdlWaitAndAcquireGPUSwapchainTexture
   , sdlAcquireGPUCommandBuffer
+  , sdlCancelGPUCommandBuffer
   , sdlSubmitGPUCommandBuffer
   , sdlBeginGPURenderPass
   , sdlEndGPURenderPass
@@ -3545,6 +3546,22 @@ require label action = do
       err <- sdlGetError
       throwIO (SlopSDLFailure (T.pack label) (T.pack err))
 
+recordAndSubmitGPU :: GPUDevice -> (GPUCommandBuffer -> IO a) -> IO a
+recordAndSubmitGPU device record = mask_ $ do
+  commandBuffer <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer device)
+  result <- record commandBuffer `onException` cancel commandBuffer
+  submitted <- sdlSubmitGPUCommandBuffer commandBuffer
+  unless submitted $ do
+    err <- sdlGetError
+    throwIO (SlopSDLFailure "SDL_SubmitGPUCommandBuffer" (T.pack err))
+  pure result
+  where
+    cancel commandBuffer = do
+      cancelled <- sdlCancelGPUCommandBuffer commandBuffer
+      unless cancelled $ do
+        err <- sdlGetError
+        hPutStrLn stderr ("slop GPU command cancellation failed: " <> err)
+
 readInputState :: IO InputState
 readInputState = do
   (keysPtr, keyCount) <- sdlGetKeyboardState
@@ -3727,32 +3744,28 @@ uploadSurface window surface gpuFormat = do
         ptr <- require "SDL_MapGPUTransferBuffer" (sdlMapGPUTransferBuffer window.appGPUDevice transfer False)
         copyBytes ptr surfaceInfo'.surfaceInfoPixels byteSize
         sdlUnmapGPUTransferBuffer window.appGPUDevice transfer
-        cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
-        copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
-        let bpp = max 1 (pitch `div` max 1 width)
-        let transferInfo = GPUTextureTransferInfo
-              { gpuTransferBuffer = transfer
-              , gpuTransferOffset = 0
-              , gpuTransferPixelsPerRow = fromIntegral (pitch `div` bpp)
-              , gpuTransferRowsPerLayer = fromIntegral height
-              }
-        let region = GPUTextureRegion
-              { gpuTextureRegionTexture = tex.textureHandle
-              , gpuTextureRegionMipLevel = 0
-              , gpuTextureRegionLayer = 0
-              , gpuTextureRegionX = 0
-              , gpuTextureRegionY = 0
-              , gpuTextureRegionZ = 0
-              , gpuTextureRegionW = fromIntegral width
-              , gpuTextureRegionH = fromIntegral height
-              , gpuTextureRegionD = 1
-              }
-        sdlUploadToGPUTexture copyPass transferInfo region False
-        sdlEndGPUCopyPass copyPass
-        okSubmit <- sdlSubmitGPUCommandBuffer cmd
-        unless okSubmit $ do
-          err <- sdlGetError
-          throwIO (SlopSDLFailure "SDL_SubmitGPUCommandBuffer" (T.pack err))
+        recordAndSubmitGPU window.appGPUDevice $ \commandBuffer -> do
+          copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass commandBuffer)
+          flip finally (sdlEndGPUCopyPass copyPass) $ do
+            let bpp = max 1 (pitch `div` max 1 width)
+            let transferInfo = GPUTextureTransferInfo
+                  { gpuTransferBuffer = transfer
+                  , gpuTransferOffset = 0
+                  , gpuTransferPixelsPerRow = fromIntegral (pitch `div` bpp)
+                  , gpuTransferRowsPerLayer = fromIntegral height
+                  }
+            let region = GPUTextureRegion
+                  { gpuTextureRegionTexture = tex.textureHandle
+                  , gpuTextureRegionMipLevel = 0
+                  , gpuTextureRegionLayer = 0
+                  , gpuTextureRegionX = 0
+                  , gpuTextureRegionY = 0
+                  , gpuTextureRegionZ = 0
+                  , gpuTextureRegionW = fromIntegral width
+                  , gpuTextureRegionH = fromIntegral height
+                  , gpuTextureRegionD = 1
+                  }
+            sdlUploadToGPUTexture copyPass transferInfo region False
         pure tex
   where
     lockSurface = do
@@ -3781,31 +3794,27 @@ createSolidTexture device fmt width height r g b a = do
       BS.useAsCStringLen bytes $ \(src, _) ->
         copyBytes ptr (castPtr src) byteSize
       sdlUnmapGPUTransferBuffer device transfer
-      cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer device)
-      copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
-      let transferInfo = GPUTextureTransferInfo
-            { gpuTransferBuffer = transfer
-            , gpuTransferOffset = 0
-            , gpuTransferPixelsPerRow = fromIntegral width
-            , gpuTransferRowsPerLayer = fromIntegral height
-            }
-      let region = GPUTextureRegion
-            { gpuTextureRegionTexture = tex.textureHandle
-            , gpuTextureRegionMipLevel = 0
-            , gpuTextureRegionLayer = 0
-            , gpuTextureRegionX = 0
-            , gpuTextureRegionY = 0
-            , gpuTextureRegionZ = 0
-            , gpuTextureRegionW = fromIntegral width
-            , gpuTextureRegionH = fromIntegral height
-            , gpuTextureRegionD = 1
-            }
-      sdlUploadToGPUTexture copyPass transferInfo region False
-      sdlEndGPUCopyPass copyPass
-      okSubmit <- sdlSubmitGPUCommandBuffer cmd
-      unless okSubmit $ do
-        err <- sdlGetError
-        throwIO (SlopSDLFailure "SDL_SubmitGPUCommandBuffer" (T.pack err))
+      recordAndSubmitGPU device $ \commandBuffer -> do
+        copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass commandBuffer)
+        flip finally (sdlEndGPUCopyPass copyPass) $ do
+          let transferInfo = GPUTextureTransferInfo
+                { gpuTransferBuffer = transfer
+                , gpuTransferOffset = 0
+                , gpuTransferPixelsPerRow = fromIntegral width
+                , gpuTransferRowsPerLayer = fromIntegral height
+                }
+          let region = GPUTextureRegion
+                { gpuTextureRegionTexture = tex.textureHandle
+                , gpuTextureRegionMipLevel = 0
+                , gpuTextureRegionLayer = 0
+                , gpuTextureRegionX = 0
+                , gpuTextureRegionY = 0
+                , gpuTextureRegionZ = 0
+                , gpuTextureRegionW = fromIntegral width
+                , gpuTextureRegionH = fromIntegral height
+                , gpuTextureRegionD = 1
+                }
+          sdlUploadToGPUTexture copyPass transferInfo region False
       pure tex
 
 createNoiseTexture2D :: Int -> Int -> NoiseSettings -> WindowM Texture
@@ -4569,23 +4578,19 @@ createMeshIO window layout vertices = do
       withArrayLen vertices $ \_ src ->
         copyBytes ptr (castPtr src) byteSize
       sdlUnmapGPUTransferBuffer window.appGPUDevice transfer
-      cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
-      copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
-      let source = GPUTransferBufferLocation
-            { gpuTransferLocationBuffer = transfer
-            , gpuTransferLocationOffset = 0
-            }
-      let dest = GPUBufferRegion
-            { gpuBufferRegionBuffer = buffer
-            , gpuBufferRegionOffset = 0
-            , gpuBufferRegionSize = fromIntegral byteSize
-            }
-      sdlUploadToGPUBuffer copyPass source dest False
-      sdlEndGPUCopyPass copyPass
-      ok <- sdlSubmitGPUCommandBuffer cmd
-      unless ok $ do
-        err <- sdlGetError
-        throwIO (SlopSDLFailure "SDL_SubmitGPUCommandBuffer" (T.pack err))
+      recordAndSubmitGPU window.appGPUDevice $ \commandBuffer -> do
+        copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass commandBuffer)
+        flip finally (sdlEndGPUCopyPass copyPass) $ do
+          let source = GPUTransferBufferLocation
+                { gpuTransferLocationBuffer = transfer
+                , gpuTransferLocationOffset = 0
+                }
+          let dest = GPUBufferRegion
+                { gpuBufferRegionBuffer = buffer
+                , gpuBufferRegionOffset = 0
+                , gpuBufferRegionSize = fromIntegral byteSize
+                }
+          sdlUploadToGPUBuffer copyPass source dest False
       pure Mesh
         { meshBuffer = buffer
         , meshVertexCount = fromIntegral (length vertices)
@@ -6168,22 +6173,18 @@ dispatchComputeIO window pipeline bindings (groupX, groupY, groupZ) = do
             , gpuStoragePadding2 = 0
             , gpuStoragePadding3 = 0
             }) resolved.cbReadWriteTextures
-  cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
-  computePass <- require "SDL_BeginGPUComputePass" (sdlBeginGPUComputePass cmd rwBindings [])
-  sdlBindGPUComputePipeline computePass pipeline.computeHandle
-  samplers <- buildSamplerBindingsExplicit window resolved.cbSamplers
-  sdlBindGPUComputeSamplers computePass 0 samplers
-  let readOnlyTextures = map (\tex -> tex.textureHandle) resolved.cbReadOnlyTextures
-  sdlBindGPUComputeStorageTextures computePass 0 readOnlyTextures
-  forM_ resolved.cbUniforms $ \(UniformBinding slot bytes) ->
-    BS.useAsCStringLen bytes $ \(ptr, byteLen) ->
-      sdlPushGPUComputeUniformData cmd slot (castPtr ptr) (fromIntegral byteLen)
-  sdlDispatchGPUCompute computePass groupX groupY groupZ
-  sdlEndGPUComputePass computePass
-  ok <- sdlSubmitGPUCommandBuffer cmd
-  unless ok $ do
-    err <- sdlGetError
-    throwIO (SlopSDLFailure "SDL_SubmitGPUCommandBuffer" (T.pack err))
+  recordAndSubmitGPU window.appGPUDevice $ \commandBuffer -> do
+    computePass <- require "SDL_BeginGPUComputePass" (sdlBeginGPUComputePass commandBuffer rwBindings [])
+    flip finally (sdlEndGPUComputePass computePass) $ do
+      sdlBindGPUComputePipeline computePass pipeline.computeHandle
+      samplers <- buildSamplerBindingsExplicit window resolved.cbSamplers
+      sdlBindGPUComputeSamplers computePass 0 samplers
+      let readOnlyTextures = map (\tex -> tex.textureHandle) resolved.cbReadOnlyTextures
+      sdlBindGPUComputeStorageTextures computePass 0 readOnlyTextures
+      forM_ resolved.cbUniforms $ \(UniformBinding slot bytes) ->
+        BS.useAsCStringLen bytes $ \(ptr, byteLen) ->
+          sdlPushGPUComputeUniformData commandBuffer slot (castPtr ptr) (fromIntegral byteLen)
+      sdlDispatchGPUCompute computePass groupX groupY groupZ
 
 destroyShaderIO :: Shader -> IO ()
 destroyShaderIO shader =
