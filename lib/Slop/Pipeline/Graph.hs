@@ -36,16 +36,16 @@ import Data.IORef (atomicModifyIORef', readIORef, writeIORef)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Set as Set
 
-import qualified Slop as S
+import qualified Slop.Internal as S
 import Slop.Internal.DList (DList, singleton, toList)
-import Slop
+import Slop.Internal
   ( Binding
   , Color
   , ComputeBinding
   , ComputePipeline
   , Draw
   , DrawItem (..)
-  , Loop
+  , WindowM
   , Mesh
   , Pipeline
   , RenderTarget
@@ -53,7 +53,6 @@ import Slop
   , ShaderUniform (..)
   , askWindow
   , dispatchCompute
-  , liftLoop
   , withShaderBindings
   )
 import Slop.SDL.Raw (FRect)
@@ -169,16 +168,16 @@ compile :: Graph a -> GraphPlan
 compile (Graph action) =
   GraphPlan (toList (execWriter (evalStateT action 0)))
 
-renderPlan :: (Int, Int) -> GraphPlan -> Loop ()
+renderPlan :: (Int, Int) -> GraphPlan -> WindowM ()
 renderPlan size (GraphPlan steps) = do
   mapM_ (runStep size) steps
   pruneTargets (collectNodes steps)
 
-render :: (Int, Int) -> Graph a -> Loop ()
+render :: (Int, Int) -> Graph a -> WindowM ()
 render size graph =
   renderPlan size (compile graph)
 
-runStep :: (Int, Int) -> Step -> Loop ()
+runStep :: (Int, Int) -> Step -> WindowM ()
 runStep size step =
   case step of
     StepPass node opsList -> do
@@ -188,12 +187,12 @@ runStep size step =
       target <- ensureTarget node size
       blitTarget target src dst
     StepCompute pipeline bindings groups ->
-      liftLoop (dispatchCompute pipeline bindings groups)
+      dispatchCompute pipeline bindings groups
 
-runOps :: (Int, Int) -> [Op] -> Loop ()
+runOps :: (Int, Int) -> [Op] -> WindowM ()
 runOps size = mapM_ (runOp size)
 
-runOp :: (Int, Int) -> Op -> Loop ()
+runOp :: (Int, Int) -> Op -> WindowM ()
 runOp size op =
   case op of
     OpClear color -> clearTarget color
@@ -206,33 +205,33 @@ runOp size op =
     OpShader shader uniforms opsList -> do
       passWithShader shader uniforms (runOps size opsList)
 
-ensureTarget :: Node -> (Int, Int) -> Loop RenderTarget
+ensureTarget :: Node -> (Int, Int) -> WindowM RenderTarget
 ensureTarget (Node nodeId) size = do
-  window <- liftLoop askWindow
-  targets <- liftLoop (liftIO (readIORef window.appPipelineTargets))
+  window <- askWindow
+  targets <- liftIO (readIORef window.appPipelineTargets)
   case IntMap.lookup nodeId targets of
     Just (target, targetSize)
       | targetSize == size -> pure target
       | otherwise -> do
-          _ <- liftLoop (S.destroyTarget target)
-          target' <- liftLoop (S.createRenderTarget (fst size) (snd size))
-          liftLoop (liftIO (writeIORef window.appPipelineTargets (IntMap.insert nodeId (target', size) targets)))
+          S.destroyTarget target
+          target' <- S.createRenderTarget (fst size) (snd size)
+          liftIO (writeIORef window.appPipelineTargets (IntMap.insert nodeId (target', size) targets))
           pure target'
     Nothing -> do
-      target' <- liftLoop (S.createRenderTarget (fst size) (snd size))
-      liftLoop (liftIO (writeIORef window.appPipelineTargets (IntMap.insert nodeId (target', size) targets)))
+      target' <- S.createRenderTarget (fst size) (snd size)
+      liftIO (writeIORef window.appPipelineTargets (IntMap.insert nodeId (target', size) targets))
       pure target'
 
-clearTarget :: Color -> Loop ()
+clearTarget :: Color -> WindowM ()
 clearTarget = S.clear
 
-drawTarget :: DrawItem -> Loop ()
+drawTarget :: DrawItem -> WindowM ()
 drawTarget (DrawItem ctx item) = S.draw ctx item
 
-blitTarget :: RenderTarget -> Maybe FRect -> FRect -> Loop ()
+blitTarget :: RenderTarget -> Maybe FRect -> FRect -> WindowM ()
 blitTarget = S.output
 
-passWithShader :: Shader -> [ShaderUniform] -> Loop a -> Loop a
+passWithShader :: Shader -> [ShaderUniform] -> WindowM a -> WindowM a
 passWithShader shader uniforms action =
   withShaderBindings shader uniforms action
 
@@ -262,11 +261,11 @@ collectNodes = foldl' stepNodes Set.empty
           acc <> collectOps opsList
         _ -> acc
 
-pruneTargets :: Set.Set Int -> Loop ()
+pruneTargets :: Set.Set Int -> WindowM ()
 pruneTargets used = do
-  window <- liftLoop askWindow
-  stale <- liftLoop $ liftIO $
+  window <- askWindow
+  stale <- liftIO $
     atomicModifyIORef' window.appPipelineTargets $ \targets ->
       let (keep, dropTargets) = IntMap.partitionWithKey (\k _ -> Set.member k used) targets
       in (keep, IntMap.elems dropTargets)
-  mapM_ (\(target, _) -> liftLoop (S.destroyTarget target)) stale
+  mapM_ (\(target, _) -> S.destroyTarget target) stale

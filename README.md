@@ -48,9 +48,9 @@ import Slop
 
 main :: IO ()
 main = runWindow defaultConfig $ do
-  let load label spec = loadAssetAsync spec >>= awaitAsset >>= expect label
-  texture <- load "texture" (TextureAsset "assets/sprite.bmp")
-  font <- load "font" (FontAsset "assets/Inter/Inter-VariableFont_opsz,wght.ttf" 28)
+  let load spec = loadAssetAsync spec >>= awaitAsset
+  texture <- load (TextureAsset "assets/sprite.bmp")
+  font <- load (FontAsset "assets/Inter/Inter-VariableFont_opsz,wght.ttf" 28)
 
   loop () $ \frame _ -> do
     when (frame.quitRequested || keyPressed KeyEscape frame.input) $
@@ -68,12 +68,17 @@ main = runWindow defaultConfig $ do
 
 ## Concepts
 
-- **WindowM**: main application monad. `runWindow` initializes SDL, GPU device, swapchain, mixer, and assets.
-- **Loop**: rendering monad used inside the frame loop.
+- **WindowM**: the application monad used for setup, frame callbacks, rendering, assets, and audio. `runWindow` initializes SDL, the GPU device, swapchain, mixer, and asset manager.
 - **Frame**: snapshot of inputs, timing, window size, drawable size, and quitRequested.
   - `frame.size` = logical window size.
   - `frame.renderSize` = swapchain/drawable pixel size (use this for rendering).
   - `frame.dpiScale` = `renderSize / size` as a `V2 Float`.
+
+`Slop` is the common window/input/2D/resource/audio façade. Advanced code opts into focused modules:
+
+- `Slop.GPU` for custom graphics, compute, shaders, bindings, and render targets.
+- `Slop.Pipeline` or `Slop.Pipeline.Graph` for declarative render pipelines.
+- `Slop.SDL.Raw` only for low-level SDL interop. Common geometry (`FPoint`/`FRect`) is exported by `Slop` and `Slop.Draw2D`.
 
 ### Config patches
 
@@ -113,7 +118,7 @@ Slop gives you two pipeline styles:
 ### Graph DSL (recommended)
 
 ```haskell
-import Slop hiding (clear, draw, output, render)
+import Slop hiding (clear, draw)
 import Slop.Pipeline.Graph
 
 _ <- loop () $ \frame _ -> do
@@ -243,13 +248,13 @@ draw (basic2D cam) (Sprite atlas (Just src) (rect 120 140 128 128) Nothing)
 ```haskell
 blend <- createTrackPool PoolBlend 2
 sfxPool <- createTrackPool PoolRoundRobin 8
-_ <- runLoop (crossfadeToLoop blend ambience 0)
+crossfadeToLoop blend ambience 0
 
 _ <- loop () $ \frame _ -> do
   when (keyPressed KeySpace frame.input) $
-    void (playPool sfxPool sfx)
+    playPool sfxPool sfx
   when (keyPressed KeyB frame.input) $
-    void (crossfadeToLoop blend ambienceAlt 2.0)
+    crossfadeToLoop blend ambienceAlt 2.0
   pure (Continue ())
 ```
 
@@ -271,6 +276,7 @@ _ <- loop () $ \frame _ -> do
 Slop supports custom graphics and compute pipelines (`Pipeline`, `Binding`, `ComputeBinding`).
 The demo uses Spirdo to compile WESL -> SPIR-V. Slop itself is Spirdo-free.
 For predictable sampler bindings, use `wesl` with the inline pragma `// spirdo:sampler=combined`.
+Import `Slop.GPU` for this API.
 
 ### Slop shader ABI (predictable bindings)
 
@@ -278,7 +284,7 @@ Slop’s custom fragment path follows SDL_gpu’s SPIR-V descriptor-set conventi
 
 - **Fragment samplers / textures / storage textures** live in `@group(2)`.
 - **Fragment uniform buffers** live in `@group(3)`.
-- Slop binds uniforms by **binding slot index** (`0..3`), not by name.
+- Reflected layouts bind values by name and retain slot positions inside `ReflectedShaderLayout`.
 - Slop binds samplers as a **combined sampler array** starting at slot 0.
 - Use `Shader2D` / `Shader2DAsset` for sprite/text overrides (this path enforces the ABI).
 - Separate `texture` + `sampler` bindings **must be combined** (add `// spirdo:sampler=combined`) for the 2D override path.
@@ -303,8 +309,13 @@ Keep **texture bindings contiguous** (`0..N-1`) so sampler slots are predictable
 ### Sprite shader override (Shader2D)
 
 ```haskell
-shader2d <- load "fx" (Shader2DAsset (shaderSpirv shaderSource) (ShaderCounts 2 0 0 1))
-setShader2DBindings shader2d shaderBindingTable
+layout <- either throwSlop pure $ shaderLayoutFromReflection "fx" ShaderFragment
+  [ ReflectedBinding "slop" 3 0 (ReflectedUniform 32)
+  , ReflectedBinding "params" 3 1 (ReflectedUniform (sizeOf params))
+  , ReflectedBinding "source" 2 0 ReflectedSampledTexture
+  , ReflectedBinding "noiseTex" 2 1 ReflectedSampledTexture
+  ]
+shader2d <- load (ReflectedShader2DAsset (shaderSpirv shaderSource) layout)
 
 -- Make sure your WESL shader uses group(3) for uniforms and group(2) for samplers.
 -- Add `// spirdo:sampler=combined` to the shader source.
@@ -315,8 +326,7 @@ fx <- spriteEffectNamed shader2d
 
 draw (basic2D cam) (Sprite tex Nothing dst (Just fx))
 ```
-`spriteEffectNamed` requires a binding table (e.g. from Spirdo) to be set via
-`setShaderBindings` so names map to binding slots.
+`shaderLayoutFromReflection` rejects duplicate names/locations, wrong descriptor groups, unsupported kinds, and non-contiguous slots. `spriteEffectNamed` then rejects missing, duplicate, kind-incompatible, or incorrectly sized values with the shader and binding names attached. Reordering reflected declarations does not change renderer code. The positional `ShaderCounts`/`fUniform`/`fSampler` API remains in `Slop.GPU` as the low-level path for shaders without reflection.
 
 ### Spirdo quick recipe (combined sampler mode)
 
@@ -342,8 +352,12 @@ fn main(@location(0) uv: vec2<f32>, @location(1) color: vec4<f32>) -> @location(
 }
 |]
 
-shader2d <- load "scanline" (Shader2DAsset (shaderSpirv scanlineShader) (ShaderCounts 1 0 0 1))
-let fx = spriteEffect shader2d [ShaderUniform 0 params]
+layout <- either throwSlop pure $ shaderLayoutFromReflection "scanline" ShaderFragment
+  [ ReflectedBinding "params" 3 0 (ReflectedUniform 32)
+  , ReflectedBinding "tex0" 2 0 ReflectedSampledTexture
+  ]
+shader2d <- load (ReflectedShader2DAsset (shaderSpirv scanlineShader) layout)
+fx <- spriteEffectNamed shader2d [NamedUniform "params" params]
 draw (basic2D cam) (Sprite tex Nothing dst (Just fx))
 ```
 
@@ -354,11 +368,11 @@ bind sampler slots explicitly in Slop with `ShaderSamplerWith`.
 
 ### Uniform safety
 
-Size-checked helpers return `Either String` instead of crashing:
+Size-checked helpers return `SlopResult`, so failures use the same error vocabulary as shader creation and asset loading:
 
 ```haskell
-let u = shaderUniformSized 0 16 params      -- Either String ShaderUniform
-let u' = shaderUniformBytesSized 0 16 bytes -- Either String ShaderUniform
+let u = shaderUniformSized 0 16 params      -- SlopResult ShaderUniform
+let u' = shaderUniformBytesSized 0 16 bytes -- SlopResult ShaderUniform
 ```
 
 ### Sampler bindings (contiguous slots)
@@ -446,7 +460,11 @@ size <- measureText font "Measure me"
 
 `measureText` uses the text cache (same cache as `drawText`/`text`).
 
-### Resource helpers (explicit lifetime)
+### Resource ownership
+
+Normal direct acquisition functions (`loadTexture`, `loadFont`, `createText`, and the constructors in `Slop.GPU`) register their result with the window. Shutdown releases those resources in reverse acquisition order, including when setup or the frame loop throws. The corresponding `destroy*` functions remain available for early release and unregister the resource before destroying it.
+
+Assets have the same guarantee through the asset manager. `withResource` is available when a lifetime should end before window shutdown:
 
 ```haskell
 withResource
@@ -506,16 +524,21 @@ Assets are typed and managed in `WindowM`. Async loads run on background threads
 but GPU-backed assets load on the **main thread** even when requested via `loadAssetAsync`.
 
 ```haskell
-let load label spec = loadAssetAsync spec >>= awaitAsset >>= expect label
-texture <- load "texture" (TextureAsset "assets/sprite.bmp")
+let load spec = loadAssetAsync spec >>= awaitAsset
+texture <- load (TextureAsset "assets/sprite.bmp")
 ```
 
-Typed errors:
+`loadAsset`, `awaitAsset`, and `awaitAssetUpdate` throw `SlopError`, whose constructors retain the operation and offending asset, shader, binding, or SDL call. Use the result variants when failure is expected and recoverable:
 
 ```haskell
-texId <- loadAssetE (TextureAsset "assets/sprite.bmp")
-texture <- expectE "texture" =<< awaitAssetE texId
+texId <- loadAssetAsync (TextureAsset "assets/sprite.bmp")
+result <- awaitAssetResult texId
+case result of
+  Left err -> logDebug (renderSlopError err)
+  Right texture -> ...
 ```
+
+Custom `AssetLoader` implementations return `SlopResult` from `loadAssetIO`, so extension loaders use the same error model without converting failures through `String`.
 
 If you're not using `loop`, call `processMainAssets` to progress main-thread loads.
 
@@ -600,8 +623,8 @@ cell <- createNoiseTexture2D 256 256 defaultNoiseSettings
 Noise textures can also be created as assets for automatic cleanup:
 
 ```haskell
-let load label spec = loadAssetAsync spec >>= awaitAsset >>= expect label
-noiseTex <- load "noise" (NoiseTexture2DAsset 256 256 defaultNoiseSettings)
+let load spec = loadAssetAsync spec >>= awaitAsset
+noiseTex <- load (NoiseTexture2DAsset 256 256 defaultNoiseSettings)
 ```
 
 Looping (tiled) noise:
@@ -669,14 +692,13 @@ volume <- createNoiseTexture3D 192 192 192 hiRes
 Use a custom shader to sample `texture_3d` (pass time or a slice as Z):
 
 ```haskell
-let load label spec = loadAssetAsync spec >>= awaitAsset >>= expect label
-volume <- load "noise3d" (NoiseTexture3DAsset 64 64 64 defaultNoiseSettings)
+let load spec = loadAssetAsync spec >>= awaitAsset
+volume <- load (NoiseTexture3DAsset 64 64 64 defaultNoiseSettings)
 
-let fx =
-      SpriteEffect shader2d
-        [ NamedSamplerWith "noiseTex3D" volume sampler
-        , NamedUniform "time" time
-        ]
+fx <- spriteEffectNamed shader2d
+  [ NamedSamplerWith "noiseTex3D" volume sampler
+  , NamedUniform "time" time
+  ]
 
 draw (basic2D cam) (Sprite tex Nothing (rect 40 80 256 256) (Just fx))
 ```
@@ -703,11 +725,10 @@ If you want fully loaded audio, create it yourself and use `AudioLoaded` (advanc
 
 ```haskell
 blend <- createTrackPool PoolBlend 2
-_ <- runLoop (crossfadeToLoop blend ambience 0)
+crossfadeToLoop blend ambience 0
 
 when (keyPressed KeyB frame.input) $ do
-  _ <- crossfadeToLoop blend ambienceAlt 2.0
-  pure ()
+  crossfadeToLoop blend ambienceAlt 2.0
 ```
 
 Pool strategies:

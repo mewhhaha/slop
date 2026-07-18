@@ -29,7 +29,7 @@ module Slop.Pipeline
   ) where
 
 import Data.Foldable (traverse_)
-import Slop
+import Slop.Internal
   ( Color
   , Draw
   , PassM
@@ -39,7 +39,7 @@ import Slop
   , Shader
   , ShaderUniform
   , TargetRef(..)
-  , Loop
+  , WindowM
   , plan
   , pass
   , passBlit
@@ -78,7 +78,7 @@ instance Monoid a => Monoid (Pipeline a) where
 pipeline :: Pipeline a -> RenderPlan
 pipeline (Pipeline action) = plan action
 
-runPipeline :: Pipeline a -> Loop ()
+runPipeline :: Pipeline a -> WindowM ()
 runPipeline = runPlan . pipeline
 
 fork :: Pipeline a -> Pipeline b -> Pipeline (a, b)

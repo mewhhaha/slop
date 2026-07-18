@@ -1,0 +1,31 @@
+module Slop.Audio
+  ( Audio(..)
+  , MusicAsset(..)
+  , ChunkAsset(..)
+  , Track
+  , TrackPool
+  , PoolPolicy(..)
+  , BlendPool
+  , playMusic
+  , playMusicLoop
+  , playSound
+  , createTrackPool
+  , createTrackPoolFrom
+  , playPool
+  , playPoolLoop
+  , playPoolPriority
+  , playPoolPriorityLoop
+  , stopPool
+  , trackPlaying
+  , createBlendPool
+  , crossfadeTo
+  , crossfadeToLoop
+  , updateBlend
+  , createTrack
+  , destroyTrack
+  , playOn
+  , playOnLoop
+  , stopTrack
+  ) where
+
+import Slop.Internal

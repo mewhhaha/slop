@@ -11,9 +11,11 @@
 module Main (main) where
 
 import Data.Word (Word32)
+import qualified Data.Text as T
 import Foreign.Ptr (nullPtr, ptrToWordPtr, wordPtrToPtr)
 import GHC.Generics (Generic)
-import Slop hiding (clear, draw, drawMesh, output, pass, postProcess, render, withShader)
+import Slop hiding (clear, draw)
+import Slop.GPU hiding (drawMesh, output, pass, postProcess, render, withShader)
 import Slop.Pipeline.Graph
 import Slop.SDL.Raw (GPUDevice(..), GPUTexture(..))
 import Spirdo.Wesl
@@ -22,15 +24,16 @@ import Spirdo.Wesl
   , shaderSpirv
   , wesl
   )
+import qualified Spirdo.Wesl as W
 import Spirdo.Wesl.Inputs
   ( ShaderInputs(..)
   , StorageTextureInput(..)
   , StorageTextureHandle(..)
-  , UniformSlot(..)
+  , UniformInput(..)
   , inputsFromPrepared
+  , orderedUniforms
   , storageTexture
   , uniform
-  , uniformSlots
   )
 
 data Params = Params
@@ -177,49 +180,47 @@ main = do
           }
 
   runWindow cfg $ do
-    let load label spec = loadAssetAsync spec >>= awaitAsset >>= expect label
-    let prepare label shader = expect label (prepareShader shader)
-    let inputs label prepared builder = expect label (inputsFromPrepared prepared builder)
+    let load spec = loadAssetAsync spec >>= awaitAsset
+    let prepare label shader = either (throwSpirdoError "prepare shader" label) pure (prepareShader shader)
+    let inputs label prepared builder = either (throwSpirdoError "build shader inputs" label) pure (inputsFromPrepared prepared builder)
 
     computePrepared <- prepare "computeShader" computeShader
     slicePrepared <- prepare "slice3dShader" slice3dShader
+    demoPrepared <- prepare "demoShader" demoShader
+    comboPrepared <- prepare "comboShader" comboShader
+    computeLayout <- either throwSlop pure (reflectionFromPrepared "computeShader" computePrepared)
+    sliceLayout <- either throwSlop pure (reflectionFromPrepared "slice3dShader" slicePrepared)
+    demoLayout <- either throwSlop pure (reflectionFromPrepared "demoShader" demoPrepared)
+    comboLayout <- either throwSlop pure (reflectionFromPrepared "comboShader" comboPrepared)
+    computeDesc <- either throwSlop pure (computeDescFromReflection (shaderSpirv computeShader) (threads3D 8 8 1) computeLayout)
+    sliceDesc <- either throwSlop pure (computeDescFromReflection (shaderSpirv slice3dShader) (threads3D 8 8 1) sliceLayout)
 
     computePipe <-
-      load "compute pipeline" (ComputePipelineAsset defaultCompute
-        { computeShaderCode = shaderSpirv computeShader
-        , computeReadwriteStorageTextures = 1
-        , computeUniformBuffers = 1
-        , computeThreads = threads3D 8 8 1
-        })
+      load (ComputePipelineAsset computeDesc)
     slicePipe <-
-      load "slice pipeline" (ComputePipelineAsset defaultCompute
-        { computeShaderCode = shaderSpirv slice3dShader
-        , computeReadwriteStorageTextures = 2
-        , computeUniformBuffers = 1
-        , computeThreads = threads3D 8 8 1
-        })
+      load (ComputePipelineAsset sliceDesc)
 
     let computeSize = 256
     computeTex <-
-      load "compute texture" (TextureDescAsset (textureDesc computeSize computeSize)
+      load (TextureDescAsset (textureDesc computeSize computeSize)
         { texUsage = [TextureSampled, TextureStorageRead, TextureStorageWrite]
         })
 
-    texture <- load "sprite" (TextureAsset "assets/sprite.bmp")
-    font <- load "font" (FontAsset "assets/Inter/Inter-VariableFont_opsz,wght.ttf" 28)
-    ambience <- load "ambience" (MusicAsset "assets/ambience - air conditioner.wav")
-    ambienceAlt <- load "ambience alt" (MusicAsset "assets/ambience - car sedan idling.wav")
-    sfx <- load "air duster" (ChunkAsset "assets/air duster 7.wav")
+    texture <- load (TextureAsset "assets/sprite.bmp")
+    font <- load (FontAsset "assets/Inter/Inter-VariableFont_opsz,wght.ttf" 28)
+    ambience <- load (MusicAsset "assets/ambience - air conditioner.wav")
+    ambienceAlt <- load (MusicAsset "assets/ambience - car sedan idling.wav")
+    sfx <- load (ChunkAsset "assets/air duster 7.wav")
 
     sampler <-
-      load "sampler" (SamplerAsset defaultSamplerDesc
+      load (SamplerAsset defaultSamplerDesc
         { samplerAddressU = SamplerRepeat
         , samplerAddressV = SamplerRepeat
         , samplerAddressW = SamplerRepeat
         })
 
-    shader2d <- load "shader2d" (Shader2DAsset (shaderSpirv demoShader) (ShaderCounts 0 0 0 1))
-    shader2dCombo <- load "shader2d combo" (Shader2DAsset (shaderSpirv comboShader) (ShaderCounts 2 0 0 0))
+    shader2d <- load (ReflectedShader2DAsset (shaderSpirv demoShader) demoLayout)
+    shader2dCombo <- load (ReflectedShader2DAsset (shaderSpirv comboShader) comboLayout)
     let noiseSize = 512
     let noiseSettings =
           loopNoise2D noiseSize noiseSize
@@ -228,7 +229,7 @@ main = do
               , noiseScale = 16
               , noiseOctaves = 4
               }
-    noiseTex <- load "noise" (NoiseTexture2DAsset noiseSize noiseSize noiseSettings)
+    noiseTex <- load (NoiseTexture2DAsset noiseSize noiseSize noiseSettings)
     let volumeSize = 160
     let volumeSettings =
           loopNoise3D volumeSize volumeSize volumeSize
@@ -238,22 +239,22 @@ main = do
               , noiseOctaves = 5
               , noiseGain = 0.55
               }
-    noiseVolume <- load "noise3d" (NoiseTexture3DAsset volumeSize volumeSize volumeSize volumeSettings)
+    noiseVolume <- load (NoiseTexture3DAsset volumeSize volumeSize volumeSize volumeSettings)
     noiseSliceTex <-
-      load "noise slice" (TextureDescAsset (textureDesc volumeSize volumeSize)
+      load (TextureDescAsset (textureDesc volumeSize volumeSize)
         { texUsage = [TextureSampled, TextureStorageRead, TextureStorageWrite]
         })
 
     blend <- createTrackPool PoolBlend 2
     sfxPool <- createTrackPool PoolRoundRobin 8
-    _ <- runLoop (crossfadeToLoop blend ambience 0)
+    _ <- crossfadeToLoop blend ambience 0
 
     let groupsX = fromIntegral ((computeSize + 7) `div` 8) :: Word32
     let groupsY = fromIntegral ((computeSize + 7) `div` 8) :: Word32
     let computeGroups = (groupsX, groupsY, 1)
     let sliceGroups = (fromIntegral ((volumeSize + 7) `div` 8), fromIntegral ((volumeSize + 7) `div` 8), 1 :: Word32)
-    let fx = spriteEffect shader2d []
-    let fxCombo = spriteEffect shader2dCombo [ShaderSamplerWith 1 noiseTex sampler]
+    fx <- spriteEffectNamed shader2d []
+    fxCombo <- spriteEffectNamed shader2dCombo [NamedSamplerWith "noiseTex" noiseTex sampler]
 
     _ <- loop (0 :: Int) $ \frame active -> do
       let (winWInt, winHInt) = frame.renderSize
@@ -280,6 +281,8 @@ main = do
               <> storageTexture @"out_tex" (toStorageHandle noiseSliceTex)
               <> uniform @"params" sliceParams
           )
+      computeBindings <- either throwSlop pure (computeBindingsFromInputs computeLayout computeInputs)
+      sliceBindings <- either throwSlop pure (computeBindingsFromInputs sliceLayout sliceInputs)
 
       let scene =
             pass $ mconcat
@@ -302,8 +305,8 @@ main = do
               ]
 
       let pipeline =
-            compute computePipe (computeBindingsFrom computeInputs) computeGroups
-              *> compute slicePipe (computeBindingsFrom sliceInputs) sliceGroups
+            compute computePipe computeBindings computeGroups
+              *> compute slicePipe sliceBindings sliceGroups
               *> outputOf scene Nothing winRect
 
       active' <- if keyPressed KeyB frame.input
@@ -317,7 +320,7 @@ main = do
 
       _ <- if keyPressed keySpace frame.input
         then playPool sfxPool sfx
-        else pure False
+        else pure ()
 
       render frame.renderSize pipeline
       pure (Continue active')
@@ -342,19 +345,82 @@ storageTextureFromHandle (StorageTextureHandle value) =
     , textureDepth = 1
     }
 
-computeUniformBytesFor :: Word32 -> [UniformSlot] -> [ComputeBinding]
-computeUniformBytesFor group slots =
-  [ computeUniformBytes binding bytes
-  | UniformSlot g binding bytes <- slots
-  , g == group
-  ]
+throwSpirdoError :: T.Text -> T.Text -> String -> WindowM a
+throwSpirdoError operation shaderName detail =
+  throwSlop (SlopShaderFailure operation shaderName Nothing (T.pack detail))
 
-computeBindingsFrom :: ShaderInputs iface -> [ComputeBinding]
-computeBindingsFrom inputs =
-  let uniforms = computeUniformBytesFor 2 (uniformSlots inputs)
-      storage =
-        [ ComputeStorageTextureRW entry.storageTextureBinding (storageTextureFromHandle entry.storageTextureHandle)
-        | entry <- inputs.siStorageTextures
-        , entry.storageTextureGroup == 1
-        ]
-  in uniforms <> storage
+reflectionFromPrepared :: T.Text -> W.PreparedShader iface -> SlopResult ReflectedShaderLayout
+reflectionFromPrepared shaderName prepared = do
+  bindings <- mapM (reflectedBinding shaderName) prepared.psPlan.bpBindings
+  shaderLayoutFromReflection shaderName (reflectedStage prepared.psStage) bindings
+
+reflectedStage :: W.ShaderStage -> ShaderStage
+reflectedStage stage =
+  case stage of
+    W.ShaderStageFragment -> ShaderFragment
+    W.ShaderStageVertex -> ShaderVertex
+    W.ShaderStageCompute -> ShaderCompute
+
+reflectedBinding :: T.Text -> W.BindingInfo -> SlopResult ReflectedBinding
+reflectedBinding shaderName binding = do
+  bindingType <- reflectedBindingType shaderName binding
+  pure ReflectedBinding
+    { reflectedName = T.pack binding.biName
+    , reflectedGroup = binding.biGroup
+    , reflectedSlot = binding.biBinding
+    , reflectedType = bindingType
+    }
+
+reflectedBindingType :: T.Text -> W.BindingInfo -> SlopResult ReflectedBindingType
+reflectedBindingType shaderName binding
+  | W.isUniformKind binding.biKind =
+      case uniformLayoutSize binding.biType of
+        Just byteSize -> Right (ReflectedUniform byteSize)
+        Nothing -> Left (unsupported "uniform reflection did not contain a host-shareable byte size")
+  | W.isSamplerKind binding.biKind = Right ReflectedSampler
+  | W.isTextureKind binding.biKind = Right ReflectedSampledTexture
+  | W.isStorageBufferKind binding.biKind = Right ReflectedStorageBuffer
+  | W.isStorageTextureKind binding.biKind =
+      ReflectedStorageTexture <$> reflectedStorageAccess binding.biType
+  | otherwise = Left (unsupported "binding kind is not supported")
+  where
+    unsupported detail =
+      SlopShaderFailure "reflect shader" shaderName (Just (T.pack binding.biName)) detail
+
+reflectedStorageAccess :: W.TypeLayout -> SlopResult ReflectedStorageAccess
+reflectedStorageAccess bindingType =
+  case bindingType of
+    W.TLStorageTexture1D _ access -> fromSpirdoAccess access
+    W.TLStorageTexture2D _ access -> fromSpirdoAccess access
+    W.TLStorageTexture2DArray _ access -> fromSpirdoAccess access
+    W.TLStorageTexture3D _ access -> fromSpirdoAccess access
+    _ -> Left (SlopShaderFailure "reflect shader" "unknown" Nothing "storage texture binding has a non-storage type")
+  where
+    fromSpirdoAccess W.StorageRead = Right ReflectedReadOnly
+    fromSpirdoAccess W.StorageWrite = Right ReflectedReadWrite
+    fromSpirdoAccess W.StorageReadWrite = Right ReflectedReadWrite
+
+uniformLayoutSize :: W.TypeLayout -> Maybe Int
+uniformLayoutSize bindingType =
+  case bindingType of
+    W.TLScalar _ _ byteSize -> Just (fromIntegral byteSize)
+    W.TLVector _ _ _ byteSize -> Just (fromIntegral byteSize)
+    W.TLMatrix _ _ _ _ byteSize _ -> Just (fromIntegral byteSize)
+    W.TLArray _ _ _ _ byteSize -> Just (fromIntegral byteSize)
+    W.TLStruct _ _ _ byteSize -> Just (fromIntegral byteSize)
+    _ -> Nothing
+
+computeBindingsFromInputs :: ReflectedShaderLayout -> ShaderInputs iface -> SlopResult [ComputeBinding]
+computeBindingsFromInputs layout inputs =
+  computeBindingsFromReflection layout (uniforms <> storageTextures)
+  where
+    uniforms =
+      [ ComputeUniformBytesNamed (T.pack entry.uiName) entry.uiBytes
+      | entry <- orderedUniforms inputs
+      ]
+    storageTextures =
+      [ ComputeStorageTextureRWNamed
+          (T.pack entry.storageTextureName)
+          (storageTextureFromHandle entry.storageTextureHandle)
+      | entry <- inputs.siStorageTextures
+      ]
