@@ -25,12 +25,12 @@ module Slop.Resource
   , loadAsset
   , loadAssetResult
   , loadAssetAsync
+  , processMainAssets
   , awaitAsset
   , awaitAssetResult
   , awaitAssetUpdate
   , awaitAssetUpdateResult
   , getAsset
-  , getAssetReady
   , assetReady
   , getAssetStatus
   , removeAsset

@@ -1,11 +1,10 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE NoFieldSelectors #-}
-{-# LANGUAGE OverloadedRecordDot #-}
 
 module Slop.Pipeline
   ( TargetRef(..)
   , RenderPlan
-  , PlanM(..)
+  , PlanM
   , PassM
   , Pipeline
   , plan
@@ -14,7 +13,6 @@ module Slop.Pipeline
   , runPlan
   , runPipeline
   , fork
-  , join
   , passTo
   , into
   , output
@@ -84,9 +82,6 @@ runPipeline = runPlan . pipeline
 fork :: Pipeline a -> Pipeline b -> Pipeline (a, b)
 fork (Pipeline left) (Pipeline right) =
   Pipeline (liftA2 (,) left right)
-
-join :: RenderTarget -> [RenderTarget] -> Maybe FRect -> FRect -> Pipeline RenderTarget
-join = merge
 
 passTo :: TargetRef -> PassM a -> Pipeline a
 passTo targetRef ops = Pipeline (pass targetRef ops)

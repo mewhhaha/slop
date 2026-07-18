@@ -21,17 +21,16 @@ module Slop.Draw2D
   , RectOutline(..)
   , RectFill(..)
   , Sprite(..)
-  , SpriteEffect(..)
+  , SpriteEffect
   , spriteEffect
   , spriteEffectNamed
   , Label(..)
-  , TextDraw(..)
+  , TextDraw
   , text
   , textWith
   , TextStyle(..)
   , TextStylePatch(..)
   , defaultTextStyle
-  , textStyle
   , textColor
   , textShader
   , textBlend

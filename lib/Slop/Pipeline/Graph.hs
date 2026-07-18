@@ -22,7 +22,6 @@ module Slop.Pipeline.Graph
   , output
   , outputOf
   , fork
-  , join
   , linear
   , renderPlan
   , render
@@ -150,9 +149,6 @@ outputOf input src dst =
 fork :: Graph a -> Graph b -> Graph (a, b)
 fork (Graph left) (Graph right) =
   Graph (liftA2 (,) left right)
-
-join :: [Node] -> Maybe FRect -> FRect -> Graph Node
-join = merge
 
 linear :: Node -> [(Shader, [ShaderUniform])] -> Maybe FRect -> FRect -> Graph Node
 linear start passes src dst =

@@ -17,3 +17,5 @@
 * Fixed 3D view/projection matrices to use the CPU matrix representation and SDL_gpu's left-handed `0..1` clip space.
 * Hardened asset cleanup, async exception handling, and SDL_ttf draw-data validation.
 * Added the shader generator as a checked Cabal component and removed unused template and demo asset files.
+* Breaking: removed exact API aliases and the fragment-only `ShaderBinding` layer; use the canonical `getAsset`, `output`, `computePipeline`, `merge`, `defaultTextStyle`, fragment shader, `TrackPool`, and `ShaderUniform` APIs. Pipeline writer and single-path wrapper constructors are now abstract.
+* Breaking: removed the mutable uniform-cache API, which did not avoid draw-time uploads; pass `ShaderUniform` values explicitly at the draw or pass boundary.

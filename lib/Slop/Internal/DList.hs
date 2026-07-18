@@ -1,5 +1,5 @@
 module Slop.Internal.DList
-  ( DList(..)
+  ( DList
   , singleton
   , toList
   ) where
