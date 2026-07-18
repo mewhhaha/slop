@@ -1845,42 +1845,47 @@ finishLoad app stateVar assetId spec result _ = case result of
 
 finishReload :: forall spec. AssetLoader spec => Window -> TVar ManagerState -> Int -> spec -> SlopResult (AssetType spec) -> Maybe (TMVar (SlopResult ())) -> IO ()
 finishReload app stateVar assetId spec result notify = case result of
-  Left err -> do
-    atomically $ do
-      case notify of
-        Nothing -> pure ()
-        Just var -> void (tryPutTMVar var (Left err))
+  Left err -> completeReload (Left err)
   Right asset -> do
     let dyn = toDyn asset
     let finalizer = unloadAssetIO app spec asset
     let typ = typeOf asset
-    (_replaced, oldFinalizer, missing) <- atomically $ do
+    (oldFinalizer, missing) <- atomically $ do
       st <- readTVar stateVar
       case IntMap.lookup assetId (st.msAssets) of
-        Nothing -> pure (False, Nothing, True)
+        Nothing -> pure (Nothing, True)
         Just slot@AssetSlot { slotState = SlotReady _ oldFin } -> do
           let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
           writeTVar stateVar st { msAssets = IntMap.insert assetId slot' (st.msAssets) }
-          pure (True, Just oldFin, False)
+          pure (Just oldFin, False)
         Just slot@AssetSlot { slotState = SlotFailed _ } -> do
           let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
           writeTVar stateVar st { msAssets = IntMap.insert assetId slot' (st.msAssets) }
-          pure (True, Nothing, False)
+          pure (Nothing, False)
         Just slot@AssetSlot { slotState = SlotLoading _ } -> do
           let slot' = slot { slotType = typ, slotState = SlotReady dyn finalizer }
           writeTVar stateVar st { msAssets = IntMap.insert assetId slot' (st.msAssets) }
-          pure (True, Nothing, False)
+          pure (Nothing, False)
     if missing
       then do
-        finalizer
-        atomically $ case notify of
-          Nothing -> pure ()
-          Just var -> void (tryPutTMVar var (Left (SlopAssetFailure "reload" ("#" <> T.pack (show assetId)) "asset not found")))
+        cleanupResult <- runFinalizer finalizer
+        case cleanupResult of
+          Left err -> completeReload (Left err)
+          Right () -> case notify of
+            Nothing -> pure ()
+            Just _ -> completeReload (Left (SlopAssetFailure "reload" ("#" <> T.pack (show assetId)) "asset not found"))
       else do
-        maybe (pure ()) id oldFinalizer
-        atomically $ case notify of
-          Nothing -> pure ()
-          Just var -> void (tryPutTMVar var (Right ()))
+        cleanupResult <- maybe (pure (Right ())) runFinalizer oldFinalizer
+        completeReload cleanupResult
+  where
+    runFinalizer finalizer =
+      first (exceptionAssetError "reload cleanup" (assetLabel spec)) <$> trySyncException finalizer
+
+    completeReload reloadResult = case notify of
+      Just var -> atomically (void (tryPutTMVar var reloadResult))
+      Nothing -> case reloadResult of
+        Left err -> hPutStrLn stderr ("slop asset reload failed: " <> T.unpack (renderSlopError err))
+        Right () -> pure ()
 
 registerLoading :: forall a. Typeable a => AssetManager -> IO (AssetId a, TMVar (SlopResult ()))
 registerLoading mgr = atomically $ do
