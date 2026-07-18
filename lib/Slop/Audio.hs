@@ -1,3 +1,4 @@
+-- | SDL_mixer playback, reusable track pools, priorities, and crossfades.
 module Slop.Audio
   ( Audio(..)
   , MusicAsset(..)

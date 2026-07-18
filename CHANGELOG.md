@@ -38,3 +38,4 @@
 * Configure audio loops as part of starting playback, rather than mutating a track after playback has already begun.
 * Verify every hand-written SDL struct binding against native header sizes and alignments in the test suite.
 * Include the demo's font, texture, audio, and asset-license files in source distributions.
+* Document the purpose of each public module and the layout contracts of the foundational math and generic `Storable` APIs.

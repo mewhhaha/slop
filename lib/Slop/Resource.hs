@@ -1,3 +1,4 @@
+-- | Direct and asynchronous resource loading with explicit status and cleanup.
 module Slop.Resource
   ( Resource(..)
   , withResource

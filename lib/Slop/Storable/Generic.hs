@@ -1,6 +1,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
+-- | Derive C-like 'Storable' layout operations for single-constructor product
+-- types. Every field must be 'Storable'; sum types are intentionally excluded.
 module Slop.Storable.Generic
   ( GStorable(..)
   , alignUp
@@ -14,6 +16,7 @@ import Data.Proxy (Proxy(..))
 import Foreign
 import GHC.Generics (Generic, (:*:)(..), K1(..), M1(..), Rep, U1(..), from, to)
 
+-- | 'Storable' operations over a 'Generic' representation.
 class GStorable f where
   gSizeOf :: Proxy f -> Int
   gAlignment :: Proxy f -> Int
@@ -55,21 +58,26 @@ instance Storable a => GStorable (K1 i a) where
   gPeek ptr = K1 <$> peek (castPtr ptr)
   gPoke ptr (K1 a) = poke (castPtr ptr) a
 
+-- | Round a byte size up to the next multiple of a positive alignment.
 alignUp :: Int -> Int -> Int
 alignUp size align =
   ((size + align - 1) `div` align) * align
 
+-- | Calculate the padded size of a product type from its generic fields.
 genericSizeOf :: forall a. (Generic a, GStorable (Rep a)) => Proxy a -> Int
 genericSizeOf _ =
   let size = gSizeOf (Proxy @(Rep a))
       align = gAlignment (Proxy @(Rep a))
   in alignUp size align
 
+-- | Calculate the strictest field alignment in a product type.
 genericAlignment :: forall a. (Generic a, GStorable (Rep a)) => Proxy a -> Int
 genericAlignment _ = gAlignment (Proxy @(Rep a))
 
+-- | Read a product value using its generically calculated field offsets.
 genericPeek :: forall a. (Generic a, GStorable (Rep a)) => Ptr a -> IO a
 genericPeek ptr = to <$> gPeek (castPtr ptr)
 
+-- | Write a product value using its generically calculated field offsets.
 genericPoke :: forall a. (Generic a, GStorable (Rep a)) => Ptr a -> a -> IO ()
 genericPoke ptr value = gPoke (castPtr ptr) (from value)

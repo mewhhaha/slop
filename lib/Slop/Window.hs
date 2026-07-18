@@ -1,3 +1,4 @@
+-- | Window configuration, lifecycle, frame iteration, and structured errors.
 module Slop.Window
   ( Config(..)
   , ConfigPatch(..)

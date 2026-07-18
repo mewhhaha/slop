@@ -1,3 +1,4 @@
+-- | Camera-aware 2D drawing contexts and built-in shapes, sprites, and text.
 module Slop.Draw2D
   ( FPoint(..)
   , FRect(..)

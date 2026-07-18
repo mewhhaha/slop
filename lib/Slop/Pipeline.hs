@@ -1,6 +1,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
+-- | Pass-oriented render plans with explicit intermediate render targets.
 module Slop.Pipeline
   ( TargetRef(..)
   , RenderPlan

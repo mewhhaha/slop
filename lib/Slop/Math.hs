@@ -1,5 +1,7 @@
 {-# LANGUAGE NoFieldSelectors #-}
 
+-- | Small strict vector and row-major matrix types used by Slop's CPU and GPU
+-- APIs. Float vectors and matrices have packed 'Storable' representations.
 module Slop.Math
   ( V2(..)
   , V3(..)
@@ -17,12 +19,16 @@ module Slop.Math
 import Foreign.C.Types (CFloat)
 import Foreign.Storable (Storable(..))
 
+-- | A strict two-component vector.
 data V2 a = V2 !a !a deriving (Eq, Show)
 
+-- | A strict three-component vector.
 data V3 a = V3 !a !a !a deriving (Eq, Show)
 
+-- | A strict four-component vector.
 data V4 a = V4 !a !a !a !a deriving (Eq, Show)
 
+-- | A strict row-major 4-by-4 matrix.
 data M44 a
   = M44 !a !a !a !a
          !a !a !a !a
@@ -30,15 +36,19 @@ data M44 a
          !a !a !a !a
   deriving (Eq, Show)
 
+-- | Convert a pair to a two-component vector.
 v2 :: (a, a) -> V2 a
 v2 (x, y) = V2 x y
 
+-- | Convert a triple to a three-component vector.
 v3 :: (a, a, a) -> V3 a
 v3 (x, y, z) = V3 x y z
 
+-- | Convert a four-tuple to a four-component vector.
 v4 :: (a, a, a, a) -> V4 a
 v4 (x, y, z, w) = V4 x y z w
 
+-- | Common dot product, length, and normalization operations.
 class Vector v where
   dot :: Num a => v a -> v a -> a
   len :: Floating a => v a -> a
@@ -122,10 +132,12 @@ instance Vector V4 where
         inv = if l == 0 then 1 else 1 / l
     in V4 (x*inv) (y*inv) (z*inv) (w*inv)
 
+-- | Compute the right-handed cross product of two three-component vectors.
 v3Cross :: Num a => V3 a -> V3 a -> V3 a
 v3Cross (V3 ax ay az) (V3 bx by bz) =
   V3 (ay*bz - az*by) (az*bx - ax*bz) (ax*by - ay*bx)
 
+-- | Construction and transformation operations for 4-by-4 float matrices.
 class Matrix4 m where
   identity :: m Float
   transpose :: m Float -> m Float
@@ -135,6 +147,7 @@ class Matrix4 m where
   perspective :: Float -> Float -> Float -> Float -> m Float
   lookAt :: V3 Float -> V3 Float -> V3 Float -> m Float
 
+-- | Multiply a row-major matrix by a column vector.
 m44MulV4 :: M44 Float -> V4 Float -> V4 Float
 m44MulV4 (M44 m00 m01 m02 m03
                    m10 m11 m12 m13

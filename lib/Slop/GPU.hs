@@ -1,5 +1,6 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 
+-- | Explicit GPU resources, shaders, bindings, compute work, and 3D drawing.
 module Slop.GPU
   ( Texture(..)
   , TextureUsage(..)

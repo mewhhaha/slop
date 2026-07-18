@@ -1,3 +1,4 @@
+-- | Per-frame keyboard, mouse, text, wheel, and modifier state.
 module Slop.Input
   ( InputState(..)
   , InputFrame(..)

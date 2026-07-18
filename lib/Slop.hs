@@ -1,3 +1,5 @@
+-- | The high-level Slop API for windows, input, 2D drawing, resources, audio,
+-- and math. Import "Slop.GPU" or a pipeline module for lower-level rendering.
 module Slop
   ( module Slop.Window
   , module Slop.Input

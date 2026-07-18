@@ -8,6 +8,8 @@
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 
+-- | Low-level SDL3, SDL_gpu, SDL_image, SDL_ttf, and SDL_mixer bindings.
+-- Callers are responsible for native lifetime and thread-safety requirements.
 module Slop.SDL.Raw
   ( SDL_InitFlags
   , SDL_WindowFlags

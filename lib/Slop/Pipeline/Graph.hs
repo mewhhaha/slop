@@ -2,6 +2,7 @@
 {-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
+-- | A render-graph DSL that allocates, resizes, and prunes node targets.
 module Slop.Pipeline.Graph
   ( Node
   , Graph
