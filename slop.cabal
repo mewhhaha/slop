@@ -32,12 +32,19 @@ flag demo
 library
     import:           warnings
     exposed-modules:  Slop
+                      Slop.Window
+                      Slop.Input
+                      Slop.Draw2D
+                      Slop.Resource
+                      Slop.GPU
+                      Slop.Audio
                       Slop.Math
                       Slop.SDL.Raw
                       Slop.Pipeline
                       Slop.Pipeline.Graph
                       Slop.Storable.Generic
-    other-modules:    Slop.Internal.DList
+    other-modules:    Slop.Internal
+                      Slop.Internal.DList
     -- other-extensions:
     build-depends:
         base ^>=4.21.0.0,
@@ -75,4 +82,15 @@ executable slop
         sdl3-mixer
 
     hs-source-dirs:   exe
+    default-language: GHC2024
+
+test-suite slop-test
+    import:           warnings
+    type:             exitcode-stdio-1.0
+    main-is:          Main.hs
+    build-depends:
+        base ^>=4.21.0.0,
+        slop,
+        text
+    hs-source-dirs:   test
     default-language: GHC2024

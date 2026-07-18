@@ -1,0 +1,28 @@
+module Slop.Input
+  ( InputState(..)
+  , InputFrame(..)
+  , InputEvent(..)
+  , Modifiers(..)
+  , inputPrev
+  , inputNow
+  , inputText
+  , inputWheel
+  , inputMods
+  , inputEvents
+  , Key(..)
+  , MouseButton(..)
+  , mouseLeft
+  , mouseMiddle
+  , mouseRight
+  , mouseX1
+  , mouseX2
+  , keySpace
+  , keyDown
+  , keyPressed
+  , keyReleased
+  , mouseButtonDown
+  , mouseButtonPressed
+  , mouseButtonReleased
+  ) where
+
+import Slop.Internal

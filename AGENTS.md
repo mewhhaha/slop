@@ -14,7 +14,10 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 ## Layout
 
 - `slop.cabal` — package metadata (library + demo executable).
-- `lib/Slop.hs` — public API (window/loop, rendering, assets, audio pools).
+- `lib/Slop.hs` — small public facade for windowing, input, 2D drawing, resources, audio, and math.
+- `lib/Slop/{Window,Input,Draw2D,Resource,Audio}.hs` — focused high-level public modules.
+- `lib/Slop/GPU.hs` — opt-in advanced GPU and shader API.
+- `lib/Slop/Internal.hs` — shared implementation; not part of the supported public API.
 - `lib/Slop/Math.hs` — vector/matrix types and math helpers.
 - `lib/Slop/SDL/Raw.hs` — raw FFI bindings for SDL3 + SDL_gpu + SDL3_image/ttf/mixer.
 - `lib/Slop/Pipeline.hs` — explicit render targets + pass-based pipeline helpers.
@@ -26,10 +29,8 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 
 ## Core Concepts
 
-- `WindowM` is the main application monad. `runWindow` sets up SDL, GPU device + swapchain, mixer, and the asset manager.
-- `Loop` is the rendering monad used inside the frame loop.
-- `loop :: a -> (Frame -> a -> Loop (LoopControl a)) -> WindowM (LoopExit a)` is the main driver.
-- `runLoop :: Loop a -> WindowM a` runs Loop actions inside WindowM (useful for asset setup).
+- `WindowM` is the application and frame monad. `runWindow` sets up SDL, GPU device + swapchain, mixer, and the asset manager.
+- `loop :: a -> (Frame -> a -> WindowM (LoopControl a)) -> WindowM (LoopExit a)` is the main driver.
 - Use `ConfigPatch` + `applyConfigPatch` to compose config overrides with a `Monoid`.
 
 ## Rendering (SDL_gpu)
@@ -37,7 +38,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 - Backend uses `SDL_CreateGPUDevice` + `SDL_ClaimWindowForGPUDevice`; commands are recorded and submitted per frame.
 - `RenderTarget` is a GPU texture target. Use `createRenderTarget` / `destroyTarget`.
 - `createTexture2D` + `TextureDesc` are the high-level path for compute/sample targets in demos.
-- `render target (Loop ())` sets the current render target; `output` blits to the swapchain.
+- `render target (WindowM ())` sets the current render target; `output` blits to the swapchain.
 - The Graph DSL (`Slop.Pipeline.Graph`) manages render targets per node and resizes them when the window size changes.
 - Custom pipelines use `Pipeline` + `Mesh` + `Binding` via `drawMesh`. `spritePipeline` + `spriteMeshTransient` are the simple path.
 - `draw` now takes a context: use `draw (basic2D cam) ...` for built-in shapes/sprites/text, `draw (basicUIWith shader uniforms) ...` for standard pipeline shader swaps, or `draw (asMesh pipe bindings) mesh` (`basicUI`, `basicParticle` are blend-mode variants; `basic3D` is a mesh-only 3D pipeline with `Mesh3D` + model matrix).
@@ -48,12 +49,14 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 - `SlopGlobals` uniform (slot 0) is auto-bound for fragment shaders with uniform buffers (time, renderSize, dpiScale). Fragment uniforms live in SPIR-V `@group(3)`, samplers/textures in `@group(2)`.
 - Declarative pipeline builders: `defaultGraphics`/`graphicsPipeline` and `defaultCompute`/`computePipeline`.
 - Compute pipelines use `computePipeline` + `dispatchCompute`, or `compute` steps inside the graph DSL.
+- Directly created textures, fonts, shaders, pipelines, meshes, samplers, text, and audio tracks are released by `runWindow` in reverse acquisition order. Explicit destroy functions remain available for shorter lifetimes.
 
 ## Bindings
 
 - `Binding`/`ComputeBinding` are stage-aware for custom pipelines (`vUniformBytes`, `fSamplerWith`, `computeStorageTextureRW`, etc).
+- Prefer reflected shader layouts and named bindings. Reflection validates descriptor groups, duplicate declarations, missing names, binding kinds, and uniform sizes before GPU submission.
 - Legacy `ShaderUniform` helpers are fragment-only and auto-bind the draw texture at sampler slot 0.
-- `ShaderBindings`/`NamedUniform` still resolve for the legacy fragment helper.
+- Positional `ShaderCounts` and slot-based bindings remain available in `Slop.GPU` for shaders without reflection.
 
 ## Text
 
@@ -72,6 +75,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 ## Assets
 
 - Asset manager runs on a background thread. Use `loadAssetAsync` + `awaitAsset`.
+- `loadAsset`, `awaitAsset`, and `awaitAssetUpdate` throw `SlopError`; their `*Result` variants expose recoverable failures without exceptions.
 - GPU-backed assets (textures, GPU text, shaders, pipelines, samplers) are loaded on the main thread even when using `loadAssetAsync`.
 - `loadAssetAsync` for main-thread assets queues work; `loop` calls `processMainAssets` each frame to service it.
 - Shader/pipeline asset specs: `ShaderAsset`, `VertexShaderAsset`, `ComputePipelineAsset`, `PipelineAsset`, `SamplerAsset`.
@@ -88,11 +92,11 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 
 - Spirdo is used only by the demo/tools. `cabal.project` pins the git revision.
 - Shader sources in the demo/tools should include `// spirdo:sampler=combined` (combined sampler ABI for Slop).
-- The demo (`exe/Main.hs`) contains the Spirdo adapter helpers (binding conversions + shader counts).
+- The demo (`exe/Main.hs`) converts Spirdo reflection into Slop layouts and resolves bindings by name.
 
 ## Notes
 
-- Default shader SPIR-V bytes live in `lib/Slop.hs` (`defaultVertexSpirv`, `defaultFragmentSpirv`).
+- Default shader SPIR-V bytes live in `lib/Slop/Internal.hs` (`defaultVertexSpirv`, `defaultFragmentSpirv`).
 - Regenerate them via `tools/spirv-gen.hs`.
 
 ## Pause Notes (What I Need To Continue)
