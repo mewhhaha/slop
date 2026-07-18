@@ -179,6 +179,10 @@ tex <- createTexture2DSize size
 rt <- createRenderTargetSize size
 ```
 
+The convenience constructors clamp non-positive values to `1`. Use
+`mkSize2D`, `mkSize3D`, `mkThreads2D`, or `mkThreads3D` when invalid input
+must be rejected instead.
+
 ## Standard Pipelines
 
 Slop ships with standard pipelines; most code should use these:
@@ -203,6 +207,7 @@ mesh <- createMesh3D vertices
 draw (basic3D cam) (mesh3D mesh identity [])
 ```
 
+The 3D helpers follow SDL_gpu's left-handed coordinate system and `0..1` depth range.
 `Vertex3D` layout: `vec4 position`, `vec2 uv`, `vec4 color`.
 
 ## Game Recipes
@@ -812,3 +817,9 @@ Don't:
 
 See `exe/Main.hs` for a single demo that combines: pipeline graph, sprites, text,
 custom shaders, compute, and audio pools.
+
+Regenerate the embedded default shader byte lists with:
+
+```sh
+cabal run -f demo slop-spirv-gen
+```

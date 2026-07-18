@@ -179,20 +179,20 @@ instance Matrix4 M44 where
     in M44
         (t / aspect) 0 0 0
         0 t 0 0
-        0 0 (f / fn) 1
-        0 0 ((-n * f) / fn) 0
+        0 0 (f / fn) ((-n * f) / fn)
+        0 0 1 0
   lookAt eye target up =
     let f = normalize (target - eye)
-        s = normalize (v3Cross f up)
-        u = v3Cross s f
+        s = normalize (v3Cross up f)
+        u = v3Cross f s
         V3 sx sy sz = s
         V3 ux uy uz = u
         V3 fx fy fz = f
     in M44
-        sx ux (-fx) 0
-        sy uy (-fy) 0
-        sz uz (-fz) 0
-        (-dot s eye) (-dot u eye) (dot f eye) 1
+        sx sy sz (-dot s eye)
+        ux uy uz (-dot u eye)
+        fx fy fz (-dot f eye)
+        0 0 0 1
 
 instance Num a => Num (M44 a) where
   (+) (M44 a00 a01 a02 a03

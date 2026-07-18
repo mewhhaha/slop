@@ -6,19 +6,19 @@ module Slop.GPU
   , TextureDesc(..)
   , textureDesc
   , textureDescSize
-  , Positive(..)
+  , Positive
   , mkPositive
   , positive
-  , Size2D(..)
-  , Size3D(..)
+  , Size2D
+  , Size3D
   , mkSize2D
   , mkSize3D
   , size2D
   , size3D
   , size2DToTuple
   , size3DToTuple
-  , Threads2D(..)
-  , Threads3D(..)
+  , Threads2D
+  , Threads3D
   , mkThreads2D
   , mkThreads3D
   , threads2D

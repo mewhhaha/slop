@@ -1,8 +1,8 @@
 # Revision history for slop
 
-## 0.1.0.0 -- YYYY-mm-dd
+## 0.1.0.0 -- Unreleased
 
-* First version. Released on an unsuspecting world.
+* Initial release.
 * Breaking: `TextStyle.textEffect` renamed to `textShader`; `textEffect`/`patchTextEffect` helpers renamed to `textShader`/`patchTextShader`.
 * Breaking: sprite/text override shaders are now `Shader2D`/`Shader2DAsset` (renamed from EffectShader). `SpriteEffect` and `basicUIWith` now take `Shader2D`.
 * Added `NoiseSimplex` and `NoiseSimplex2` GPU noise modes.
@@ -13,3 +13,7 @@
 * Added reflected shader layouts and named uniform/compute bindings, including declaration, group, kind, and size validation.
 * Directly created GPU, text, and audio resources are released automatically by `runWindow` in reverse acquisition order.
 * Added GHC 9.14 support and updated the demo to Spirdo 0.2's compile-time shader API.
+* Breaking: `AssetId`, `Positive`, size, and thread-count constructors are now abstract so callers cannot forge invalid values.
+* Fixed 3D view/projection matrices to use the CPU matrix representation and SDL_gpu's left-handed `0..1` clip space.
+* Hardened asset cleanup, async exception handling, and SDL_ttf draw-data validation.
+* Added the shader generator as a checked Cabal component and removed unused template and demo asset files.

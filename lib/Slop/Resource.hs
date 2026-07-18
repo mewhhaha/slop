@@ -12,7 +12,7 @@ module Slop.Resource
   , closeFont
   , createText
   , destroyText
-  , AssetId(..)
+  , AssetId
   , AnyAssetId(..)
   , AssetStatus(..)
   , AssetUpdate

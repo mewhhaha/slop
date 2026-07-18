@@ -97,7 +97,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 ## Notes
 
 - Default shader SPIR-V bytes live in `lib/Slop/Internal.hs` (`defaultVertexSpirv`, `defaultFragmentSpirv`).
-- Regenerate them via `tools/spirv-gen.hs`.
+- Regenerate them via `cabal run -f demo slop-spirv-gen`.
 
 ## Pause Notes (What I Need To Continue)
 
