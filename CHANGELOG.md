@@ -32,3 +32,4 @@
 * Start replacement crossfades from the track on which the interrupted fade was settled.
 * Cancel unsubmitted GPU upload and compute command buffers when command recording fails.
 * Release failed render command buffers safely, submitting rather than cancelling after swapchain acquisition.
+* Make public SDL resource creation and ownership registration atomic against asynchronous exceptions.

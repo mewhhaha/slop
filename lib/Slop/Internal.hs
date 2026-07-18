@@ -757,6 +757,13 @@ registerOwnedResource window key release =
            , ()
            )
 
+acquireOwnedResource :: Window -> IO a -> (a -> OwnedResourceKey) -> (a -> IO ()) -> IO a
+acquireOwnedResource window acquire key release = mask_ $ do
+  resource <- acquire
+  registerOwnedResource window (key resource) (release resource)
+    `onException` release resource
+  pure resource
+
 releaseOwnedResource :: Window -> OwnedResourceKey -> IO () -> IO ()
 releaseOwnedResource window key fallback = do
   release <- atomicModifyIORef' window.appOwnedResources $ \resources ->
@@ -3837,9 +3844,10 @@ createSolidTexture device fmt width height r g b a = do
 createNoiseTexture2D :: Int -> Int -> NoiseSettings -> WindowM Texture
 createNoiseTexture2D width height settings = do
   window <- ask
-  texture <- liftIO (createNoiseTexture2DIO window width height settings)
-  liftIO (registerOwnedResource window (textureResourceKey texture) (destroyTextureIO texture))
-  pure texture
+  liftIO $ acquireOwnedResource window
+    (createNoiseTexture2DIO window width height settings)
+    textureResourceKey
+    destroyTextureIO
 
 createNoiseTexture2DSize :: Size2D -> NoiseSettings -> WindowM Texture
 createNoiseTexture2DSize size settings =
@@ -3881,9 +3889,10 @@ createNoiseTexture2DIO window width height settings = do
 createNoiseTexture3D :: Int -> Int -> Int -> NoiseSettings -> WindowM Texture
 createNoiseTexture3D width height depth settings = do
   window <- ask
-  texture <- liftIO (createNoiseTexture3DIO window width height depth settings)
-  liftIO (registerOwnedResource window (textureResourceKey texture) (destroyTextureIO texture))
-  pure texture
+  liftIO $ acquireOwnedResource window
+    (createNoiseTexture3DIO window width height depth settings)
+    textureResourceKey
+    destroyTextureIO
 
 createNoiseTexture3DSize :: Size3D -> NoiseSettings -> WindowM Texture
 createNoiseTexture3DSize size settings =
@@ -4622,16 +4631,18 @@ createTransientMeshIO window layout vertices = do
 createMesh :: Storable a => VertexLayout -> [a] -> WindowM Mesh
 createMesh layout vertices = do
   window <- ask
-  mesh <- liftIO (createMeshIO window layout vertices)
-  liftIO (registerOwnedResource window (meshResourceKey mesh) (sdlReleaseGPUBuffer window.appGPUDevice mesh.meshBuffer))
-  pure mesh
+  liftIO $ acquireOwnedResource window
+    (createMeshIO window layout vertices)
+    meshResourceKey
+    (\mesh -> sdlReleaseGPUBuffer window.appGPUDevice mesh.meshBuffer)
 
 createTransientMesh :: Storable a => VertexLayout -> [a] -> WindowM Mesh
 createTransientMesh layout vertices = do
   window <- ask
-  mesh <- liftIO (createTransientMeshIO window layout vertices)
-  liftIO (registerOwnedResource window (meshResourceKey mesh) (sdlReleaseGPUBuffer window.appGPUDevice mesh.meshBuffer))
-  pure mesh
+  liftIO $ acquireOwnedResource window
+    (createTransientMeshIO window layout vertices)
+    meshResourceKey
+    (\mesh -> sdlReleaseGPUBuffer window.appGPUDevice mesh.meshBuffer)
 
 createMesh3D :: [Vertex3D] -> WindowM Mesh
 createMesh3D vertices =
@@ -4887,17 +4898,18 @@ graphicsPipeline desc = do
 createPipeline :: VertexShader -> FragmentShader -> VertexLayout -> Primitive -> SDL_GPUTextureFormat -> BlendMode -> DepthMode -> SDL_GPUTextureFormat -> WindowM Pipeline
 createPipeline vertexShader fragmentShader layout prim fmt blendEnabled depthMode depthFormat = do
   window <- ask
-  pipelineHandle <- liftIO $
-    createGraphicsPipeline window
-      vertexShader.vertexShaderHandle
-      fragmentShader.shaderHandle
-      layout
-      (primitiveToSDL prim)
-      fmt
-      blendEnabled
-      depthMode
-      depthFormat
-  let pipeline = Pipeline
+  liftIO $ acquireOwnedResource window
+    (do
+      pipelineHandle <- createGraphicsPipeline window
+        vertexShader.vertexShaderHandle
+        fragmentShader.shaderHandle
+        layout
+        (primitiveToSDL prim)
+        fmt
+        blendEnabled
+        depthMode
+        depthFormat
+      pure Pipeline
         { pipelineHandle = pipelineHandle
         , pipelineVertex = vertexShader.vertexShaderHandle
         , pipelineFragment = fragmentShader.shaderHandle
@@ -4907,9 +4919,9 @@ createPipeline vertexShader fragmentShader layout prim fmt blendEnabled depthMod
         , pipelineBlend = blendEnabled
         , pipelineDepthMode = depthMode
         , pipelineDepthFormat = depthFormat
-        }
-  liftIO (registerOwnedResource window (pipelineResourceKey pipeline) (sdlReleaseGPUGraphicsPipeline window.appGPUDevice pipeline.pipelineHandle))
-  pure pipeline
+        })
+    pipelineResourceKey
+    (\pipeline -> sdlReleaseGPUGraphicsPipeline window.appGPUDevice pipeline.pipelineHandle)
 
 destroyPipeline :: Pipeline -> WindowM ()
 destroyPipeline pipeline = do
@@ -5130,9 +5142,10 @@ createTexture2DIO window desc = do
 createTexture2D :: TextureDesc -> WindowM Texture
 createTexture2D desc = do
   window <- ask
-  texture <- liftIO (createTexture2DIO window desc)
-  liftIO (registerOwnedResource window (textureResourceKey texture) (destroyTextureIO texture))
-  pure texture
+  liftIO $ acquireOwnedResource window
+    (createTexture2DIO window desc)
+    textureResourceKey
+    destroyTextureIO
 
 createTexture2DSize :: Size2D -> WindowM Texture
 createTexture2DSize size =
@@ -5297,9 +5310,10 @@ runPlan (RenderPlan passes) = mapM_ runPass passes
 loadTexture :: FilePath -> WindowM Texture
 loadTexture path = do
   window <- ask
-  texture <- liftIO (loadTextureIO window path)
-  liftIO (registerOwnedResource window (textureResourceKey texture) (destroyTextureIO texture))
-  pure texture
+  liftIO $ acquireOwnedResource window
+    (loadTextureIO window path)
+    textureResourceKey
+    destroyTextureIO
 
 destroyTexture :: Texture -> WindowM ()
 destroyTexture texture = do
@@ -5309,16 +5323,18 @@ destroyTexture texture = do
 loadFont :: FilePath -> Float -> WindowM Font
 loadFont path size = do
   window <- ask
-  font <- liftIO (loadFontIO path size)
-  liftIO (registerOwnedResource window (fontResourceKey font) (closeFontIO font))
-  pure font
+  liftIO $ acquireOwnedResource window
+    (loadFontIO path size)
+    fontResourceKey
+    closeFontIO
 
 loadFontSDF :: FilePath -> Float -> WindowM Font
 loadFontSDF path size = do
   window <- ask
-  font <- liftIO (loadFontSDFIO path size)
-  liftIO (registerOwnedResource window (fontResourceKey font) (closeFontIO font))
-  pure font
+  liftIO $ acquireOwnedResource window
+    (loadFontSDFIO path size)
+    fontResourceKey
+    closeFontIO
 
 closeFont :: Font -> WindowM ()
 closeFont font = do
@@ -5329,9 +5345,10 @@ closeFont font = do
 createText :: Font -> T.Text -> WindowM Text
 createText font str = do
   window <- ask
-  textObject <- liftIO (createTextIO window font str)
-  liftIO (registerOwnedResource window (textResourceKey textObject) (destroyTextIO textObject))
-  pure textObject
+  liftIO $ acquireOwnedResource window
+    (createTextIO window font str)
+    textResourceKey
+    destroyTextIO
 
 destroyText :: Text -> WindowM ()
 destroyText textObject = do
@@ -5477,7 +5494,7 @@ startTrackPlaybackIO operation window track audio loops = do
 playMusic :: Audio -> Int -> WindowM ()
 playMusic audio loops = do
   window <- ask
-  mTrack <- liftIO $ do
+  mTrack <- liftIO $ mask_ $ do
     existing <- readIORef window.appMusicTrack
     case existing of
       Just track -> pure (Just track)
@@ -5486,8 +5503,8 @@ playMusic audio loops = do
         case created of
           Nothing -> pure Nothing
           Just track -> do
-            writeIORef window.appMusicTrack (Just track)
             registerOwnedResource window (trackResourceKey track) (mixDestroyTrack track)
+            writeIORef window.appMusicTrack (Just track)
             pure (Just track)
   case mTrack of
     Nothing -> requireAudioSuccess "MIX_CreateTrack" False
@@ -5499,16 +5516,22 @@ playMusicLoop audio = playMusic audio (-1)
 playSound :: Audio -> WindowM ()
 playSound audio = do
   window <- ask
-  mTrack <- liftIO (mixCreateTrack window.appMixer)
-  case mTrack of
+  created <- liftIO $ mask_ $ do
+    mTrack <- mixCreateTrack window.appMixer
+    case mTrack of
+      Nothing -> pure Nothing
+      Just track -> do
+        released <- newMVar False `onException` mixDestroyTrack track
+        let release = modifyMVar_ released $ \alreadyReleased ->
+              if alreadyReleased
+                then pure True
+                else mixDestroyTrack track >> pure True
+        registerOwnedResource window (trackResourceKey track) release
+          `onException` release
+        pure (Just (track, released, release))
+  case created of
     Nothing -> requireAudioSuccess "MIX_CreateTrack" False
-    Just track -> do
-      released <- liftIO (newMVar False)
-      let release = modifyMVar_ released $ \alreadyReleased ->
-            if alreadyReleased
-              then pure True
-              else mixDestroyTrack track >> pure True
-      liftIO (registerOwnedResource window (trackResourceKey track) release)
+    Just (track, released, release) -> do
       liftIO $ startTrackPlaybackIO "play sound" window track audio 0
         `onException` releaseOwnedResource window (trackResourceKey track) release
       _ <- liftIO $ forkIO $ do
@@ -5550,9 +5573,11 @@ createTrackPool :: PoolPolicy -> Int -> WindowM TrackPool
 createTrackPool policy count = do
   window <- ask
   let count' = if policy == PoolBlend then max 2 count else count
-  tracks <- liftIO (createTracks window (max 0 count'))
-  liftIO $ forM_ tracks $ \track ->
-    registerOwnedResource window (trackResourceKey track) (mixDestroyTrack track)
+  tracks <- liftIO $ mask_ $ do
+    created <- createTracks window (max 0 count')
+    forM_ created $ \track ->
+      registerOwnedResource window (trackResourceKey track) (mixDestroyTrack track)
+    pure created
   createTrackPoolFrom policy tracks
   where
     createTracks _ 0 = pure []
@@ -5791,15 +5816,17 @@ trackIndex pool track =
 createTrack :: WindowM Track
 createTrack = do
   window <- ask
-  track <- liftIO (mixCreateTrack window.appMixer)
-  case track of
-    Nothing -> do
-      detail <- liftIO sdlGetError
-      let evidence = if null detail then "operation returned no track" else T.pack detail
-      throwSlop (SlopSDLFailure "MIX_CreateTrack" evidence)
-    Just created -> do
-      liftIO (registerOwnedResource window (trackResourceKey created) (mixDestroyTrack created))
-      pure created
+  liftIO $ acquireOwnedResource window
+    (do
+      created <- mixCreateTrack window.appMixer
+      case created of
+        Just track -> pure track
+        Nothing -> do
+          detail <- sdlGetError
+          let evidence = if null detail then "operation returned no track" else T.pack detail
+          throwIO (SlopSDLFailure "MIX_CreateTrack" evidence))
+    trackResourceKey
+    mixDestroyTrack
 
 destroyTrack :: Track -> WindowM ()
 destroyTrack track = do
@@ -5909,10 +5936,10 @@ defaultSamplerCreateInfo = samplerDescToCreateInfo defaultSamplerDesc
 createSampler :: SamplerDesc -> WindowM Sampler
 createSampler desc = do
   window <- ask
-  sampler <- liftIO $ require "SDL_CreateGPUSampler" (sdlCreateGPUSampler window.appGPUDevice (samplerDescToCreateInfo desc))
-  let result = Sampler sampler
-  liftIO (registerOwnedResource window (samplerResourceKey result) (sdlReleaseGPUSampler window.appGPUDevice sampler))
-  pure result
+  liftIO $ acquireOwnedResource window
+    (Sampler <$> require "SDL_CreateGPUSampler" (sdlCreateGPUSampler window.appGPUDevice (samplerDescToCreateInfo desc)))
+    samplerResourceKey
+    (\(Sampler sampler) -> sdlReleaseGPUSampler window.appGPUDevice sampler)
 
 destroySampler :: Sampler -> WindowM ()
 destroySampler (Sampler sampler) = do
@@ -6040,9 +6067,10 @@ createVertexShaderIO window spirv counts = do
 createVertexShader :: ByteString -> ShaderCounts -> WindowM VertexShader
 createVertexShader spirv counts = do
   window <- ask
-  shader <- liftIO (createVertexShaderIO window spirv counts)
-  liftIO (registerOwnedResource window (vertexShaderResourceKey shader) (sdlReleaseGPUShader shader.vertexShaderDevice shader.vertexShaderHandle))
-  pure shader
+  liftIO $ acquireOwnedResource window
+    (createVertexShaderIO window spirv counts)
+    vertexShaderResourceKey
+    (\shader -> sdlReleaseGPUShader shader.vertexShaderDevice shader.vertexShaderHandle)
 
 destroyVertexShader :: VertexShader -> WindowM ()
 destroyVertexShader shader = do
@@ -6052,9 +6080,10 @@ destroyVertexShader shader = do
 createFragmentShader :: ByteString -> ShaderCounts -> WindowM FragmentShader
 createFragmentShader spirv counts = do
   window <- ask
-  shader <- liftIO (createShaderFromSpirvWithIO window spirv counts.shaderSamplers counts.shaderStorageTextures counts.shaderStorageBuffers counts.shaderUniformBuffers)
-  liftIO (registerOwnedResource window (fragmentShaderResourceKey shader) (destroyShaderIO shader))
-  pure shader
+  liftIO $ acquireOwnedResource window
+    (createShaderFromSpirvWithIO window spirv counts.shaderSamplers counts.shaderStorageTextures counts.shaderStorageBuffers counts.shaderUniformBuffers)
+    fragmentShaderResourceKey
+    destroyShaderIO
 
 createFragmentShaderReflected :: ByteString -> ReflectedShaderLayout -> WindowM FragmentShader
 createFragmentShaderReflected spirv layout = do
@@ -6116,9 +6145,10 @@ createComputePipelineIO window desc = do
 computePipeline :: ComputeDesc -> WindowM ComputePipeline
 computePipeline desc = do
   window <- ask
-  pipeline <- liftIO (createComputePipelineIO window desc)
-  liftIO (registerOwnedResource window (computePipelineResourceKey pipeline) (sdlReleaseGPUComputePipeline pipeline.computeDevice pipeline.computeHandle))
-  pure pipeline
+  liftIO $ acquireOwnedResource window
+    (createComputePipelineIO window desc)
+    computePipelineResourceKey
+    (\pipeline -> sdlReleaseGPUComputePipeline pipeline.computeDevice pipeline.computeHandle)
 
 defaultCompute :: ComputeDesc
 defaultCompute =
