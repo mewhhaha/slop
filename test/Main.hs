@@ -6,9 +6,11 @@ module Main (main) where
 import Control.Exception (try)
 import Data.Int (Int32)
 import qualified Data.Text as T
+import Foreign.Ptr (nullPtr)
 
 import Slop
 import Slop.GPU
+import qualified Slop.SDL.Raw as SDL
 
 main :: IO ()
 main = do
@@ -28,6 +30,8 @@ main = do
   duplicateNamedUniformFailsBeforeDrawing
   wrongNamedBindingTypeFailsBeforeDrawing
   uniformSizeMismatchIsTyped
+  failedWindowSizeQueriesDoNotExposeUninitializedOutputs
+  failedRenderPresentationIsObservable
 
 basicGeometryIsBackendNeutral :: IO ()
 basicGeometryIsBackendNeutral = do
@@ -189,6 +193,18 @@ uniformSizeMismatchIsTyped =
     Left SlopShaderFailure { errorBinding = Just "3" } -> pure ()
     Left err -> fail ("expected uniform slot evidence, got " <> T.unpack (renderSlopError err))
     Right _ -> fail "uniform size mismatch was accepted"
+
+failedWindowSizeQueriesDoNotExposeUninitializedOutputs :: IO ()
+failedWindowSizeQueriesDoNotExposeUninitializedOutputs = do
+  logicalSize <- SDL.sdlGetWindowSize (SDL.Window nullPtr)
+  pixelSize <- SDL.sdlGetWindowSizeInPixels (SDL.Window nullPtr)
+  assertEqual "invalid logical window size" Nothing logicalSize
+  assertEqual "invalid pixel window size" Nothing pixelSize
+
+failedRenderPresentationIsObservable :: IO ()
+failedRenderPresentationIsObservable = do
+  presented <- SDL.sdlRenderPresent (SDL.Renderer nullPtr)
+  assertEqual "invalid renderer presentation" False presented
 
 expectRight :: SlopResult a -> IO a
 expectRight result =

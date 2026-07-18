@@ -3460,8 +3460,8 @@ runWindowIO cfg action = do
                           frameCommands <- newIORef []
                           frameShaders <- newIORef []
                           recording <- newIORef Nothing
-                          winSize <- sdlGetWindowSize win
-                          drawableSize <- sdlGetWindowSizeInPixels win
+                          winSize <- require "SDL_GetWindowSize" (sdlGetWindowSize win)
+                          drawableSize <- require "SDL_GetWindowSizeInPixels" (sdlGetWindowSizeInPixels win)
                           windowSize <- newIORef winSize
                           drawableSizeRef <- newIORef drawableSize
                           globalsUniform <- newIORef Nothing
@@ -4992,8 +4992,8 @@ loop initialState onFrame = do
         now <- liftIO sdlGetTicks
         currentInput <- liftIO readInputState
         inputMods' <- liftIO (modifiersFromKeymod <$> SDL.sdlGetModState)
-        (winW, winH) <- liftIO (sdlGetWindowSize (window.appWindow))
-        (drawW, drawH) <- liftIO (sdlGetWindowSizeInPixels (window.appWindow))
+        (winW, winH) <- liftIO (require "SDL_GetWindowSize" (sdlGetWindowSize (window.appWindow)))
+        (drawW, drawH) <- liftIO (require "SDL_GetWindowSizeInPixels" (sdlGetWindowSizeInPixels (window.appWindow)))
         liftIO (writeIORef window.appWindowSize (winW, winH))
         liftIO (writeIORef window.appDrawableSize (drawW, drawH))
         let dt = fromIntegral (now - previous) / 1000

@@ -3399,7 +3399,7 @@ foreign import ccall unsafe "SDL_RenderClear" c_SDL_RenderClear
   :: Ptr SDL_Renderer -> IO CBool
 
 foreign import ccall unsafe "SDL_RenderPresent" c_SDL_RenderPresent
-  :: Ptr SDL_Renderer -> IO ()
+  :: Ptr SDL_Renderer -> IO CBool
 
 foreign import ccall unsafe "SDL_CreateTexture" c_SDL_CreateTexture
   :: Ptr SDL_Renderer -> SDL_PixelFormat -> SDL_TextureAccess -> CInt -> CInt -> IO (Ptr SDL_Texture)
@@ -3432,8 +3432,8 @@ sdlSetRenderDrawColorFloat (Renderer ptr) r g b a =
 sdlRenderClear :: Renderer -> IO Bool
 sdlRenderClear (Renderer ptr) = fromCBool <$> c_SDL_RenderClear ptr
 
-sdlRenderPresent :: Renderer -> IO ()
-sdlRenderPresent (Renderer ptr) = c_SDL_RenderPresent ptr
+sdlRenderPresent :: Renderer -> IO Bool
+sdlRenderPresent (Renderer ptr) = fromCBool <$> c_SDL_RenderPresent ptr
 
 sdlCreateTexture :: Renderer -> SDL_PixelFormat -> SDL_TextureAccess -> Int -> Int -> IO (Maybe Texture)
 sdlCreateTexture (Renderer r) format access w h = do
@@ -3562,28 +3562,34 @@ sdlStopTextInput :: Window -> IO Bool
 sdlStopTextInput (Window win) = fromCBool <$> c_SDL_StopTextInput win
 
 foreign import ccall unsafe "SDL_GetWindowSize" c_SDL_GetWindowSize
-  :: Ptr SDL_Window -> Ptr CInt -> Ptr CInt -> IO ()
+  :: Ptr SDL_Window -> Ptr CInt -> Ptr CInt -> IO CBool
 
-sdlGetWindowSize :: Window -> IO (Int, Int)
+sdlGetWindowSize :: Window -> IO (Maybe (Int, Int))
 sdlGetWindowSize (Window win) =
   alloca $ \wPtr ->
     alloca $ \hPtr -> do
-      c_SDL_GetWindowSize win wPtr hPtr
-      w <- peek wPtr
-      h <- peek hPtr
-      pure (fromIntegral w, fromIntegral h)
+      ok <- c_SDL_GetWindowSize win wPtr hPtr
+      if not (fromCBool ok)
+        then pure Nothing
+        else do
+          w <- peek wPtr
+          h <- peek hPtr
+          pure (Just (fromIntegral w, fromIntegral h))
 
 foreign import ccall unsafe "SDL_GetWindowSizeInPixels" c_SDL_GetWindowSizeInPixels
-  :: Ptr SDL_Window -> Ptr CInt -> Ptr CInt -> IO ()
+  :: Ptr SDL_Window -> Ptr CInt -> Ptr CInt -> IO CBool
 
-sdlGetWindowSizeInPixels :: Window -> IO (Int, Int)
+sdlGetWindowSizeInPixels :: Window -> IO (Maybe (Int, Int))
 sdlGetWindowSizeInPixels (Window win) =
   alloca $ \wPtr ->
     alloca $ \hPtr -> do
-      c_SDL_GetWindowSizeInPixels win wPtr hPtr
-      w <- peek wPtr
-      h <- peek hPtr
-      pure (fromIntegral w, fromIntegral h)
+      ok <- c_SDL_GetWindowSizeInPixels win wPtr hPtr
+      if not (fromCBool ok)
+        then pure Nothing
+        else do
+          w <- peek wPtr
+          h <- peek hPtr
+          pure (Just (fromIntegral w, fromIntegral h))
 
 foreign import ccall unsafe "SDL_GetTicks" c_SDL_GetTicks
   :: IO Word64
