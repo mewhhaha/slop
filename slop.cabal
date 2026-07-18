@@ -16,6 +16,11 @@ homepage:           https://github.com/mewhhaha/slop
 bug-reports:        https://github.com/mewhhaha/slop/issues
 tested-with:        GHC ==9.12.2, GHC ==9.14.1
 extra-doc-files:    README.md, CHANGELOG.md
+extra-source-files:
+    assets/*.bmp
+    assets/*.wav
+    assets/Inter/*.ttf
+    assets/Inter/*.txt
 
 source-repository head
     type: git
