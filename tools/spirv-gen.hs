@@ -1,11 +1,18 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
 
-import Spirdo.Wesl (shaderSpirv, wesl)
 import qualified Data.ByteString as BS
+import Spirdo.Wesl.Reflection
+  ( defaultCompileOptions
+  , imports
+  , shaderSpirv
+  , spirv
+  , wesl
+  )
 
 vertexSpirv :: BS.ByteString
-vertexSpirv = shaderSpirv [wesl|
+vertexSpirv = shaderSpirv $(spirv defaultCompileOptions imports [wesl|
 // spirdo:sampler=combined
 struct VsOut {
 @builtin(position) position: vec4<f32>;
@@ -18,10 +25,10 @@ fn main(@location(0) in_pos: vec2<f32>, @location(1) in_uv: vec2<f32>, @location
 let pos = vec4(in_pos.x, in_pos.y, 0.0, 1.0);
 return VsOut(pos, in_uv, in_color);
 }
-|]
+|])
 
 vertex3DSpirv :: BS.ByteString
-vertex3DSpirv = shaderSpirv [wesl|
+vertex3DSpirv = shaderSpirv $(spirv defaultCompileOptions imports [wesl|
 // spirdo:sampler=combined
 struct VsOut {
 @builtin(position) position: vec4<f32>;
@@ -46,10 +53,10 @@ let pos = vec4(
 );
 return VsOut(pos, in_uv, in_color);
 }
-|]
+|])
 
 fragmentSpirv :: BS.ByteString
-fragmentSpirv = shaderSpirv [wesl|
+fragmentSpirv = shaderSpirv $(spirv defaultCompileOptions imports [wesl|
 // spirdo:sampler=combined
 @group(2) @binding(0)
 var spriteTex: texture_2d<f32>;
@@ -61,10 +68,10 @@ fn main(@location(0) uv: vec2<f32>, @location(1) color: vec4<f32>) -> @location(
 let tex = textureSample(spriteTex, spriteSamp, uv);
 return tex * color;
 }
-|]
+|])
 
 noise2DSpirv :: BS.ByteString
-noise2DSpirv = shaderSpirv [wesl|
+noise2DSpirv = shaderSpirv $(spirv defaultCompileOptions imports [wesl|
 // spirdo:sampler=combined
 struct Params {
   dims: vec4<f32>;
@@ -319,10 +326,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let v = clamp01(contrasted);
   textureStore(out_tex, vec2(i32(gid.x), i32(gid.y)), vec4(v, v, v, 1.0));
 }
-|]
+|])
 
 noise3DSpirv :: BS.ByteString
-noise3DSpirv = shaderSpirv [wesl|
+noise3DSpirv = shaderSpirv $(spirv defaultCompileOptions imports [wesl|
 // spirdo:sampler=combined
 struct Params {
   dims: vec4<f32>;
@@ -683,7 +690,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let v = clamp01(contrasted);
   textureStore(out_tex, vec3(i32(gid.x), i32(gid.y), i32(gid.z)), vec4(v, v, v, 1.0));
 }
-|]
+|])
 
 main :: IO ()
 main = do

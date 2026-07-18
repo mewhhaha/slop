@@ -25,7 +25,7 @@ common warnings
     ghc-options: -Wall
 
 flag demo
-    description: Build the demo executable (depends on spirdo).
+    description: Build the demo and shader generator (depends on spirdo).
     default: False
     manual: True
 
@@ -45,16 +45,15 @@ library
                       Slop.Storable.Generic
     other-modules:    Slop.Internal
                       Slop.Internal.DList
-    -- other-extensions:
     build-depends:
         base ^>=4.21.0.0 || ^>=4.22.0.0,
-        bytestring,
-        containers,
-        directory,
-        mtl,
-        stm,
-        text,
-        time
+        bytestring <0.13,
+        containers <0.9,
+        directory <1.4,
+        mtl <2.4,
+        stm <2.6,
+        text <2.2,
+        time <1.16
     pkgconfig-depends:
         sdl3 >= 3.4,
         sdl3-image,
@@ -66,22 +65,33 @@ library
 executable slop
     import:           warnings
     main-is:          Main.hs
-    -- other-modules:
-    -- other-extensions:
     if !flag(demo)
         buildable: False
     build-depends:
         base ^>=4.21.0.0 || ^>=4.22.0.0,
-        bytestring,
-        containers,
+        bytestring <0.13,
+        containers <0.9,
         slop,
-        spirdo,
-        template-haskell,
-        text
+        spirdo ^>=0.2.0.0,
+        template-haskell >=2.23 && <2.25,
+        text <2.2
     pkgconfig-depends:
         sdl3-mixer
 
     hs-source-dirs:   exe
+    default-language: GHC2024
+
+executable slop-spirv-gen
+    import:           warnings
+    main-is:          spirv-gen.hs
+    if !flag(demo)
+        buildable: False
+    build-depends:
+        base ^>=4.21.0.0 || ^>=4.22.0.0,
+        bytestring <0.13,
+        spirdo ^>=0.2.0.0,
+        template-haskell >=2.23 && <2.25
+    hs-source-dirs:   tools
     default-language: GHC2024
 
 test-suite slop-test
@@ -91,6 +101,6 @@ test-suite slop-test
     build-depends:
         base ^>=4.21.0.0 || ^>=4.22.0.0,
         slop,
-        text
+        text <2.2
     hs-source-dirs:   test
     default-language: GHC2024

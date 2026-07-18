@@ -3,6 +3,7 @@
 
 module Main (main) where
 
+import Control.Exception (try)
 import Data.Int (Int32)
 import qualified Data.Text as T
 
@@ -12,7 +13,11 @@ import Slop.GPU
 main :: IO ()
 main = do
   basicGeometryIsBackendNeutral
+  invalidConfigFailsBeforeSDLInitialization
   advancedCameraIsAvailableFromGPU
+  cameraViewMovesTheEyeToTheOrigin
+  cameraViewPlacesTheTargetAtPositiveDepth
+  perspectiveMapsTheDepthRangeToSDLClipSpace
   reflectedCountsIgnoreDeclarationOrder
   duplicateReflectedNamesCarryBindingEvidence
   invalidDescriptorGroupCarriesBindingEvidence
@@ -31,10 +36,42 @@ basicGeometryIsBackendNeutral = do
   rectangle `seq` pure ()
   windowTypeIsPublic `seq` pure ()
 
+invalidConfigFailsBeforeSDLInitialization :: IO ()
+invalidConfigFailsBeforeSDLInitialization = do
+  result <- try (runWindow defaultConfig { windowWidth = 0 } (pure ())) :: IO (Either SlopError ())
+  case result of
+    Left SlopIOFailure { errorResource = "windowWidth", errorDetail = detail }
+      | "got 0" `T.isInfixOf` detail -> pure ()
+    Left err -> fail ("expected invalid windowWidth evidence, got " <> T.unpack (renderSlopError err))
+    Right _ -> fail "invalid window width reached SDL initialization"
+
 advancedCameraIsAvailableFromGPU :: IO ()
 advancedCameraIsAvailableFromGPU = do
   let camera = camera3D (V3 0 0 5) (V3 0 0 0) (V3 0 1 0) (pi / 3) (16 / 9) 0.1 100
   camera `seq` pure ()
+
+cameraViewMovesTheEyeToTheOrigin :: IO ()
+cameraViewMovesTheEyeToTheOrigin = do
+  let eye = V3 2 3 5
+      camera = camera3D eye (V3 0 0 0) (V3 0 1 0) (pi / 3) (16 / 9) 0.1 100
+  assertV3Near "camera eye in view space" (V3 0 0 0) (transformPoint (camera3DView camera) eye)
+
+cameraViewPlacesTheTargetAtPositiveDepth :: IO ()
+cameraViewPlacesTheTargetAtPositiveDepth = do
+  let target = V3 0 0 0
+      camera = camera3D (V3 0 0 5) target (V3 0 1 0) (pi / 3) (16 / 9) 0.1 100
+      V3 _ _ targetDepth = transformPoint (camera3DView camera) target
+  assertNear "camera target depth" 5 targetDepth
+
+perspectiveMapsTheDepthRangeToSDLClipSpace :: IO ()
+perspectiveMapsTheDepthRangeToSDLClipSpace = do
+  let near = 0.1
+      far = 100
+      projection = perspective (pi / 2) 1 near far :: M44 Float
+      V3 _ _ nearDepth = transformPoint projection (V3 0 0 near)
+      V3 _ _ farDepth = transformPoint projection (V3 0 0 far)
+  assertNear "near clipping plane" 0 nearDepth
+  assertNear "far clipping plane" 1 farDepth
 
 reflectedCountsIgnoreDeclarationOrder :: IO ()
 reflectedCountsIgnoreDeclarationOrder = do
@@ -135,5 +172,17 @@ expectRight result =
 assertEqual :: (Eq a, Show a) => String -> a -> a -> IO ()
 assertEqual label expected actual =
   if expected == actual
+    then pure ()
+    else fail (label <> ": expected " <> show expected <> ", got " <> show actual)
+
+assertV3Near :: String -> V3 Float -> V3 Float -> IO ()
+assertV3Near label (V3 expectedX expectedY expectedZ) (V3 actualX actualY actualZ) = do
+  assertNear (label <> " x") expectedX actualX
+  assertNear (label <> " y") expectedY actualY
+  assertNear (label <> " z") expectedZ actualZ
+
+assertNear :: String -> Float -> Float -> IO ()
+assertNear label expected actual =
+  if abs (expected - actual) <= 0.0001
     then pure ()
     else fail (label <> ": expected " <> show expected <> ", got " <> show actual)

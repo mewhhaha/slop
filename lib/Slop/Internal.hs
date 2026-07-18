@@ -406,7 +406,7 @@ module Slop.Internal
   , withShaderUniform
   ) where
 
-import Control.Exception (Exception (..), SomeException, bracket, bracket_, finally, fromException, onException, throwIO, try)
+import Control.Exception (Exception (..), SomeAsyncException, SomeException, bracket, bracket_, finally, fromException, onException, throwIO, try)
 import Control.Monad (foldM, forM_, replicateM, unless, void, when)
 import Control.Concurrent (ThreadId, forkIO, modifyMVar, modifyMVar_, newMVar, threadDelay)
 import Control.Concurrent.STM
@@ -451,9 +451,9 @@ import Data.Time.Clock (UTCTime)
 import Data.Typeable (TypeRep, Typeable, typeOf, typeRep)
 import Data.Word (Word8, Word32, Word64)
 import GHC.Conc (getNumCapabilities)
-import Foreign (Ptr, Storable (..), alloca, castPtr, nullPtr, peek, poke, pokeByteOff)
+import Foreign (Ptr, Storable (..), alloca, castPtr, nullPtr, peek, peekElemOff, poke, pokeByteOff)
 import Foreign.C.String (peekCString, withCString)
-import Foreign.C.Types (CFloat (..))
+import Foreign.C.Types (CFloat (..), CInt)
 import Foreign.Marshal.Array (peekArray, withArray, withArrayLen)
 import Foreign.Marshal.Utils (copyBytes)
 import System.Directory (getModificationTime)
@@ -1442,6 +1442,16 @@ exceptionAssetError operation resource exception =
     Just err -> assetOperationError operation resource err
     Nothing -> SlopAssetFailure operation resource (T.pack (displayException exception))
 
+trySyncException :: IO a -> IO (Either SomeException a)
+trySyncException action = do
+  result <- try action
+  case result of
+    Left exception ->
+      case fromException exception :: Maybe SomeAsyncException of
+        Just _ -> throwIO exception
+        Nothing -> pure result
+    Right _ -> pure result
+
 newtype AssetUpdate = AssetUpdate (TMVar (SlopResult ()))
 
 data AssetThread
@@ -1539,10 +1549,10 @@ data SamplerAsset = SamplerAsset
 instance AssetLoader TextureAsset where
   type AssetType TextureAsset = Texture
   loadAssetIO app (TextureAsset path) = do
-    result <- try (loadTextureIO app path)
+    result <- trySyncException (loadTextureIO app path)
     case result of
       Right tex -> pure (Right tex)
-      Left (err :: SomeException) -> pure (Left (exceptionAssetError "load texture" (T.pack path) err))
+      Left err -> pure (Left (exceptionAssetError "load texture" (T.pack path) err))
   unloadAssetIO _ _ = destroyTextureIO
   assetLabel (TextureAsset path) = T.pack path
   assetFiles (TextureAsset path) = [path]
@@ -1788,17 +1798,21 @@ data AssetCommand where
   AssetCommand :: AssetLoader spec => Int -> spec -> RequestMode -> Maybe (TMVar (SlopResult ())) -> AssetCommand
   StopCommand :: TMVar () -> AssetCommand
 
-initAssetManager :: Window -> Int -> IO AssetManager
-initAssetManager app workerCount = do
+newAssetManager :: IO AssetManager
+newAssetManager = do
   stateVar <- newTVarIO ManagerState { msNextId = 0, msAssets = IntMap.empty }
   queue <- newTQueueIO
-  let count = max 1 workerCount
-  tids <- replicateM count (forkIO (assetWorker app stateVar queue))
   pure AssetManager
     { amState = stateVar
     , amQueue = queue
-    , amThreads = tids
+    , amThreads = []
     }
+
+startAssetWorkers :: Window -> Int -> AssetManager -> IO AssetManager
+startAssetWorkers app workerCount manager = do
+  let count = max 1 workerCount
+  tids <- replicateM count (forkIO (assetWorker app manager.amState manager.amQueue))
+  pure manager { amThreads = tids }
 
 shutdownAssetManager :: Window -> AssetManager -> IO ()
 shutdownAssetManager app mgr = do
@@ -1817,8 +1831,11 @@ removeAllAssetsIO app mgr = do
     st <- readTVar (mgr.amState)
     writeTVar (mgr.amState) st { msAssets = IntMap.empty }
     pure (IntMap.elems (st.msAssets))
-  mapM_ (finalizeEntry app) entries
+  finalizeEntries entries
   where
+    finalizeEntries [] = pure ()
+    finalizeEntries (entry : remaining) =
+      finalizeEntry app entry `finally` finalizeEntries remaining
     finalizeEntry _ (AssetSlot _ (SlotFailed _) _) = pure ()
     finalizeEntry _ (AssetSlot _ (SlotLoading var) _) =
       void (atomically (tryPutTMVar var (Left (SlopAssetFailure "remove" "all assets" "asset removed"))))
@@ -1843,7 +1860,7 @@ handleAssetCommand app stateVar cmd =
       atomically (putTMVar done ())
       pure False
     AssetCommand assetId spec mode notify -> do
-      result <- try @SomeException (loadAssetIO app spec)
+      result <- trySyncException (loadAssetIO app spec)
       let resolved = case result of
             Left exception -> Left (exceptionAssetError "load" (assetLabel spec) exception)
             Right loaded -> first (assetOperationError "load" (assetLabel spec)) loaded
@@ -1937,7 +1954,7 @@ loadAssetResult spec = do
   let label = assetLabel spec
   (assetId, _) <- liftIO (registerLoading @(AssetType spec) mgr)
   liftIO (installHotReloadInfo app assetId spec)
-  result <- liftIO (try @SomeException (loadAssetIO app spec))
+  result <- liftIO (trySyncException (loadAssetIO app spec))
   let resolved = case result of
         Left exception -> Left (exceptionAssetError "load" label exception)
         Right loaded -> first (assetOperationError "load" label) loaded
@@ -2186,7 +2203,7 @@ loadHotReloadTimes files = do
 
 safeGetModTime :: FilePath -> IO (Maybe UTCTime)
 safeGetModTime path = do
-  result <- try @SomeException (getModificationTime path)
+  result <- trySyncException (getModificationTime path)
   case result of
     Left _ -> pure Nothing
     Right time -> pure (Just time)
@@ -3482,7 +3499,8 @@ withShaderBindingsBlendTransform blend shader bindings transform action = do
 
 
 runWindowIO :: Config -> (Window -> IO a) -> IO a
-runWindowIO cfg action =
+runWindowIO cfg action = do
+  either throwIO pure (validateConfig cfg)
   bracket_ initSDL shutdownSDL $ do
     let title = cfg.windowTitle
     let width = cfg.windowWidth
@@ -3548,10 +3566,10 @@ runWindowIO cfg action =
                           drawableSizeRef <- newIORef drawableSize
                           globalsUniform <- newIORef Nothing
                           ownedResources <- newIORef emptyOwnedResources
+                          assetsWithoutWorkers <- newAssetManager
                           pipelines <- newIORef Map.empty
                           drawColor <- newIORef (rgba 1 1 1 1)
                           let frameContext = RecordingContext frameCommands frameShaders
-                          let placeholderAssets = error "AssetManager not initialized"
                           let windowBase = Window
                                 { appWindow = win
                                 , appGPUDevice = dev
@@ -3561,7 +3579,7 @@ runWindowIO cfg action =
                                 , appMixer = mix
                                 , appMusicTrack = musicTrackRef
                                 , appBlendPools = blendPools
-                                , appAssets = placeholderAssets
+                                , appAssets = assetsWithoutWorkers
                                 , appMainAssetQueue = mainAssetQueue
                                 , appTargets = targets
                                 , appPipelineTargets = pipelineTargets
@@ -3588,7 +3606,7 @@ runWindowIO cfg action =
                             if cfg.assetWorkers <= 0
                               then max 1 <$> getNumCapabilities
                               else pure cfg.assetWorkers
-                          bracket (initAssetManager windowBase workerCount) (shutdownAssetManager windowBase) $ \assets -> do
+                          bracket (startAssetWorkers windowBase workerCount assetsWithoutWorkers) (shutdownAssetManager windowBase) $ \assets -> do
                             let windowHandle = windowBase { appAssets = assets }
                             action windowHandle `finally`
                               (cleanupOwnedResources windowHandle `finally`
@@ -3610,6 +3628,24 @@ runWindowIO cfg action =
     die label = do
       err <- sdlGetError
       throwIO (SlopSDLFailure (T.pack label) (T.pack err))
+
+validateConfig :: Config -> SlopResult ()
+validateConfig cfg = do
+  positiveCInt "windowWidth" cfg.windowWidth
+  positiveCInt "windowHeight" cfg.windowHeight
+  case cfg.textAtlasSize of
+    Just size -> positiveCInt "textAtlasSize" size
+    Nothing -> pure ()
+  when (cfg.assetWorkers < 0) $
+    Left (invalid "assetWorkers" "expected zero or a positive worker count" cfg.assetWorkers)
+  where
+    positiveCInt field value
+      | value <= 0 = Left (invalid field "expected a positive value" value)
+      | toInteger value > toInteger (maxBound :: CInt) =
+          Left (invalid field ("maximum is " <> showText (maxBound :: CInt)) value)
+      | otherwise = Right ()
+    invalid field expectation value =
+      SlopIOFailure "validate config" field (expectation <> ", got " <> showText value)
 
 
 require :: String -> IO (Maybe a) -> IO a
@@ -3972,15 +4008,18 @@ createNoiseTexture3DIO window width height depth settings = do
 
 createTexture3D :: GPUDevice -> SDL_GPUTextureFormat -> SDL_GPUTextureUsageFlags -> Int -> Int -> Int -> IO Texture
 createTexture3D device fmt usage width height depth = do
+  gpuWidth <- textureDimension "create 3D texture" "width" width
+  gpuHeight <- textureDimension "create 3D texture" "height" height
+  gpuDepth <- textureDimension "create 3D texture" "depth" depth
   gpuTex <- require "SDL_CreateGPUTexture"
     (sdlCreateGPUTexture device
       GPUTextureCreateInfo
         { gpuTextureType = sdlGPUTextureType3D
         , gpuTextureFormat = fmt
         , gpuTextureUsage = usage
-        , gpuTextureWidth = fromIntegral width
-        , gpuTextureHeight = fromIntegral height
-        , gpuTextureLayerCountOrDepth = fromIntegral depth
+        , gpuTextureWidth = gpuWidth
+        , gpuTextureHeight = gpuHeight
+        , gpuTextureLayerCountOrDepth = gpuDepth
         , gpuTextureNumLevels = 1
         , gpuTextureSampleCount = sdlGPUSampleCount1
         , gpuTextureProps = 0
@@ -3995,14 +4034,16 @@ createTexture3D device fmt usage width height depth = do
 
 createTexture :: GPUDevice -> SDL_GPUTextureFormat -> SDL_GPUTextureUsageFlags -> Int -> Int -> IO Texture
 createTexture device fmt usage width height = do
+  gpuWidth <- textureDimension "create 2D texture" "width" width
+  gpuHeight <- textureDimension "create 2D texture" "height" height
   gpuTex <- require "SDL_CreateGPUTexture"
     (sdlCreateGPUTexture device
       GPUTextureCreateInfo
         { gpuTextureType = sdlGPUTextureType2D
         , gpuTextureFormat = fmt
         , gpuTextureUsage = usage
-        , gpuTextureWidth = fromIntegral width
-        , gpuTextureHeight = fromIntegral height
+        , gpuTextureWidth = gpuWidth
+        , gpuTextureHeight = gpuHeight
         , gpuTextureLayerCountOrDepth = 1
         , gpuTextureNumLevels = 1
         , gpuTextureSampleCount = sdlGPUSampleCount1
@@ -4015,6 +4056,16 @@ createTexture device fmt usage width height = do
     , textureHeight = height
     , textureDepth = 1
     }
+
+textureDimension :: T.Text -> T.Text -> Int -> IO Word32
+textureDimension operation dimension value
+  | value <= 0 = throwIO (invalid "expected a positive value")
+  | toInteger value > toInteger (maxBound :: Word32) =
+      throwIO (invalid ("maximum is " <> showText (maxBound :: Word32)))
+  | otherwise = pure (fromIntegral value)
+  where
+    invalid expectation =
+      SlopIOFailure operation dimension (expectation <> ", got " <> showText value)
 
 createRenderTargetTexture :: Window -> Int -> Int -> IO Texture
 createRenderTargetTexture window width height =
@@ -4515,7 +4566,7 @@ spriteVertices size transform tex src dst =
 
 textVertices :: (Int, Int) -> Text -> Float -> Float -> Color -> ShaderContext -> IO [ResolvedDraw]
 textVertices size textObj x y color ctx = do
-  void (ttfSetTextPosition textObj (round x) (round y))
+  setTextPositionChecked textObj (round x) (round y)
   seqPtr <- ttfGetGPUTextDrawData textObj
   go seqPtr []
   where
@@ -4525,18 +4576,42 @@ textVertices size textObj x y color ctx = do
           seqInfo <- peek ptr
           let numVerts = fromIntegral seqInfo.ttfAtlasNumVertices
           let numIdx = fromIntegral seqInfo.ttfAtlasNumIndices
-          xy <- if seqInfo.ttfAtlasXY == nullPtr then pure [] else peekArray numVerts seqInfo.ttfAtlasXY
-          uv <- if seqInfo.ttfAtlasUV == nullPtr then pure [] else peekArray numVerts seqInfo.ttfAtlasUV
-          idx <- if seqInfo.ttfAtlasIndices == nullPtr then pure [] else peekArray numIdx seqInfo.ttfAtlasIndices
-          let vertices = map (vertexFrom xy uv) idx
+          when (numVerts < 0) $
+            throwIO (atlasDrawError ("negative vertex count " <> showText numVerts))
+          when (numIdx < 0) $
+            throwIO (atlasDrawError ("negative index count " <> showText numIdx))
+          when (numVerts > 0 && seqInfo.ttfAtlasXY == nullPtr) $
+            throwIO (atlasDrawError ("missing position array for " <> showText numVerts <> " vertices"))
+          when (numVerts > 0 && seqInfo.ttfAtlasUV == nullPtr) $
+            throwIO (atlasDrawError ("missing UV array for " <> showText numVerts <> " vertices"))
+          when (numIdx > 0 && seqInfo.ttfAtlasIndices == nullPtr) $
+            throwIO (atlasDrawError ("missing index array for " <> showText numIdx <> " indices"))
+          indices <- peekArray numIdx seqInfo.ttfAtlasIndices
+          vertices <- mapM (vertexFrom numVerts seqInfo.ttfAtlasXY seqInfo.ttfAtlasUV) indices
           let resolvedDraw = ResolvedDraw sdlGPUPrimitiveTypeTriangleList vertices seqInfo.ttfAtlasTexture ctx
           go seqInfo.ttfAtlasNext (resolvedDraw : acc)
-    vertexFrom xy uv i =
-      let idx = fromIntegral i
-          FPoint px py = xy !! idx
-          FPoint u v = uv !! idx
-          uvVec = V2 (realToFrac u) (realToFrac v)
-      in mkVertex size ctx.ctxTransform (FPoint px py) uvVec color
+    vertexFrom vertexCount xy uv rawIndex = do
+      let index = fromIntegral rawIndex
+      when (index < 0 || index >= vertexCount) $
+        throwIO
+          (atlasDrawError
+            ( "index " <> showText index
+                <> " is outside vertex range 0.." <> showText (vertexCount - 1)
+            ))
+      FPoint px py <- peekElemOff xy index
+      FPoint u v <- peekElemOff uv index
+      let uvVec = V2 (realToFrac u) (realToFrac v)
+      pure (mkVertex size ctx.ctxTransform (FPoint px py) uvVec color)
+
+atlasDrawError :: T.Text -> SlopError
+atlasDrawError = SlopSDLFailure "TTF_GetGPUTextDrawData"
+
+setTextPositionChecked :: Text -> Int -> Int -> IO ()
+setTextPositionChecked textObj x y = do
+  positioned <- ttfSetTextPosition textObj x y
+  unless positioned $ do
+    detail <- sdlGetError
+    throwIO (SlopSDLFailure "TTF_SetTextPosition" (T.pack detail))
 
 mkVertex :: (Int, Int) -> Maybe Transform2D -> FPoint -> V2 Float -> Color -> Vertex
 mkVertex (w, h) transform (FPoint x y) (V2 u v) (Color r g b a) =
@@ -5440,7 +5515,7 @@ measureTextCachedIO window font str = do
 
 measureTextObj :: Text -> IO (V2 Float)
 measureTextObj textObj = do
-  void (ttfSetTextPosition textObj 0 0)
+  setTextPositionChecked textObj 0 0
   seqPtr <- ttfGetGPUTextDrawData textObj
   bounds <- go seqPtr Nothing
   pure $ case bounds of
@@ -5452,7 +5527,11 @@ measureTextObj textObj = do
       | otherwise = do
           seqInfo <- peek ptr
           let numVerts = fromIntegral seqInfo.ttfAtlasNumVertices
-          points <- if seqInfo.ttfAtlasXY == nullPtr then pure [] else peekArray numVerts seqInfo.ttfAtlasXY
+          when (numVerts < 0) $
+            throwIO (atlasDrawError ("negative vertex count " <> showText numVerts))
+          when (numVerts > 0 && seqInfo.ttfAtlasXY == nullPtr) $
+            throwIO (atlasDrawError ("missing position array for " <> showText numVerts <> " vertices"))
+          points <- peekArray numVerts seqInfo.ttfAtlasXY
           let acc' = foldl' updateBounds acc points
           go seqInfo.ttfAtlasNext acc'
     updateBounds Nothing (FPoint x y) =
