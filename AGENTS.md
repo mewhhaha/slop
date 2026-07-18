@@ -30,6 +30,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 ## Core Concepts
 
 - `WindowM` is the application and frame monad. `runWindow` sets up SDL, GPU device + swapchain, mixer, and the asset manager.
+- SDL, mixer, and TTF initialization is staged so a later startup failure unwinds only the subsystems that initialized successfully.
 - `loop :: a -> (Frame -> a -> WindowM (LoopControl a)) -> WindowM (LoopExit a)` is the main driver.
 - Use `ConfigPatch` + `applyConfigPatch` to compose config overrides with a `Monoid`.
 
