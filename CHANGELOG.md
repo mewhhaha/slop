@@ -35,3 +35,4 @@
 * Make public SDL resource creation and ownership registration atomic against asynchronous exceptions.
 * Correct fallible SDL window-size and render-presentation bindings so failures cannot expose uninitialized outputs or appear successful.
 * Report window configuration and automatic text-input startup failures instead of silently continuing with partial initialization.
+* Configure audio loops as part of starting playback, rather than mutating a track after playback has already begun.
