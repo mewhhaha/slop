@@ -3407,15 +3407,15 @@ runWindowIO cfg action = do
     let height = cfg.windowHeight
     window <- require "SDL_CreateWindow" (sdlCreateWindow title width height 0)
     bracket (pure window) sdlDestroyWindow $ \win -> do
-      void $ sdlSetWindowResizable win (cfg.windowResizable)
-      okShow <- sdlShowWindow win
-      unless okShow (die "SDL_ShowWindow")
-      bracket_ (void (SDL.sdlStartTextInput win)) (void (SDL.sdlStopTextInput win)) $ do
+      requireSDLSuccess "SDL_SetWindowResizable" (sdlSetWindowResizable win cfg.windowResizable)
+      requireSDLSuccess "SDL_ShowWindow" (sdlShowWindow win)
+      bracket_
+        (requireSDLSuccess "SDL_StartTextInput" (SDL.sdlStartTextInput win))
+        (requireSDLSuccess "SDL_StopTextInput" (SDL.sdlStopTextInput win)) $ do
         sdlPumpEvents
         gpu <- require "SDL_CreateGPUDevice" (sdlCreateGPUDevice sdlGPUShaderFormatSpirv False)
         bracket (pure gpu) sdlDestroyGPUDevice $ \dev -> do
-          okClaim <- sdlClaimWindowForGPUDevice dev win
-          unless okClaim (die "SDL_ClaimWindowForGPUDevice")
+          requireSDLSuccess "SDL_ClaimWindowForGPUDevice" (sdlClaimWindowForGPUDevice dev win)
           let releaseWindow = sdlReleaseWindowFromGPUDevice dev win
           bracket_ (pure ()) releaseWindow $ do
             swapFmt <- sdlGetGPUSwapchainTextureFormat dev win
@@ -3432,10 +3432,10 @@ runWindowIO cfg action = do
                     let GPUDevice devPtr = dev
                     let propDevice = "SDL_ttf.gpu_text_engine.create.device"
                     let propAtlas = "SDL_ttf.gpu_text_engine.create.atlas_texture_size"
-                    okDev <- sdlSetPointerProperty props propDevice (castPtr devPtr)
-                    unless okDev (die "SDL_SetPointerProperty (TTF device)")
-                    okSize <- sdlSetNumberProperty props propAtlas (fromIntegral size)
-                    unless okSize (die "SDL_SetNumberProperty (TTF atlas size)")
+                    requireSDLSuccess "SDL_SetPointerProperty (TTF device)"
+                      (sdlSetPointerProperty props propDevice (castPtr devPtr))
+                    requireSDLSuccess "SDL_SetNumberProperty (TTF atlas size)"
+                      (sdlSetNumberProperty props propAtlas (fromIntegral size))
                     require "TTF_CreateGPUTextEngineWithProperties" (ttfCreateGPUTextEngineWithProperties props)
               bracket (pure textEngine) ttfDestroyGPUTextEngine $ \engine -> do
                 mixer <- require "MIX_CreateMixerDevice" (mixCreateMixerDevice sdlAudioDeviceDefaultPlayback)
@@ -3515,12 +3515,12 @@ runWindowIO cfg action = do
                                     cleanupDepthTargets windowHandle)))
   where
     withInitializedSubsystems body =
-      bracket_ (initializeSubsystem "SDL_Init" (sdlInit (sdlInitVideo .|. sdlInitAudio))) sdlQuit $
-        bracket_ (initializeSubsystem "MIX_Init" mixInit) mixQuit $
-          bracket_ (initializeSubsystem "TTF_Init" ttfInit) ttfQuit body
-    initializeSubsystem label initialize = do
-      initialized <- initialize
-      unless initialized (die label)
+      bracket_ (requireSDLSuccess "SDL_Init" (sdlInit (sdlInitVideo .|. sdlInitAudio))) sdlQuit $
+        bracket_ (requireSDLSuccess "MIX_Init" mixInit) mixQuit $
+          bracket_ (requireSDLSuccess "TTF_Init" ttfInit) ttfQuit body
+    requireSDLSuccess label operation = do
+      succeeded <- operation
+      unless succeeded (die label)
     die label = do
       err <- sdlGetError
       throwIO (SlopSDLFailure (T.pack label) (T.pack err))
