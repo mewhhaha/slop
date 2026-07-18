@@ -20,3 +20,4 @@
 * Breaking: removed exact API aliases and the fragment-only `ShaderBinding` layer; use the canonical `getAsset`, `output`, `computePipeline`, `merge`, `defaultTextStyle`, fragment shader, `TrackPool`, and `ShaderUniform` APIs. Pipeline writer and single-path wrapper constructors are now abstract.
 * Breaking: removed the mutable uniform-cache API, which did not avoid draw-time uploads; pass `ShaderUniform` values explicitly at the draw or pass boundary.
 * Breaking: collapsed the thirteen `As2D` constructors into one composable blend/camera/effect record and removed raw matrix-only variants. Sprite effects now preserve the selected 2D camera and blend mode. The unused right-biased `SpriteEffect`/`TextStyle` semigroups were removed in favor of `TextStylePatch`.
+* Fixed depth-target ownership: depth textures are allocated only for passes that need them, replaced safely on resize, and released with their render target or swapchain.

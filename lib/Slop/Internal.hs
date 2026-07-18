@@ -354,7 +354,7 @@ module Slop.Internal
   , withShader
   ) where
 
-import Control.Exception (Exception (..), SomeAsyncException, SomeException, bracket, bracket_, finally, fromException, onException, throwIO, try)
+import Control.Exception (Exception (..), SomeAsyncException, SomeException, bracket, bracket_, finally, fromException, mask_, onException, throwIO, try)
 import Control.Monad (foldM, forM_, replicateM, unless, void, when)
 import Control.Concurrent (ThreadId, forkIO, modifyMVar, modifyMVar_, newMVar, threadDelay)
 import Control.Concurrent.STM
@@ -3553,32 +3553,26 @@ unregisterRenderTarget window tex =
          then (Map.delete key targets, True)
          else (targets, False)
 
-registerDepthTarget :: Window -> Texture -> DepthTarget -> IO ()
-registerDepthTarget window colorTex depth =
-  atomicModifyIORef' (window.appDepthTargets) $ \targets ->
-    (Map.insert (renderTargetKey colorTex) depth targets, ())
-
-unregisterDepthTarget :: Window -> Texture -> IO ()
-unregisterDepthTarget window colorTex =
-  atomicModifyIORef' (window.appDepthTargets) $ \targets ->
-    let key = renderTargetKey colorTex
-    in (Map.delete key targets, ())
-
 cleanupDepthTargets :: Window -> IO ()
 cleanupDepthTargets window = do
+  swapchainTarget <- atomicModifyIORef' window.appDepthTarget $ \target ->
+    (Nothing, target)
   targets <- atomicModifyIORef' (window.appDepthTargets) $ \targets ->
     (Map.empty, Map.elems targets)
+  case swapchainTarget of
+    Nothing -> pure ()
+    Just target -> destroyTextureIO target.depthTexture
   mapM_ (\target -> destroyTextureIO target.depthTexture) targets
 
 ensureSwapchainDepthTarget :: Window -> (Int, Int) -> IO DepthTarget
-ensureSwapchainDepthTarget window size = do
+ensureSwapchainDepthTarget window size = mask_ $ do
   current <- readIORef window.appDepthTarget
   case current of
     Just target | target.depthSize == size -> pure target
     Just target -> do
-      destroyTextureIO target.depthTexture
       newTarget <- createDepthTargetIO window (fst size) (snd size)
       writeIORef window.appDepthTarget (Just newTarget)
+      destroyTextureIO target.depthTexture
       pure newTarget
     Nothing -> do
       newTarget <- createDepthTargetIO window (fst size) (snd size)
@@ -3586,14 +3580,18 @@ ensureSwapchainDepthTarget window size = do
       pure newTarget
 
 ensureRenderTargetDepth :: Window -> Texture -> (Int, Int) -> IO DepthTarget
-ensureRenderTargetDepth window colorTex size = do
+ensureRenderTargetDepth window colorTex size = mask_ $ do
   targets <- readIORef window.appDepthTargets
-  case Map.lookup (renderTargetKey colorTex) targets of
+  let key = renderTargetKey colorTex
+  case Map.lookup key targets of
     Just target | target.depthSize == size -> pure target
-    _ -> do
+    current -> do
       newTarget <- createDepthTargetIO window (fst size) (snd size)
       atomicModifyIORef' window.appDepthTargets $ \m ->
-        (Map.insert (renderTargetKey colorTex) newTarget m, ())
+        (Map.insert key newTarget m, ())
+      case current of
+        Nothing -> pure ()
+        Just target -> destroyTextureIO target.depthTexture
       pure newTarget
 
 cleanupRenderTargets :: Window -> IO ()
@@ -5155,10 +5153,10 @@ isSlot0Binding binding =
 createRenderTarget :: Int -> Int -> WindowM RenderTarget
 createRenderTarget width height = do
   window <- ask
-  tex <- liftIO (createRenderTargetTexture window width height)
-  depth <- liftIO (createDepthTargetIO window width height `onException` destroyTextureIO tex)
-  liftIO (registerRenderTarget window tex)
-  liftIO (registerDepthTarget window tex depth)
+  tex <- liftIO $ mask_ $ do
+    texture <- createRenderTargetTexture window width height
+    registerRenderTarget window texture
+    pure texture
   pure (RenderTarget tex)
 
 createRenderTargetSize :: Size2D -> WindowM RenderTarget
@@ -5178,12 +5176,16 @@ withRenderTarget width height action = do
 destroyTarget :: RenderTarget -> WindowM ()
 destroyTarget (RenderTarget tex) = do
   window <- ask
-  removed <- liftIO (unregisterRenderTarget window tex)
-  if removed
-    then do
-      liftIO (unregisterDepthTarget window tex)
-      liftIO (destroyTextureIO tex)
-    else pure ()
+  liftIO $ mask_ $ do
+    removed <- unregisterRenderTarget window tex
+    when removed $ do
+      depthTarget <- atomicModifyIORef' window.appDepthTargets $ \targets ->
+        let key = renderTargetKey tex
+        in (Map.delete key targets, Map.lookup key targets)
+      case depthTarget of
+        Nothing -> destroyTextureIO tex
+        Just depth ->
+          destroyTextureIO depth.depthTexture `finally` destroyTextureIO tex
 
 render :: RenderTarget -> WindowM () -> WindowM ()
 render target action = do
