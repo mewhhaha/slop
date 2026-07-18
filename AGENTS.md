@@ -76,7 +76,8 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 
 ## Assets
 
-- Asset manager runs on a background thread. Use `loadAssetAsync` + `awaitAsset`.
+- Asset manager runs on background threads. Use `loadAssetAsync` + `awaitAsset`.
+- Worker completion is tracked independently from stop commands, so shutdown cannot hang if a worker exits unexpectedly.
 - `loadAsset`, `awaitAsset`, and `awaitAssetUpdate` throw `SlopError`; their `*Result` variants expose recoverable failures without exceptions.
 - GPU-backed assets (textures, GPU text, shaders, pipelines, samplers) are loaded on the main thread even when using `loadAssetAsync`.
 - `loadAssetAsync` for main-thread assets queues work; `loop` calls `processMainAssets` each frame to service it.
