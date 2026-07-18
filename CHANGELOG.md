@@ -22,3 +22,4 @@
 * Breaking: collapsed the thirteen `As2D` constructors into one composable blend/camera/effect record and removed raw matrix-only variants. Sprite effects now preserve the selected 2D camera and blend mode. The unused right-biased `SpriteEffect`/`TextStyle` semigroups were removed in favor of `TextStylePatch`.
 * Fixed depth-target ownership: depth textures are allocated only for passes that need them, replaced safely on resize, and released with their render target or swapchain.
 * Hardened partial startup cleanup so SDL, mixer, and TTF initialization failures unwind already-started subsystems in reverse order.
+* Prevented asset-manager shutdown hangs when a background worker exits before consuming its stop command.

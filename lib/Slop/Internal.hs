@@ -356,7 +356,7 @@ module Slop.Internal
 
 import Control.Exception (Exception (..), SomeAsyncException, SomeException, bracket, bracket_, finally, fromException, mask_, onException, throwIO, try)
 import Control.Monad (foldM, forM_, replicateM, unless, void, when)
-import Control.Concurrent (ThreadId, forkIO, modifyMVar, modifyMVar_, newMVar, threadDelay)
+import Control.Concurrent (forkFinally, forkIO, modifyMVar, modifyMVar_, newMVar, threadDelay)
 import Control.Concurrent.STM
   ( TMVar
   , TQueue
@@ -407,6 +407,7 @@ import Foreign.C.Types (CFloat (..), CInt)
 import Foreign.Marshal.Array (peekArray, withArray, withArrayLen)
 import Foreign.Marshal.Utils (copyBytes)
 import System.Directory (getModificationTime)
+import System.IO (hPutStrLn, stderr)
 
 import Slop.Internal.DList (DList, singleton, toList)
 import Slop.Math
@@ -1711,7 +1712,7 @@ instance AssetLoader SamplerAsset where
 data AssetManager = AssetManager
   { amState :: !(TVar ManagerState)
   , amQueue :: !(TQueue AssetCommand)
-  , amThreads :: ![ThreadId]
+  , amWorkerCompletions :: ![TMVar ()]
   }
 
 data ManagerState = ManagerState
@@ -1740,7 +1741,7 @@ data RequestMode = RequestLoad | RequestReload
 
 data AssetCommand where
   AssetCommand :: AssetLoader spec => Int -> spec -> RequestMode -> Maybe (TMVar (SlopResult ())) -> AssetCommand
-  StopCommand :: TMVar () -> AssetCommand
+  StopCommand :: AssetCommand
 
 newAssetManager :: IO AssetManager
 newAssetManager = do
@@ -1749,21 +1750,28 @@ newAssetManager = do
   pure AssetManager
     { amState = stateVar
     , amQueue = queue
-    , amThreads = []
+    , amWorkerCompletions = []
     }
 
 startAssetWorkers :: Window -> Int -> AssetManager -> IO AssetManager
 startAssetWorkers app workerCount manager = do
   let count = max 1 workerCount
-  tids <- replicateM count (forkIO (assetWorker app manager.amState manager.amQueue))
-  pure manager { amThreads = tids }
+  workerCompletions <- replicateM count $ do
+    completion <- newEmptyTMVarIO
+    void $ forkFinally
+      (assetWorker app manager.amState manager.amQueue)
+      (\result ->
+        (case result of
+          Left exception -> hPutStrLn stderr ("slop asset worker exited: " <> displayException exception)
+          Right () -> pure ())
+        `finally` atomically (putTMVar completion ()))
+    pure completion
+  pure manager { amWorkerCompletions = workerCompletions }
 
 shutdownAssetManager :: Window -> AssetManager -> IO ()
 shutdownAssetManager app mgr = do
-  let workerCount = length mgr.amThreads
-  stopVars <- replicateM workerCount newEmptyTMVarIO
-  atomically $ forM_ stopVars (\var -> writeTQueue (mgr.amQueue) (StopCommand var))
-  mapM_ (atomically . readTMVar) stopVars
+  atomically $ forM_ mgr.amWorkerCompletions (const (writeTQueue mgr.amQueue StopCommand))
+  mapM_ (atomically . readTMVar) mgr.amWorkerCompletions
   removeAllAssetsIO app mgr
 
 removeAllAssetsIO :: Window -> AssetManager -> IO ()
@@ -1797,9 +1805,7 @@ assetWorker app stateVar queue = go
 handleAssetCommand :: Window -> TVar ManagerState -> AssetCommand -> IO Bool
 handleAssetCommand app stateVar cmd =
   case cmd of
-    StopCommand done -> do
-      atomically (putTMVar done ())
-      pure False
+    StopCommand -> pure False
     AssetCommand assetId spec mode notify -> do
       result <- trySyncException (loadAssetIO app spec)
       let resolved = case result of
@@ -1959,7 +1965,7 @@ processMainAssets = do
         Nothing -> pure ()
         Just cmd -> do
           case cmd of
-            StopCommand _ -> pure ()
+            StopCommand -> pure ()
             _ -> void (handleAssetCommand app stateVar cmd)
           drain app stateVar queue
 
@@ -1977,7 +1983,7 @@ awaitWithMainQueue app var = go
         Right value -> pure value
         Left cmd -> do
           case cmd of
-            StopCommand _ -> pure ()
+            StopCommand -> pure ()
             _ -> void (handleAssetCommand app stateVar cmd)
           go
 
