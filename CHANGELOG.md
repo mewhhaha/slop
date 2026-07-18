@@ -36,3 +36,4 @@
 * Correct fallible SDL window-size and render-presentation bindings so failures cannot expose uninitialized outputs or appear successful.
 * Report window configuration and automatic text-input startup failures instead of silently continuing with partial initialization.
 * Configure audio loops as part of starting playback, rather than mutating a track after playback has already begun.
+* Verify every hand-written SDL struct binding against native header sizes and alignments in the test suite.

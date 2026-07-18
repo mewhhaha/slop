@@ -1,12 +1,16 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Main (main) where
 
 import Control.Exception (try)
 import Data.Int (Int32)
 import qualified Data.Text as T
+import Foreign.C.Types (CInt(..), CSize(..))
 import Foreign.Ptr (nullPtr)
+import Foreign.Storable (Storable, alignment, sizeOf)
 
 import Slop
 import Slop.GPU
@@ -32,6 +36,7 @@ main = do
   uniformSizeMismatchIsTyped
   failedWindowSizeQueriesDoNotExposeUninitializedOutputs
   failedRenderPresentationIsObservable
+  rawStructLayoutsMatchSDL
 
 basicGeometryIsBackendNeutral :: IO ()
 basicGeometryIsBackendNeutral = do
@@ -205,6 +210,66 @@ failedRenderPresentationIsObservable :: IO ()
 failedRenderPresentationIsObservable = do
   presented <- SDL.sdlRenderPresent (SDL.Renderer nullPtr)
   assertEqual "invalid renderer presentation" False presented
+
+rawStructLayoutsMatchSDL :: IO ()
+rawStructLayoutsMatchSDL =
+  mapM_ assertLayout (zip [0 ..] haskellLayouts)
+  where
+    assertLayout (index, (label, haskellSize, haskellAlignment)) = do
+      nativeSize <- fromIntegral <$> c_slop_abi_size index
+      nativeAlignment <- fromIntegral <$> c_slop_abi_alignment index
+      assertEqual (label <> " size") nativeSize haskellSize
+      assertEqual (label <> " alignment") nativeAlignment haskellAlignment
+
+haskellLayouts :: [(String, Int, Int)]
+haskellLayouts =
+  [ layoutOf @SDL.SDL_TextInputEvent "SDL_TextInputEvent"
+  , layoutOf @SDL.SDL_MouseWheelEvent "SDL_MouseWheelEvent"
+  , layoutOf @SDL.FPoint "SDL_FPoint"
+  , layoutOf @SDL.FRect "SDL_FRect"
+  , layoutOf @SDL.FColor "SDL_FColor"
+  , layoutOf @SDL.GPUTextureSamplerBinding "SDL_GPUTextureSamplerBinding"
+  , layoutOf @SDL.GPUStorageBufferReadWriteBinding "SDL_GPUStorageBufferReadWriteBinding"
+  , layoutOf @SDL.GPUStorageTextureReadWriteBinding "SDL_GPUStorageTextureReadWriteBinding"
+  , layoutOf @SDL.GPUBufferBinding "SDL_GPUBufferBinding"
+  , layoutOf @SDL.GPUViewport "SDL_GPUViewport"
+  , layoutOf @SDL.GPUVertexBufferDescription "SDL_GPUVertexBufferDescription"
+  , layoutOf @SDL.GPUVertexAttribute "SDL_GPUVertexAttribute"
+  , layoutOf @SDL.GPUVertexInputState "SDL_GPUVertexInputState"
+  , layoutOf @SDL.GPUColorTargetBlendState "SDL_GPUColorTargetBlendState"
+  , layoutOf @SDL.GPUColorTargetDescription "SDL_GPUColorTargetDescription"
+  , layoutOf @SDL.GPUGraphicsPipelineTargetInfo "SDL_GPUGraphicsPipelineTargetInfo"
+  , layoutOf @SDL.GPURasterizerState "SDL_GPURasterizerState"
+  , layoutOf @SDL.GPUMultisampleState "SDL_GPUMultisampleState"
+  , layoutOf @SDL.GPUStencilOpState "SDL_GPUStencilOpState"
+  , layoutOf @SDL.GPUDepthStencilState "SDL_GPUDepthStencilState"
+  , layoutOf @SDL.GPUShaderCreateInfo "SDL_GPUShaderCreateInfo"
+  , layoutOf @SDL.GPUSamplerCreateInfo "SDL_GPUSamplerCreateInfo"
+  , layoutOf @SDL.GPURenderStateCreateInfo "SDL_GPURenderStateCreateInfo"
+  , layoutOf @SDL.GPUComputePipelineCreateInfo "SDL_GPUComputePipelineCreateInfo"
+  , layoutOf @SDL.GPUGraphicsPipelineCreateInfo "SDL_GPUGraphicsPipelineCreateInfo"
+  , layoutOf @SDL.GPUTextureCreateInfo "SDL_GPUTextureCreateInfo"
+  , layoutOf @SDL.GPUBufferCreateInfo "SDL_GPUBufferCreateInfo"
+  , layoutOf @SDL.GPUTransferBufferCreateInfo "SDL_GPUTransferBufferCreateInfo"
+  , layoutOf @SDL.GPUTextureTransferInfo "SDL_GPUTextureTransferInfo"
+  , layoutOf @SDL.GPUTransferBufferLocation "SDL_GPUTransferBufferLocation"
+  , layoutOf @SDL.GPUTextureRegion "SDL_GPUTextureRegion"
+  , layoutOf @SDL.GPUBufferRegion "SDL_GPUBufferRegion"
+  , layoutOf @SDL.GPUColorTargetInfo "SDL_GPUColorTargetInfo"
+  , layoutOf @SDL.GPUDepthStencilTargetInfo "SDL_GPUDepthStencilTargetInfo"
+  , layoutOf @SDL.SurfaceInfo "SDL_Surface"
+  , layoutOf @SDL.TTF_GPUAtlasDrawSequence "TTF_GPUAtlasDrawSequence"
+  ]
+
+layoutOf :: forall a. Storable a => String -> (String, Int, Int)
+layoutOf label =
+  (label, sizeOf (undefined :: a), alignment (undefined :: a))
+
+foreign import ccall unsafe "slop_abi_size"
+  c_slop_abi_size :: CInt -> IO CSize
+
+foreign import ccall unsafe "slop_abi_alignment"
+  c_slop_abi_alignment :: CInt -> IO CSize
 
 expectRight :: SlopResult a -> IO a
 expectRight result =

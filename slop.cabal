@@ -94,9 +94,13 @@ test-suite slop-test
     import:           warnings
     type:             exitcode-stdio-1.0
     main-is:          Main.hs
+    c-sources:        test/abi.c
     build-depends:
         base ^>=4.21.0.0 || ^>=4.22.0.0,
         slop,
         text <2.2
+    pkgconfig-depends:
+        sdl3 >= 3.4,
+        sdl3-ttf
     hs-source-dirs:   test
     default-language: GHC2024
