@@ -24,3 +24,4 @@
 * Hardened partial startup cleanup so SDL, mixer, and TTF initialization failures unwind already-started subsystems in reverse order.
 * Prevented asset-manager shutdown hangs when a background worker exits before consuming its stop command.
 * Prevented asset reload waits from hanging when cleanup fails, and report background hot-reload failures instead of discarding them.
+* Kept render-graph targets valid when a resized replacement cannot be allocated.

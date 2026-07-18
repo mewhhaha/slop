@@ -209,9 +209,9 @@ ensureTarget (Node nodeId) size = do
     Just (target, targetSize)
       | targetSize == size -> pure target
       | otherwise -> do
-          S.destroyTarget target
           target' <- S.createRenderTarget (fst size) (snd size)
           liftIO (writeIORef window.appPipelineTargets (IntMap.insert nodeId (target', size) targets))
+          S.destroyTarget target
           pure target'
     Nothing -> do
       target' <- S.createRenderTarget (fst size) (snd size)
