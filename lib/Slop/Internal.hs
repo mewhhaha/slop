@@ -5730,23 +5730,25 @@ crossfadeToWith pool audio duration loops =
           liftIO (startTrackPlaybackIO "crossfade track pool" window track audio loops)
         (trackA : trackB : _) -> do
           state <- liftIO (readIORef pool.poolState)
-          let activeIdx = state.psActive `mod` 2
-          let fromTrack = if activeIdx == 0 then trackA else trackB
-          let toTrack = if activeIdx == 0 then trackB else trackA
-          case state.psBlend of
+          settledState <- case state.psBlend of
             Just blend -> do
               stopped <- liftIO (mixStopTrack blend.bsFrom 0)
               requireAudioSuccess "stop replaced crossfade track" stopped
               gainSet <- liftIO (mixSetTrackGain blend.bsTo 1)
               requireAudioSuccess "restore replaced crossfade gain" gainSet
-              liftIO (writeIORef pool.poolState state { psBlend = Nothing, psActive = trackIndex pool blend.bsTo })
-            Nothing -> pure ()
+              let state' = state { psBlend = Nothing, psActive = trackIndex pool blend.bsTo }
+              liftIO (writeIORef pool.poolState state')
+              pure state'
+            Nothing -> pure state
+          let activeIdx = settledState.psActive `mod` 2
+          let fromTrack = if activeIdx == 0 then trackA else trackB
+          let toTrack = if activeIdx == 0 then trackB else trackA
           if duration <= 0 || fromTrack == toTrack
             then do
               gainSet <- liftIO (mixSetTrackGain fromTrack 1)
               requireAudioSuccess "set crossfade track gain" gainSet
               liftIO (startTrackPlaybackIO "crossfade track pool" window fromTrack audio loops)
-              liftIO (writeIORef pool.poolState state { psActive = trackIndex pool fromTrack })
+              liftIO (writeIORef pool.poolState settledState { psActive = trackIndex pool fromTrack })
             else do
               toGainSet <- liftIO (mixSetTrackGain toTrack 0)
               requireAudioSuccess "set incoming crossfade gain" toGainSet
@@ -5759,7 +5761,7 @@ crossfadeToWith pool audio duration loops =
                     , bsDuration = duration
                     , bsElapsed = 0
                     }
-              liftIO (writeIORef pool.poolState state { psBlend = Just blend })
+              liftIO (writeIORef pool.poolState settledState { psBlend = Just blend })
 
 trackIndex :: TrackPool -> Track -> Int
 trackIndex pool track =
