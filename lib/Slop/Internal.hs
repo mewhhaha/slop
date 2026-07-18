@@ -5435,14 +5435,23 @@ requireAudioSuccess operation succeeded =
     let evidence = if null detail then "operation returned false" else T.pack detail
     throwSlop (SlopSDLFailure operation evidence)
 
-requireAudioPlayback :: T.Text -> Audio -> Bool -> WindowM ()
-requireAudioPlayback operation audio succeeded =
+requireAudioPlaybackIO :: T.Text -> Audio -> Bool -> IO ()
+requireAudioPlaybackIO operation audio succeeded =
   unless succeeded $ do
-    detail <- liftIO sdlGetError
+    detail <- sdlGetError
     let evidence = if null detail then "operation returned false" else T.pack detail
     case audio of
-      AudioStream path -> throwSlop (SlopAssetFailure operation (T.pack path) evidence)
-      AudioLoaded _ -> throwSlop (SlopSDLFailure operation evidence)
+      AudioStream path -> throwIO (SlopAssetFailure operation (T.pack path) evidence)
+      AudioLoaded _ -> throwIO (SlopSDLFailure operation evidence)
+
+startTrackPlaybackIO :: T.Text -> Window -> Track -> Audio -> Int -> IO ()
+startTrackPlaybackIO operation window track audio loops = do
+  inputSet <- setTrackAudioSource window track audio
+  requireAudioPlaybackIO (operation <> " input") audio inputSet
+  started <- mixPlayTrack track 0
+  requireAudioPlaybackIO operation audio started
+  loopsSet <- mixSetTrackLoops track loops
+  requireAudioPlaybackIO (operation <> " loops") audio loopsSet
 
 playMusic :: Audio -> Int -> WindowM ()
 playMusic audio loops = do
@@ -5461,11 +5470,7 @@ playMusic audio loops = do
             pure (Just track)
   case mTrack of
     Nothing -> requireAudioSuccess "MIX_CreateTrack" False
-    Just track -> do
-      okSet <- liftIO (setTrackAudioSource window track audio)
-      okPlay <- liftIO (mixPlayTrack track 0)
-      okLoop <- liftIO (mixSetTrackLoops track loops)
-      requireAudioPlayback "play music" audio (okSet && okPlay && okLoop)
+    Just track -> liftIO (startTrackPlaybackIO "play music" window track audio loops)
 
 playMusicLoop :: Audio -> WindowM ()
 playMusicLoop audio = playMusic audio (-1)
@@ -5483,27 +5488,21 @@ playSound audio = do
               then pure True
               else mixDestroyTrack track >> pure True
       liftIO (registerOwnedResource window (trackResourceKey track) release)
-      okSet <- liftIO (setTrackAudioSource window track audio)
-      okPlay <- liftIO (mixPlayTrack track 0)
-      okLoop <- liftIO (mixSetTrackLoops track 0)
-      if okSet && okPlay && okLoop
-        then do
-          _ <- liftIO $ forkIO $ do
-            let waitDone = do
-                  playing <- modifyMVar released $ \alreadyReleased ->
-                    if alreadyReleased
-                      then pure (True, False)
-                      else do
-                        trackIsPlaying <- mixTrackPlaying track
-                        pure (False, trackIsPlaying)
-                  if playing
-                    then threadDelay 10000 >> waitDone
-                    else releaseOwnedResource window (trackResourceKey track) release
-            waitDone
-          pure ()
-        else do
-          liftIO (releaseOwnedResource window (trackResourceKey track) release)
-          requireAudioPlayback "play sound" audio False
+      liftIO $ startTrackPlaybackIO "play sound" window track audio 0
+        `onException` releaseOwnedResource window (trackResourceKey track) release
+      _ <- liftIO $ forkIO $ do
+        let waitDone = do
+              playing <- modifyMVar released $ \alreadyReleased ->
+                if alreadyReleased
+                  then pure (True, False)
+                  else do
+                    trackIsPlaying <- mixTrackPlaying track
+                    pure (False, trackIsPlaying)
+              if playing
+                then threadDelay 10000 >> waitDone
+                else releaseOwnedResource window (trackResourceKey track) release
+        waitDone
+      pure ()
 
 data PoolPolicy
   = PoolRoundRobin
@@ -5602,20 +5601,16 @@ playPoolWith pool loops mPriority audio = do
       case chooseResult of
         Nothing -> requireAudioSuccess "play track pool" False
         Just (idx, info) -> do
-          stopped <-
-            if info.tiPlaying
-              then liftIO (mixStopTrack info.tiTrack 0)
-              else pure True
-          okSet <- liftIO (setTrackAudioSource window info.tiTrack audio)
-          okPlay <- liftIO (mixPlayTrack info.tiTrack 0)
-          okLoop <- liftIO (mixSetTrackLoops info.tiTrack loops)
+          when info.tiPlaying $ do
+            stopped <- liftIO (mixStopTrack info.tiTrack 0)
+            requireAudioSuccess "stop track for pool playback" stopped
+          liftIO (startTrackPlaybackIO "play track pool" window info.tiTrack audio loops)
           let priorityValue = fromMaybe (Map.findWithDefault 0 idx state.psPriorities) mPriority
           let state' = state
                 { psNext = (idx + 1) `mod` length tracks
                 , psLastUsed = Map.insert idx ticks state.psLastUsed
                 , psPriorities = Map.insert idx priorityValue state.psPriorities
                 }
-          requireAudioPlayback "play track pool" audio (stopped && okSet && okPlay && okLoop)
           liftIO (writeIORef pool.poolState state')
   where
     buildInfo state (idx, track) = do
@@ -5730,11 +5725,9 @@ crossfadeToWith pool audio duration loops =
       case tracks of
         [] -> requireAudioSuccess "crossfade track pool" False
         [track] -> do
-          okSet <- liftIO (setTrackAudioSource window track audio)
-          okPlay <- liftIO (mixPlayTrack track 0)
-          okLoop <- liftIO (mixSetTrackLoops track loops)
-          okGain <- liftIO (mixSetTrackGain track 1)
-          requireAudioPlayback "crossfade track pool" audio (okSet && okPlay && okLoop && okGain)
+          gainSet <- liftIO (mixSetTrackGain track 1)
+          requireAudioSuccess "set crossfade track gain" gainSet
+          liftIO (startTrackPlaybackIO "crossfade track pool" window track audio loops)
         (trackA : trackB : _) -> do
           state <- liftIO (readIORef pool.poolState)
           let activeIdx = state.psActive `mod` 2
@@ -5743,31 +5736,29 @@ crossfadeToWith pool audio duration loops =
           case state.psBlend of
             Just blend -> do
               stopped <- liftIO (mixStopTrack blend.bsFrom 0)
+              requireAudioSuccess "stop replaced crossfade track" stopped
               gainSet <- liftIO (mixSetTrackGain blend.bsTo 1)
-              requireAudioSuccess "replace track crossfade" (stopped && gainSet)
+              requireAudioSuccess "restore replaced crossfade gain" gainSet
               liftIO (writeIORef pool.poolState state { psBlend = Nothing, psActive = trackIndex pool blend.bsTo })
             Nothing -> pure ()
           if duration <= 0 || fromTrack == toTrack
             then do
-              okSet <- liftIO (setTrackAudioSource window fromTrack audio)
-              okPlay <- liftIO (mixPlayTrack fromTrack 0)
-              okLoop <- liftIO (mixSetTrackLoops fromTrack loops)
-              okGain <- liftIO (mixSetTrackGain fromTrack 1)
-              requireAudioPlayback "crossfade track pool" audio (okSet && okPlay && okLoop && okGain)
+              gainSet <- liftIO (mixSetTrackGain fromTrack 1)
+              requireAudioSuccess "set crossfade track gain" gainSet
+              liftIO (startTrackPlaybackIO "crossfade track pool" window fromTrack audio loops)
               liftIO (writeIORef pool.poolState state { psActive = trackIndex pool fromTrack })
             else do
               toGainSet <- liftIO (mixSetTrackGain toTrack 0)
-              okSet <- liftIO (setTrackAudioSource window toTrack audio)
-              okPlay <- liftIO (mixPlayTrack toTrack 0)
-              okLoop <- liftIO (mixSetTrackLoops toTrack loops)
+              requireAudioSuccess "set incoming crossfade gain" toGainSet
+              liftIO (startTrackPlaybackIO "crossfade track pool" window toTrack audio loops)
               fromGainSet <- liftIO (mixSetTrackGain fromTrack 1)
+              requireAudioSuccess "set outgoing crossfade gain" fromGainSet
               let blend = BlendState
                     { bsFrom = fromTrack
                     , bsTo = toTrack
                     , bsDuration = duration
                     , bsElapsed = 0
                     }
-              requireAudioPlayback "crossfade track pool" audio (toGainSet && okSet && okPlay && okLoop && fromGainSet)
               liftIO (writeIORef pool.poolState state { psBlend = Just blend })
 
 trackIndex :: TrackPool -> Track -> Int
@@ -5795,18 +5786,12 @@ destroyTrack track = do
 playOn :: Track -> Audio -> WindowM ()
 playOn track audio = do
   window <- ask
-  okSet <- liftIO (setTrackAudioSource window track audio)
-  okPlay <- liftIO (mixPlayTrack track 0)
-  okLoop <- liftIO (mixSetTrackLoops track 0)
-  requireAudioPlayback "play track" audio (okSet && okPlay && okLoop)
+  liftIO (startTrackPlaybackIO "play track" window track audio 0)
 
 playOnLoop :: Track -> Audio -> WindowM ()
 playOnLoop track audio = do
   window <- ask
-  okSet <- liftIO (setTrackAudioSource window track audio)
-  okPlay <- liftIO (mixPlayTrack track 0)
-  okLoop <- liftIO (mixSetTrackLoops track (-1))
-  requireAudioPlayback "play track loop" audio (okSet && okPlay && okLoop)
+  liftIO (startTrackPlaybackIO "play track loop" window track audio (-1))
 
 stopTrack :: Track -> WindowM ()
 stopTrack track = do

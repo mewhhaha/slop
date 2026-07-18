@@ -28,3 +28,4 @@
 * Cleaned up already-started asset workers when creating a later worker fails.
 * Kept asset workers alive when cleanup for a cancelled in-flight load fails.
 * Release assets in reverse registration order so dependent assets unwind before their dependencies.
+* Stop audio playback setup at the first SDL_mixer failure and preserve the failing operation's evidence.
