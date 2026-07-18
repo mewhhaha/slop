@@ -1754,25 +1754,33 @@ newAssetManager = do
     }
 
 startAssetWorkers :: Window -> Int -> AssetManager -> IO AssetManager
-startAssetWorkers app workerCount manager = do
+startAssetWorkers app workerCount manager = mask_ $ do
   let count = max 1 workerCount
-  workerCompletions <- replicateM count $ do
-    completion <- newEmptyTMVarIO
-    void $ forkFinally
-      (assetWorker app manager.amState manager.amQueue)
-      (\result ->
-        (case result of
-          Left exception -> hPutStrLn stderr ("slop asset worker exited: " <> displayException exception)
-          Right () -> pure ())
-        `finally` atomically (putTMVar completion ()))
-    pure completion
+  startedWorkers <- newIORef []
+  workerCompletions <-
+    replicateM count (do
+      completion <- newEmptyTMVarIO
+      void $ forkFinally
+        (assetWorker app manager.amState manager.amQueue)
+        (\result ->
+          (case result of
+            Left exception -> hPutStrLn stderr ("slop asset worker exited: " <> displayException exception)
+            Right () -> pure ())
+          `finally` atomically (putTMVar completion ()))
+      modifyIORef' startedWorkers (completion :)
+      pure completion)
+      `onException` (readIORef startedWorkers >>= stopAssetWorkers manager.amQueue)
   pure manager { amWorkerCompletions = workerCompletions }
 
 shutdownAssetManager :: Window -> AssetManager -> IO ()
 shutdownAssetManager app mgr = do
-  atomically $ forM_ mgr.amWorkerCompletions (const (writeTQueue mgr.amQueue StopCommand))
-  mapM_ (atomically . readTMVar) mgr.amWorkerCompletions
+  stopAssetWorkers mgr.amQueue mgr.amWorkerCompletions
   removeAllAssetsIO app mgr
+
+stopAssetWorkers :: TQueue AssetCommand -> [TMVar ()] -> IO ()
+stopAssetWorkers queue workerCompletions = do
+  atomically $ forM_ workerCompletions (const (writeTQueue queue StopCommand))
+  mapM_ (atomically . readTMVar) workerCompletions
 
 removeAllAssetsIO :: Window -> AssetManager -> IO ()
 removeAllAssetsIO app mgr = do

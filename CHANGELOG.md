@@ -25,3 +25,4 @@
 * Prevented asset-manager shutdown hangs when a background worker exits before consuming its stop command.
 * Prevented asset reload waits from hanging when cleanup fails, and report background hot-reload failures instead of discarding them.
 * Kept render-graph targets valid when a resized replacement cannot be allocated.
+* Cleaned up already-started asset workers when creating a later worker fails.
