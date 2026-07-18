@@ -3368,7 +3368,7 @@ with2DContext blend camera effect action =
 runWindowIO :: Config -> (Window -> IO a) -> IO a
 runWindowIO cfg action = do
   either throwIO pure (validateConfig cfg)
-  bracket_ initSDL shutdownSDL $ do
+  withInitializedSubsystems $ do
     let title = cfg.windowTitle
     let width = cfg.windowWidth
     let height = cfg.windowHeight
@@ -3481,17 +3481,13 @@ runWindowIO cfg action = do
                                   (cleanupRenderTargets windowHandle `finally`
                                     cleanupDepthTargets windowHandle)))
   where
-    initSDL = do
-      ok <- sdlInit (sdlInitVideo .|. sdlInitAudio)
-      unless ok $ die "SDL_Init"
-      okMix <- mixInit
-      unless okMix $ die "MIX_Init"
-      okFont <- ttfInit
-      unless okFont $ die "TTF_Init"
-    shutdownSDL = do
-      mixQuit
-      ttfQuit
-      sdlQuit
+    withInitializedSubsystems body =
+      bracket_ (initializeSubsystem "SDL_Init" (sdlInit (sdlInitVideo .|. sdlInitAudio))) sdlQuit $
+        bracket_ (initializeSubsystem "MIX_Init" mixInit) mixQuit $
+          bracket_ (initializeSubsystem "TTF_Init" ttfInit) ttfQuit body
+    initializeSubsystem label initialize = do
+      initialized <- initialize
+      unless initialized (die label)
     die label = do
       err <- sdlGetError
       throwIO (SlopSDLFailure (T.pack label) (T.pack err))
