@@ -1787,7 +1787,7 @@ removeAllAssetsIO app mgr = do
   entries <- atomically $ do
     st <- readTVar (mgr.amState)
     writeTVar (mgr.amState) st { msAssets = IntMap.empty }
-    pure (IntMap.elems (st.msAssets))
+    pure (map snd (IntMap.toDescList (st.msAssets)))
   finalizeEntries entries
   where
     finalizeEntries [] = pure ()
