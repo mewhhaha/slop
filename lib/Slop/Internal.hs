@@ -3546,21 +3546,38 @@ require label action = do
       err <- sdlGetError
       throwIO (SlopSDLFailure (T.pack label) (T.pack err))
 
+data UnsubmittedGPUCommand
+  = CancelUnsubmittedGPUCommand
+  | SubmitUnsubmittedGPUCommand
+
 recordAndSubmitGPU :: GPUDevice -> (GPUCommandBuffer -> IO a) -> IO a
 recordAndSubmitGPU device record = mask_ $ do
   commandBuffer <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer device)
-  result <- record commandBuffer `onException` cancel commandBuffer
+  runGPUCommands CancelUnsubmittedGPUCommand commandBuffer (record commandBuffer)
+
+runGPUCommands :: UnsubmittedGPUCommand -> GPUCommandBuffer -> IO a -> IO a
+runGPUCommands unsubmitted commandBuffer record = mask_ $ do
+  result <- record `onException` abandonGPUCommands unsubmitted commandBuffer
   submitted <- sdlSubmitGPUCommandBuffer commandBuffer
   unless submitted $ do
     err <- sdlGetError
     throwIO (SlopSDLFailure "SDL_SubmitGPUCommandBuffer" (T.pack err))
   pure result
-  where
-    cancel commandBuffer = do
-      cancelled <- sdlCancelGPUCommandBuffer commandBuffer
-      unless cancelled $ do
-        err <- sdlGetError
+
+abandonGPUCommands :: UnsubmittedGPUCommand -> GPUCommandBuffer -> IO ()
+abandonGPUCommands unsubmitted commandBuffer = do
+  succeeded <- case unsubmitted of
+    CancelUnsubmittedGPUCommand ->
+      sdlCancelGPUCommandBuffer commandBuffer
+    SubmitUnsubmittedGPUCommand ->
+      sdlSubmitGPUCommandBuffer commandBuffer
+  unless succeeded $ do
+    err <- sdlGetError
+    case unsubmitted of
+      CancelUnsubmittedGPUCommand ->
         hPutStrLn stderr ("slop GPU command cancellation failed: " <> err)
+      SubmitUnsubmittedGPUCommand ->
+        hPutStrLn stderr ("slop GPU command failure submission failed: " <> err)
 
 readInputState :: IO InputState
 readInputState = do
@@ -4133,72 +4150,71 @@ data PreparedDraw = PreparedDraw
 flushFrame :: Window -> IO ()
 flushFrame window = do
   ops <- drainRecording window.appFrameContext
-  unless (null ops) $ do
+  unless (null ops) $ mask_ $ do
     cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
-    (swapTex, w, h) <- require "SDL_WaitAndAcquireGPUSwapchainTexture" (sdlWaitAndAcquireGPUSwapchainTexture cmd window.appWindow)
+    (swapTex, w, h) <-
+      require "SDL_WaitAndAcquireGPUSwapchainTexture" (sdlWaitAndAcquireGPUSwapchainTexture cmd window.appWindow)
+        `onException` abandonGPUCommands CancelUnsubmittedGPUCommand cmd
     let size = (fromIntegral w, fromIntegral h)
-    flushOps window cmd window.appSwapchainFormat swapTex size (ensureSwapchainDepthTarget window size) ops
+    flushOps window SubmitUnsubmittedGPUCommand cmd window.appSwapchainFormat swapTex size (ensureSwapchainDepthTarget window size) ops
 
 flushTarget :: Window -> RenderTarget -> [RecordedOp] -> IO ()
 flushTarget window (RenderTarget tex) ops =
-  unless (null ops) $
-    do
-      cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
-      let size = (tex.textureWidth, tex.textureHeight)
-      flushOps window cmd window.appSwapchainFormat tex.textureHandle size (ensureRenderTargetDepth window tex size) ops
+  unless (null ops) $ mask_ $ do
+    cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
+    let size = (tex.textureWidth, tex.textureHeight)
+    flushOps window CancelUnsubmittedGPUCommand cmd window.appSwapchainFormat tex.textureHandle size (ensureRenderTargetDepth window tex size) ops
 
-flushOps :: Window -> GPUCommandBuffer -> SDL_GPUTextureFormat -> GPUTexture -> (Int, Int) -> IO DepthTarget -> [RecordedOp] -> IO ()
-flushOps window cmd fmt targetTex (w, h) getDepth ops = do
+flushOps :: Window -> UnsubmittedGPUCommand -> GPUCommandBuffer -> SDL_GPUTextureFormat -> GPUTexture -> (Int, Int) -> IO DepthTarget -> [RecordedOp] -> IO ()
+flushOps window unsubmitted cmd fmt targetTex (w, h) getDepth ops = mask_ $ do
   let (clearColor, drawOps) = extractClear ops
   prepared <- prepareDraws window fmt (w, h) drawOps
-  flip finally (mapM_ (releasePrepared window) prepared) $ do
-    unless (null prepared) $ do
-      copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
-      mapM_ (uploadPrepared cmd copyPass) prepared
-      sdlEndGPUCopyPass copyPass
-    let needsDepth = any (\pd -> pd.pdDepthMode /= DepthNone) prepared
-    depthInfo <- if needsDepth
-      then do
-        depthTarget <- getDepth
-        let GPUTexture depthPtr = depthTarget.depthTexture.textureHandle
-        pure (Just GPUDepthStencilTargetInfo
-          { gpuDepthStencilTexture = depthPtr
-          , gpuDepthStencilClearDepth = 1
-          , gpuDepthStencilLoadOp = sdlGPULoadOpClear
-          , gpuDepthStencilStoreOp = sdlGPUStoreOpStore
-          , gpuDepthStencilStencilLoadOp = sdlGPULoadOpClear
-          , gpuDepthStencilStencilStoreOp = sdlGPUStoreOpStore
-          , gpuDepthStencilCycle = 0
-          , gpuDepthStencilClearStencil = 0
-          , gpuDepthStencilMipLevel = 0
-          , gpuDepthStencilLayer = 0
-          })
-      else pure Nothing
-    let clearF = maybe (FColor 0 0 0 0) toFColor clearColor
-    let loadOp = if clearColor == Nothing then sdlGPULoadOpLoad else sdlGPULoadOpClear
-    let targetInfo = GPUColorTargetInfo
-          { gpuColorTargetTexture = let GPUTexture ptr = targetTex in ptr
-          , gpuColorTargetMipLevel = 0
-          , gpuColorTargetLayer = 0
-          , gpuColorTargetClearColor = clearF
-          , gpuColorTargetLoadOp = loadOp
-          , gpuColorTargetStoreOp = sdlGPUStoreOpStore
-          , gpuColorTargetResolveTexture = nullPtr
-          , gpuColorTargetResolveMipLevel = 0
-          , gpuColorTargetResolveLayer = 0
-          , gpuColorTargetCycle = 0
-          , gpuColorTargetCycleResolve = 0
-          , gpuColorTargetPadding1 = 0
-          , gpuColorTargetPadding2 = 0
-          }
-    renderPass <- require "SDL_BeginGPURenderPass" (sdlBeginGPURenderPass cmd targetInfo depthInfo)
-    sdlSetGPUViewport renderPass (GPUViewport 0 0 (fromIntegral w) (fromIntegral h) 0 1)
-    mapM_ (executePrepared cmd renderPass) prepared
-    sdlEndGPURenderPass renderPass
-    ok <- sdlSubmitGPUCommandBuffer cmd
-    unless ok $ do
-      err <- sdlGetError
-      throwIO (SlopSDLFailure "SDL_SubmitGPUCommandBuffer" (T.pack err))
+    `onException` abandonGPUCommands unsubmitted cmd
+  flip finally (mapM_ (releasePrepared window) prepared) $
+    runGPUCommands unsubmitted cmd $ do
+      unless (null prepared) $ do
+        copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
+        flip finally (sdlEndGPUCopyPass copyPass) $
+          mapM_ (uploadPrepared cmd copyPass) prepared
+      let needsDepth = any (\pd -> pd.pdDepthMode /= DepthNone) prepared
+      depthInfo <- if needsDepth
+        then do
+          depthTarget <- getDepth
+          let GPUTexture depthPtr = depthTarget.depthTexture.textureHandle
+          pure (Just GPUDepthStencilTargetInfo
+            { gpuDepthStencilTexture = depthPtr
+            , gpuDepthStencilClearDepth = 1
+            , gpuDepthStencilLoadOp = sdlGPULoadOpClear
+            , gpuDepthStencilStoreOp = sdlGPUStoreOpStore
+            , gpuDepthStencilStencilLoadOp = sdlGPULoadOpClear
+            , gpuDepthStencilStencilStoreOp = sdlGPUStoreOpStore
+            , gpuDepthStencilCycle = 0
+            , gpuDepthStencilClearStencil = 0
+            , gpuDepthStencilMipLevel = 0
+            , gpuDepthStencilLayer = 0
+            })
+        else pure Nothing
+      let clearF = maybe (FColor 0 0 0 0) toFColor clearColor
+      let loadOp = if clearColor == Nothing then sdlGPULoadOpLoad else sdlGPULoadOpClear
+      let targetInfo = GPUColorTargetInfo
+            { gpuColorTargetTexture = let GPUTexture ptr = targetTex in ptr
+            , gpuColorTargetMipLevel = 0
+            , gpuColorTargetLayer = 0
+            , gpuColorTargetClearColor = clearF
+            , gpuColorTargetLoadOp = loadOp
+            , gpuColorTargetStoreOp = sdlGPUStoreOpStore
+            , gpuColorTargetResolveTexture = nullPtr
+            , gpuColorTargetResolveMipLevel = 0
+            , gpuColorTargetResolveLayer = 0
+            , gpuColorTargetCycle = 0
+            , gpuColorTargetCycleResolve = 0
+            , gpuColorTargetPadding1 = 0
+            , gpuColorTargetPadding2 = 0
+            }
+      renderPass <- require "SDL_BeginGPURenderPass" (sdlBeginGPURenderPass cmd targetInfo depthInfo)
+      flip finally (sdlEndGPURenderPass renderPass) $ do
+        sdlSetGPUViewport renderPass (GPUViewport 0 0 (fromIntegral w) (fromIntegral h) 0 1)
+        mapM_ (executePrepared cmd renderPass) prepared
 
 uploadPrepared :: GPUCommandBuffer -> GPUCopyPass -> PreparedDraw -> IO ()
 uploadPrepared _ copyPass prepared =
