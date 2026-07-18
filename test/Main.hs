@@ -13,6 +13,8 @@ import Slop.GPU
 main :: IO ()
 main = do
   basicGeometryIsBackendNeutral
+  drawContextsEncodeBlendAndCamera
+  drawContextRetainsCameraWhenEffectIsAdded
   invalidConfigFailsBeforeSDLInitialization
   advancedCameraIsAvailableFromGPU
   cameraViewMovesTheEyeToTheOrigin
@@ -35,6 +37,31 @@ basicGeometryIsBackendNeutral = do
       windowTypeIsPublic = Nothing
   rectangle `seq` pure ()
   windowTypeIsPublic `seq` pure ()
+
+drawContextsEncodeBlendAndCamera :: IO ()
+drawContextsEncodeBlendAndCamera = do
+  let camera = camera2DScreen (640, 360)
+  case basic2D camera of
+    As2D BlendAlpha (Just actualCamera) Nothing ->
+      assertEqual "basic 2D camera" camera actualCamera
+    _ -> fail "basic2D did not select alpha blending with its camera"
+  case basicUI of
+    As2D BlendPremultiplied Nothing Nothing -> pure ()
+    _ -> fail "basicUI did not select premultiplied screen-space rendering"
+  case basicParticleWithCamera camera of
+    As2D BlendAdditive (Just actualCamera) Nothing ->
+      assertEqual "particle camera" camera actualCamera
+    _ -> fail "basicParticleWithCamera did not select additive blending with its camera"
+
+drawContextRetainsCameraWhenEffectIsAdded :: IO ()
+drawContextRetainsCameraWhenEffectIsAdded = do
+  let camera = camera2DScreen (640, 360)
+      effect = spriteEffect (error "test effect shader was evaluated") []
+      context = (basic2D camera) { draw2DEffect = Just effect }
+  case context of
+    As2D BlendAlpha (Just actualCamera) (Just _) ->
+      assertEqual "effect context camera" camera actualCamera
+    _ -> fail "adding a sprite effect discarded the 2D camera context"
 
 invalidConfigFailsBeforeSDLInitialization :: IO ()
 invalidConfigFailsBeforeSDLInitialization = do
