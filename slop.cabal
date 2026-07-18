@@ -14,7 +14,7 @@ category:           Graphics, Audio
 build-type:         Simple
 homepage:           https://github.com/mewhhaha/slop
 bug-reports:        https://github.com/mewhhaha/slop/issues
-tested-with:        GHC ==9.12.2
+tested-with:        GHC ==9.12.2, GHC ==9.14.1
 extra-doc-files:    README.md, CHANGELOG.md
 
 source-repository head
@@ -47,7 +47,7 @@ library
                       Slop.Internal.DList
     -- other-extensions:
     build-depends:
-        base ^>=4.21.0.0,
+        base ^>=4.21.0.0 || ^>=4.22.0.0,
         bytestring,
         containers,
         directory,
@@ -71,7 +71,7 @@ executable slop
     if !flag(demo)
         buildable: False
     build-depends:
-        base ^>=4.21.0.0,
+        base ^>=4.21.0.0 || ^>=4.22.0.0,
         bytestring,
         containers,
         slop,
@@ -89,7 +89,7 @@ test-suite slop-test
     type:             exitcode-stdio-1.0
     main-is:          Main.hs
     build-depends:
-        base ^>=4.21.0.0,
+        base ^>=4.21.0.0 || ^>=4.22.0.0,
         slop,
         text
     hs-source-dirs:   test

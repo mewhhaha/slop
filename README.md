@@ -303,7 +303,7 @@ struct Params { time: f32; _pad0: f32; renderSize: vec2<f32>; dpiScale: vec2<f32
 @group(2) @binding(2) var samp0: sampler;
 @group(2) @binding(3) var samp1: sampler;
 ```
-Compile this with `wesl` so texture+sampler pairs collapse into Slop’s combined sampler slots.
+Compile this with Spirdo so texture+sampler pairs collapse into Slop’s combined sampler slots.
 Keep **texture bindings contiguous** (`0..N-1`) so sampler slots are predictable.
 
 ### Sprite shader override (Shader2D)
@@ -334,10 +334,17 @@ Use the inline pragma and keep texture bindings contiguous:
 
 ```haskell
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
 
-import Spirdo.Wesl (wesl, shaderSpirv)
+import Spirdo.Wesl.Reflection
+  ( defaultCompileOptions
+  , imports
+  , shaderSpirv
+  , spirv
+  , wesl
+  )
 
-scanlineShader = [wesl|
+scanlineShader = $(spirv defaultCompileOptions imports [wesl|
 // spirdo:sampler=combined
 struct Params { time: f32; _pad0: f32; renderSize: vec2<f32>; _pad1: vec2<f32>; };
 @group(3) @binding(0) var<uniform> params: Params;
@@ -350,7 +357,7 @@ fn main(@location(0) uv: vec2<f32>, @location(1) color: vec4<f32>) -> @location(
   let scan = 0.85 + 0.15 * sin(uv.y * params.renderSize.y * 0.25 + params.time * 18.0);
   return vec4(tex.rgb * scan, tex.a) * color;
 }
-|]
+|])
 
 layout <- either throwSlop pure $ shaderLayoutFromReflection "scanline" ShaderFragment
   [ ReflectedBinding "params" 3 0 (ReflectedUniform 32)
@@ -361,7 +368,7 @@ fx <- spriteEffectNamed shader2d [NamedUniform "params" params]
 draw (basic2D cam) (Sprite tex Nothing dst (Just fx))
 ```
 
-If you’re using Spirdo’s `inputsFromPrepared` for custom pipelines, remember:
+If you’re using Spirdo’s `inputsFor` for custom pipelines, remember:
 in `SamplerCombined` mode sampler bindings are **not** part of the interface.
 Use `sampledTexture @"tex0" texHandle samplerHandle` in the input builder, or
 bind sampler slots explicitly in Slop with `ShaderSamplerWith`.

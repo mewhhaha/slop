@@ -3,4 +3,4 @@ packages: .
 source-repository-package
   type: git
   location: https://github.com/mewhhaha/spirdo
-  tag: 1c249eeb51165b5896781152cc2774b73b2eb60c
+  tag: 8bfd82daa7aad879a9a17cbb465c28cf89c3e1c4

@@ -12,3 +12,4 @@
 * Breaking: the high-level facade was split into focused modules, with positional GPU APIs moved to the opt-in `Slop.GPU` module.
 * Added reflected shader layouts and named uniform/compute bindings, including declaration, group, kind, and size validation.
 * Directly created GPU, text, and audio resources are released automatically by `runWindow` in reverse acquisition order.
+* Added GHC 9.14 support and updated the demo to Spirdo 0.2's compile-time shader API.
