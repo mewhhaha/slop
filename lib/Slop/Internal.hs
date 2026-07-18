@@ -1849,7 +1849,13 @@ finishLoad app stateVar assetId spec result _ = case result of
           pure False
         Nothing -> pure True
         _ -> pure False
-    if cancelled then finalizer else pure ()
+    when cancelled $ do
+      cleanupResult <- trySyncException finalizer
+      case cleanupResult of
+        Left exception ->
+          let err = exceptionAssetError "load cancellation cleanup" (assetLabel spec) exception
+          in hPutStrLn stderr ("slop asset cleanup failed: " <> T.unpack (renderSlopError err))
+        Right () -> pure ()
 
 finishReload :: forall spec. AssetLoader spec => Window -> TVar ManagerState -> Int -> spec -> SlopResult (AssetType spec) -> Maybe (TMVar (SlopResult ())) -> IO ()
 finishReload app stateVar assetId spec result notify = case result of

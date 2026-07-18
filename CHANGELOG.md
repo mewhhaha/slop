@@ -26,3 +26,4 @@
 * Prevented asset reload waits from hanging when cleanup fails, and report background hot-reload failures instead of discarding them.
 * Kept render-graph targets valid when a resized replacement cannot be allocated.
 * Cleaned up already-started asset workers when creating a later worker fails.
+* Kept asset workers alive when cleanup for a cancelled in-flight load fails.
