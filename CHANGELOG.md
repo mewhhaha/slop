@@ -19,3 +19,4 @@
 * Added the shader generator as a checked Cabal component and removed unused template and demo asset files.
 * Breaking: removed exact API aliases and the fragment-only `ShaderBinding` layer; use the canonical `getAsset`, `output`, `computePipeline`, `merge`, `defaultTextStyle`, fragment shader, `TrackPool`, and `ShaderUniform` APIs. Pipeline writer and single-path wrapper constructors are now abstract.
 * Breaking: removed the mutable uniform-cache API, which did not avoid draw-time uploads; pass `ShaderUniform` values explicitly at the draw or pass boundary.
+* Breaking: collapsed the thirteen `As2D` constructors into one composable blend/camera/effect record and removed raw matrix-only variants. Sprite effects now preserve the selected 2D camera and blend mode. The unused right-biased `SpriteEffect`/`TextStyle` semigroups were removed in favor of `TextStylePatch`.

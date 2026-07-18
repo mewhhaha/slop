@@ -874,18 +874,13 @@ data RecordingContext = RecordingContext
 
 newtype Recording = Recording RecordingContext
 
-data Transform2D
-  = TransformMatrix (M44 Float)
-  | TransformCamera Camera2D
-  deriving (Eq, Show)
-
 data ShaderContext = ShaderContext
   { ctxShader :: Shader
   , ctxUniforms :: [UniformBinding]
   , ctxSamplers :: [SamplerBindingSpec]
   , ctxStorage :: [StorageBinding]
   , ctxBlend :: BlendMode
-  , ctxTransform :: Maybe Transform2D
+  , ctxCamera :: Maybe Camera2D
   }
 
 data DrawShape
@@ -2966,43 +2961,38 @@ fullscreenRect (w, h) = rect 0 0 (fromIntegral w) (fromIntegral h)
 point :: Float -> Float -> FPoint
 point x y = FPoint (realToFrac x) (realToFrac y)
 
-data As2D
-  = As2DCamera Camera2D
-  | AsUI
-  | AsUIWith Shader2D [ShaderUniform]
-  | AsUIView (M44 Float)
-  | AsUIWithView Shader2D [ShaderUniform] (M44 Float)
-  | AsUICamera Camera2D
-  | AsUIWithCamera Shader2D [ShaderUniform] Camera2D
-  | AsParticle
-  | AsParticleWith Shader2D [ShaderUniform]
-  | AsParticleView (M44 Float)
-  | AsParticleWithView Shader2D [ShaderUniform] (M44 Float)
-  | AsParticleCamera Camera2D
-  | AsParticleWithCamera Shader2D [ShaderUniform] Camera2D
+data As2D = As2D
+  { draw2DBlend :: BlendMode
+  , draw2DCamera :: Maybe Camera2D
+  , draw2DEffect :: Maybe SpriteEffect
+  }
 
 newtype As3D = As3D Camera3D
 
 basic2D :: Camera2D -> As2D
-basic2D = As2DCamera
+basic2D camera = As2D BlendAlpha (Just camera) Nothing
 
 basicUI :: As2D
-basicUI = AsUI
+basicUI = As2D BlendPremultiplied Nothing Nothing
 
 basicUIWith :: Shader2D -> [ShaderUniform] -> As2D
-basicUIWith = AsUIWith
+basicUIWith shader uniforms =
+  basicUI { draw2DEffect = Just (SpriteEffect shader uniforms) }
 
 basicUIWithCamera :: Camera2D -> As2D
-basicUIWithCamera = AsUICamera
+basicUIWithCamera camera =
+  basicUI { draw2DCamera = Just camera }
 
 basicParticle :: As2D
-basicParticle = AsParticle
+basicParticle = As2D BlendAdditive Nothing Nothing
 
 basicParticleWith :: Shader2D -> [ShaderUniform] -> As2D
-basicParticleWith = AsParticleWith
+basicParticleWith shader uniforms =
+  basicParticle { draw2DEffect = Just (SpriteEffect shader uniforms) }
 
 basicParticleWithCamera :: Camera2D -> As2D
-basicParticleWithCamera = AsParticleCamera
+basicParticleWithCamera camera =
+  basicParticle { draw2DCamera = Just camera }
 
 basic3D :: Camera3D -> As3D
 basic3D = As3D
@@ -3040,9 +3030,6 @@ spriteEffectNamed shader2d named = do
       either throwSlop pure (resolveReflectedUniforms layout named)
   pure (SpriteEffect shader2d uniforms)
 
-instance Semigroup SpriteEffect where
-  _ <> effect = effect
-
 data TextStyle = TextStyle
   { textColor :: Color
   , textShader :: Maybe SpriteEffect
@@ -3056,13 +3043,6 @@ defaultTextStyle =
     , textShader = Nothing
     , textBlend = Nothing
     }
-
-instance Semigroup TextStyle where
-  TextStyle _ shader blend <> TextStyle color' shader' blend' =
-    TextStyle
-      color'
-      (if isJust shader' then shader' else shader)
-      (if isJust blend' then blend' else blend)
 
 data Patch a
   = Keep
@@ -3339,10 +3319,7 @@ instance Draw As2D RectFill where
 
 instance Draw As2D Sprite where
   draw ctx (Sprite texture src dst effect) =
-    case effect of
-      Nothing -> withAs2D ctx (drawTexture texture src dst)
-      Just (SpriteEffect sh uniforms) ->
-        withShaderBindings (unwrapShader2D sh) uniforms (drawTexture texture src dst)
+    withAs2DOverrides ctx Nothing effect (drawTexture texture src dst)
 
 instance Draw As2D Label where
   draw ctx (Label textObj x y style) =
@@ -3359,63 +3336,33 @@ instance Draw ctx a => Draw ctx [a] where
   draw ctx = mapM_ (draw ctx)
 
 withAs2D :: As2D -> WindowM a -> WindowM a
-withAs2D ctx action =
-  case ctx of
-    As2DCamera cam -> withBlendTransform BlendAlpha (Just (TransformCamera cam)) action
-    AsUI -> withBlendTransform BlendPremultiplied Nothing action
-    AsUIWith shader uniforms -> withShaderBindingsBlendTransform BlendPremultiplied (unwrapShader2D shader) uniforms Nothing action
-    AsUIView view -> withBlendTransform BlendPremultiplied (Just (TransformMatrix view)) action
-    AsUIWithView shader uniforms view -> withShaderBindingsBlendTransform BlendPremultiplied (unwrapShader2D shader) uniforms (Just (TransformMatrix view)) action
-    AsUICamera cam -> withBlendTransform BlendPremultiplied (Just (TransformCamera cam)) action
-    AsUIWithCamera shader uniforms cam -> withShaderBindingsBlendTransform BlendPremultiplied (unwrapShader2D shader) uniforms (Just (TransformCamera cam)) action
-    AsParticle -> withBlendTransform BlendAdditive Nothing action
-    AsParticleWith shader uniforms -> withShaderBindingsBlendTransform BlendAdditive (unwrapShader2D shader) uniforms Nothing action
-    AsParticleView view -> withBlendTransform BlendAdditive (Just (TransformMatrix view)) action
-    AsParticleWithView shader uniforms view -> withShaderBindingsBlendTransform BlendAdditive (unwrapShader2D shader) uniforms (Just (TransformMatrix view)) action
-    AsParticleCamera cam -> withBlendTransform BlendAdditive (Just (TransformCamera cam)) action
-    AsParticleWithCamera shader uniforms cam -> withShaderBindingsBlendTransform BlendAdditive (unwrapShader2D shader) uniforms (Just (TransformCamera cam)) action
-
-as2DContext :: As2D -> (BlendMode, Maybe Transform2D, Maybe (Shader2D, [ShaderUniform]))
-as2DContext ctx =
-  case ctx of
-    As2DCamera cam -> (BlendAlpha, Just (TransformCamera cam), Nothing)
-    AsUI -> (BlendPremultiplied, Nothing, Nothing)
-    AsUIWith shader uniforms -> (BlendPremultiplied, Nothing, Just (shader, uniforms))
-    AsUIView view -> (BlendPremultiplied, Just (TransformMatrix view), Nothing)
-    AsUIWithView shader uniforms view -> (BlendPremultiplied, Just (TransformMatrix view), Just (shader, uniforms))
-    AsUICamera cam -> (BlendPremultiplied, Just (TransformCamera cam), Nothing)
-    AsUIWithCamera shader uniforms cam -> (BlendPremultiplied, Just (TransformCamera cam), Just (shader, uniforms))
-    AsParticle -> (BlendAdditive, Nothing, Nothing)
-    AsParticleWith shader uniforms -> (BlendAdditive, Nothing, Just (shader, uniforms))
-    AsParticleView view -> (BlendAdditive, Just (TransformMatrix view), Nothing)
-    AsParticleWithView shader uniforms view -> (BlendAdditive, Just (TransformMatrix view), Just (shader, uniforms))
-    AsParticleCamera cam -> (BlendAdditive, Just (TransformCamera cam), Nothing)
-    AsParticleWithCamera shader uniforms cam -> (BlendAdditive, Just (TransformCamera cam), Just (shader, uniforms))
+withAs2D ctx =
+  withAs2DOverrides ctx Nothing Nothing
 
 withAs2DStyle :: As2D -> TextStyle -> WindowM a -> WindowM a
-withAs2DStyle ctx style action =
-  let (baseBlend, transform, baseShader) = as2DContext ctx
-      blend = fromMaybe baseBlend style.textBlend
+withAs2DStyle ctx style =
+  withAs2DOverrides ctx style.textBlend style.textShader
+
+withAs2DOverrides :: As2D -> Maybe BlendMode -> Maybe SpriteEffect -> WindowM a -> WindowM a
+withAs2DOverrides ctx blendOverride effectOverride action =
+  let blend = fromMaybe ctx.draw2DBlend blendOverride
       effect =
-        case style.textShader of
-          Just custom -> Just custom
-          Nothing -> fmap (uncurry SpriteEffect) baseShader
-  in case effect of
-      Nothing -> withBlendTransform blend transform action
-      Just (SpriteEffect shader uniforms) ->
-        withShaderBindingsBlendTransform blend (unwrapShader2D shader) uniforms transform action
+        case effectOverride of
+          Just override -> Just override
+          Nothing -> ctx.draw2DEffect
+  in with2DContext blend ctx.draw2DCamera effect action
 
-withBlendTransform :: BlendMode -> Maybe Transform2D -> WindowM a -> WindowM a
-withBlendTransform blend transform action = do
-  window <- ask
-  merged <- liftIO (mergeUniformBindings window window.appDefaultShader [])
-  let ctx = ShaderContext window.appDefaultShader merged [] [] blend transform
-  liftIO (withShaderContext window ctx (runWindowM window action))
-
-withShaderBindingsBlendTransform :: BlendMode -> Shader -> [ShaderUniform] -> Maybe Transform2D -> WindowM a -> WindowM a
-withShaderBindingsBlendTransform blend shader bindings transform action = do
-  collected <- liftIO (collectShaderBindings bindings)
-  withShaderBindingsInternalBlend blend shader collected transform action
+with2DContext :: BlendMode -> Maybe Camera2D -> Maybe SpriteEffect -> WindowM a -> WindowM a
+with2DContext blend camera effect action =
+  case effect of
+    Nothing -> do
+      window <- ask
+      merged <- liftIO (mergeUniformBindings window window.appDefaultShader [])
+      let shaderContext = ShaderContext window.appDefaultShader merged [] [] blend camera
+      liftIO (withShaderContext window shaderContext (runWindowM window action))
+    Just (SpriteEffect shader uniforms) -> do
+      collected <- liftIO (collectShaderBindings uniforms)
+      withShaderBindingsInternalBlend blend (unwrapShader2D shader) collected camera action
 
 
 runWindowIO :: Config -> (Window -> IO a) -> IO a
@@ -4391,47 +4338,47 @@ resolveShaderContext window ctx =
         , ctxSamplers = []
         , ctxStorage = []
         , ctxBlend = BlendAlpha
-        , ctxTransform = Nothing
+        , ctxCamera = Nothing
         }
 
 buildShapeDraws :: Window -> (Int, Int) -> DrawShape -> ShaderContext -> IO [ResolvedDraw]
 buildShapeDraws window size shape ctx =
   case shape of
     ShapeLine color p1 p2 ->
-      pure [ResolvedDraw sdlGPUPrimitiveTypeLineList (lineVertices size ctx.ctxTransform color p1 p2) (window.appWhiteTexture.textureHandle) ctx]
+      pure [ResolvedDraw sdlGPUPrimitiveTypeLineList (lineVertices size ctx.ctxCamera color p1 p2) (window.appWhiteTexture.textureHandle) ctx]
     ShapeRectOutline color rectShape ->
-      pure [ResolvedDraw sdlGPUPrimitiveTypeLineList (rectOutlineVertices size ctx.ctxTransform color rectShape) (window.appWhiteTexture.textureHandle) ctx]
+      pure [ResolvedDraw sdlGPUPrimitiveTypeLineList (rectOutlineVertices size ctx.ctxCamera color rectShape) (window.appWhiteTexture.textureHandle) ctx]
     ShapeRectFill color rectShape ->
-      pure [ResolvedDraw sdlGPUPrimitiveTypeTriangleList (rectFillVertices size ctx.ctxTransform color rectShape) (window.appWhiteTexture.textureHandle) ctx]
+      pure [ResolvedDraw sdlGPUPrimitiveTypeTriangleList (rectFillVertices size ctx.ctxCamera color rectShape) (window.appWhiteTexture.textureHandle) ctx]
     ShapeSprite tex src dst ->
-      pure [ResolvedDraw sdlGPUPrimitiveTypeTriangleList (spriteVertices size ctx.ctxTransform tex src dst) tex.textureHandle ctx]
+      pure [ResolvedDraw sdlGPUPrimitiveTypeTriangleList (spriteVertices size ctx.ctxCamera tex src dst) tex.textureHandle ctx]
     ShapeText textObj x y color ->
       textVertices size textObj x y color ctx
 
-lineVertices :: (Int, Int) -> Maybe Transform2D -> Color -> FPoint -> FPoint -> [Vertex]
-lineVertices size transform color p1 p2 =
-  [ mkVertex size transform p1 (V2 0 0) color
-  , mkVertex size transform p2 (V2 0 0) color
+lineVertices :: (Int, Int) -> Maybe Camera2D -> Color -> FPoint -> FPoint -> [Vertex]
+lineVertices size camera color p1 p2 =
+  [ mkVertex size camera p1 (V2 0 0) color
+  , mkVertex size camera p2 (V2 0 0) color
   ]
 
-rectOutlineVertices :: (Int, Int) -> Maybe Transform2D -> Color -> FRect -> [Vertex]
-rectOutlineVertices size transform color (FRect x y w h) =
+rectOutlineVertices :: (Int, Int) -> Maybe Camera2D -> Color -> FRect -> [Vertex]
+rectOutlineVertices size camera color (FRect x y w h) =
   let p1 = FPoint x y
       p2 = FPoint (x + w) y
       p3 = FPoint (x + w) (y + h)
       p4 = FPoint x (y + h)
-  in [ mkVertex size transform p1 (V2 0 0) color
-     , mkVertex size transform p2 (V2 0 0) color
-     , mkVertex size transform p2 (V2 0 0) color
-     , mkVertex size transform p3 (V2 0 0) color
-     , mkVertex size transform p3 (V2 0 0) color
-     , mkVertex size transform p4 (V2 0 0) color
-     , mkVertex size transform p4 (V2 0 0) color
-     , mkVertex size transform p1 (V2 0 0) color
+  in [ mkVertex size camera p1 (V2 0 0) color
+     , mkVertex size camera p2 (V2 0 0) color
+     , mkVertex size camera p2 (V2 0 0) color
+     , mkVertex size camera p3 (V2 0 0) color
+     , mkVertex size camera p3 (V2 0 0) color
+     , mkVertex size camera p4 (V2 0 0) color
+     , mkVertex size camera p4 (V2 0 0) color
+     , mkVertex size camera p1 (V2 0 0) color
      ]
 
-rectFillVertices :: (Int, Int) -> Maybe Transform2D -> Color -> FRect -> [Vertex]
-rectFillVertices size transform color (FRect x y w h) =
+rectFillVertices :: (Int, Int) -> Maybe Camera2D -> Color -> FRect -> [Vertex]
+rectFillVertices size camera color (FRect x y w h) =
   let p1 = FPoint x y
       p2 = FPoint (x + w) y
       p3 = FPoint (x + w) (y + h)
@@ -4440,16 +4387,16 @@ rectFillVertices size transform color (FRect x y w h) =
       uv2 = V2 1 0
       uv3 = V2 1 1
       uv4 = V2 0 1
-  in [ mkVertex size transform p1 uv1 color
-     , mkVertex size transform p2 uv2 color
-     , mkVertex size transform p4 uv4 color
-     , mkVertex size transform p2 uv2 color
-     , mkVertex size transform p3 uv3 color
-     , mkVertex size transform p4 uv4 color
+  in [ mkVertex size camera p1 uv1 color
+     , mkVertex size camera p2 uv2 color
+     , mkVertex size camera p4 uv4 color
+     , mkVertex size camera p2 uv2 color
+     , mkVertex size camera p3 uv3 color
+     , mkVertex size camera p4 uv4 color
      ]
 
-spriteVertices :: (Int, Int) -> Maybe Transform2D -> Texture -> Maybe FRect -> FRect -> [Vertex]
-spriteVertices size transform tex src dst =
+spriteVertices :: (Int, Int) -> Maybe Camera2D -> Texture -> Maybe FRect -> FRect -> [Vertex]
+spriteVertices size camera tex src dst =
   let (FRect dx dy dw dh) = dst
       (u0, v0, u1, v1) =
         case src of
@@ -4473,12 +4420,12 @@ spriteVertices size transform tex src dst =
       uv3 = V2 u1 v1
       uv4 = V2 u0 v1
       white = rgba 1 1 1 1
-  in [ mkVertex size transform p1 uv1 white
-     , mkVertex size transform p2 uv2 white
-     , mkVertex size transform p4 uv4 white
-     , mkVertex size transform p2 uv2 white
-     , mkVertex size transform p3 uv3 white
-     , mkVertex size transform p4 uv4 white
+  in [ mkVertex size camera p1 uv1 white
+     , mkVertex size camera p2 uv2 white
+     , mkVertex size camera p4 uv4 white
+     , mkVertex size camera p2 uv2 white
+     , mkVertex size camera p3 uv3 white
+     , mkVertex size camera p4 uv4 white
      ]
 
 textVertices :: (Int, Int) -> Text -> Float -> Float -> Color -> ShaderContext -> IO [ResolvedDraw]
@@ -4518,7 +4465,7 @@ textVertices size textObj x y color ctx = do
       FPoint px py <- peekElemOff xy index
       FPoint u v <- peekElemOff uv index
       let uvVec = V2 (realToFrac u) (realToFrac v)
-      pure (mkVertex size ctx.ctxTransform (FPoint px py) uvVec color)
+      pure (mkVertex size ctx.ctxCamera (FPoint px py) uvVec color)
 
 atlasDrawError :: T.Text -> SlopError
 atlasDrawError = SlopSDLFailure "TTF_GetGPUTextDrawData"
@@ -4530,22 +4477,18 @@ setTextPositionChecked textObj x y = do
     detail <- sdlGetError
     throwIO (SlopSDLFailure "TTF_SetTextPosition" (T.pack detail))
 
-mkVertex :: (Int, Int) -> Maybe Transform2D -> FPoint -> V2 Float -> Color -> Vertex
-mkVertex (w, h) transform (FPoint x y) (V2 u v) (Color r g b a) =
+mkVertex :: (Int, Int) -> Maybe Camera2D -> FPoint -> V2 Float -> Color -> Vertex
+mkVertex (w, h) camera (FPoint x y) (V2 u v) (Color r g b a) =
   let (nx, ny) =
-        case transform of
+        case camera of
           Nothing ->
             let wf = max 1 (fromIntegral w :: Float)
                 hf = max 1 (fromIntegral h :: Float)
             in ( (realToFrac x / wf) * 2 - 1
                , 1 - (realToFrac y / hf) * 2
                )
-          Just (TransformMatrix mat) ->
-            let V4 tx ty _ tw = m44MulV4 mat (V4 (realToFrac x) (realToFrac y) 0 1)
-                invW = if tw == 0 then 1 else 1 / tw
-            in (tx * invW, ty * invW)
-          Just (TransformCamera cam) ->
-            let mat = camera2DMatrix (w, h) cam
+          Just activeCamera ->
+            let mat = camera2DMatrix (w, h) activeCamera
                 V4 tx ty _ tw = m44MulV4 mat (V4 (realToFrac x) (realToFrac y) 0 1)
                 invW = if tw == 0 then 1 else 1 / tw
             in (tx * invW, ty * invW)
@@ -5359,10 +5302,7 @@ drawTextRawWith :: TextStyle -> Text -> Float -> Float -> WindowM ()
 drawTextRawWith style textObj x y =
   let action = liftWindow (\window -> drawTextIO window textObj x y style.textColor)
       blend = fromMaybe BlendAlpha style.textBlend
-  in case style.textShader of
-      Nothing -> withBlendTransform blend Nothing action
-      Just (SpriteEffect shader uniforms) ->
-        withShaderBindingsBlendTransform blend (unwrapShader2D shader) uniforms Nothing action
+  in with2DContext blend Nothing style.textShader action
 
 drawText :: Font -> T.Text -> Float -> Float -> WindowM ()
 drawText font str x y = drawTextWith defaultTextStyle font str x y
@@ -5371,10 +5311,7 @@ drawTextWith :: TextStyle -> Font -> T.Text -> Float -> Float -> WindowM ()
 drawTextWith style font str x y =
   let action = drawTextCachedWith font str x y style.textColor
       blend = fromMaybe BlendAlpha style.textBlend
-  in case style.textShader of
-      Nothing -> withBlendTransform blend Nothing action
-      Just (SpriteEffect shader uniforms) ->
-        withShaderBindingsBlendTransform blend (unwrapShader2D shader) uniforms Nothing action
+  in with2DContext blend Nothing style.textShader action
 
 drawTextCachedWith :: Font -> T.Text -> Float -> Float -> Color -> WindowM ()
 drawTextCachedWith font str x y color = do
@@ -6557,11 +6494,11 @@ withShaderBindings shader bindings action = do
   collected <- liftIO (collectShaderBindings bindings)
   withShaderBindingsInternalBlend BlendAlpha shader collected Nothing action
 
-withShaderBindingsInternalBlend :: BlendMode -> Shader -> ([UniformBinding], [SamplerBindingSpec], [StorageBinding]) -> Maybe Transform2D -> WindowM a -> WindowM a
-withShaderBindingsInternalBlend blend shader (uniforms, samplers, storage) transform action = do
+withShaderBindingsInternalBlend :: BlendMode -> Shader -> ([UniformBinding], [SamplerBindingSpec], [StorageBinding]) -> Maybe Camera2D -> WindowM a -> WindowM a
+withShaderBindingsInternalBlend blend shader (uniforms, samplers, storage) camera action = do
   window <- ask
   merged <- liftIO (mergeUniformBindings window shader uniforms)
-  let ctx = ShaderContext shader merged samplers storage blend transform
+  let ctx = ShaderContext shader merged samplers storage blend camera
   liftIO (withShaderContext window ctx (runWindowM window action))
 
 withShader :: Shader -> WindowM a -> WindowM a

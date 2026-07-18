@@ -192,6 +192,10 @@ Slop ships with standard pipelines; most code should use these:
 - `basicParticle` — additive blending.
 - `basic3D cam` — depth test/write on, blending off, for meshes.
 
+`As2D` is a composable context with `draw2DBlend`, `draw2DCamera`, and
+`draw2DEffect` fields. The standard values can be adjusted with record updates
+when a shader, camera, and non-default blend mode are needed together.
+
 ### 2D camera helpers
 
 ```haskell

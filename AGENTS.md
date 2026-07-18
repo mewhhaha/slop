@@ -42,6 +42,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 - The Graph DSL (`Slop.Pipeline.Graph`) manages render targets per node and resizes them when the window size changes.
 - Custom pipelines use `Pipeline` + `Mesh` + `Binding` via `drawMesh`. `spritePipeline` + `spriteMeshTransient` are the simple path.
 - `draw` now takes a context: use `draw (basic2D cam) ...` for built-in shapes/sprites/text, `draw (basicUIWith shader uniforms) ...` for standard pipeline shader swaps, or `draw (asMesh pipe bindings) mesh` (`basicUI`, `basicParticle` are blend-mode variants; `basic3D` is a mesh-only 3D pipeline with `Mesh3D` + model matrix).
+- `As2D` stores blend, camera, and optional `SpriteEffect` directly; per-sprite and text effects override only the effect while preserving the context camera and blend.
 - `basic2D` requires a camera (use `camera2DScreen` / `camera2DWindow`). `basicUI` stays raw screen space.
 - Depth/stencil is enabled for `basic3D` (depth test + write). The renderer allocates a depth target per swapchain/render target as needed.
 - 2D camera helpers are CPU-side transforms via `camera2DMatrix`.
