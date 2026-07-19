@@ -4554,7 +4554,7 @@ spriteVertices size camera tex src dst =
 
 textVertices :: (Int, Int) -> Text -> Float -> Float -> Color -> ShaderContext -> IO [ResolvedDraw]
 textVertices size textObj x y color ctx = do
-  setTextPositionChecked textObj (round x) (round y)
+  setTextPositionChecked textObj 0 0
   seqPtr <- ttfGetGPUTextDrawData textObj
   go seqPtr []
   where
@@ -4589,8 +4589,9 @@ textVertices size textObj x y color ctx = do
       FPoint px py <- peekElemOff xy index
       FPoint u v <- peekElemOff uv index
       let uvVec = V2 (realToFrac u) (realToFrac v)
-      -- SDL_ttf returns GPU text vertices in a Y-up coordinate system.
-      pure (mkVertex size ctx.ctxCamera (FPoint px (-py)) uvVec color)
+      -- SDL_ttf returns GPU text vertices relative to the origin with Y pointing up.
+      let screenPoint = FPoint (realToFrac x + px) (realToFrac y - py)
+      pure (mkVertex size ctx.ctxCamera screenPoint uvVec color)
 
 atlasDrawError :: T.Text -> Error
 atlasDrawError = SDLFailure "TTF_GetGPUTextDrawData"
