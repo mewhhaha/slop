@@ -4517,7 +4517,8 @@ textVertices size textObj x y color ctx = do
       FPoint px py <- peekElemOff xy index
       FPoint u v <- peekElemOff uv index
       let uvVec = V2 (realToFrac u) (realToFrac v)
-      pure (mkVertex size ctx.ctxCamera (FPoint px py) uvVec color)
+      -- SDL_ttf returns GPU text vertices in a Y-up coordinate system.
+      pure (mkVertex size ctx.ctxCamera (FPoint px (-py)) uvVec color)
 
 atlasDrawError :: T.Text -> Error
 atlasDrawError = SDLFailure "TTF_GetGPUTextDrawData"
