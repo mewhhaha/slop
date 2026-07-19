@@ -306,7 +306,7 @@ Minimal fragment ABI example:
 ```wgsl
 // spirdo:sampler=combined
 struct Params { time: f32; _pad0: f32; renderSize: vec2<f32>; dpiScale: vec2<f32>; _pad1: vec2<f32>; };
-@group(3) @binding(0) var<uniform> slop: Params;
+@group(3) @binding(0) var<uniform> globals: Params;
 @group(2) @binding(0) var tex0: texture_2d<f32>;
 @group(2) @binding(1) var tex1: texture_2d<f32>;
 @group(2) @binding(2) var samp0: sampler;
@@ -318,8 +318,8 @@ Keep **texture bindings contiguous** (`0..N-1`) so sampler slots are predictable
 ### Sprite shader override (Shader2D)
 
 ```haskell
-layout <- either throwSlop pure $ shaderLayoutFromReflection "fx" ShaderFragment
-  [ ReflectedBinding "slop" 3 0 (ReflectedUniform 32)
+layout <- either throwError pure $ shaderLayoutFromReflection "fx" ShaderFragment
+  [ ReflectedBinding "globals" 3 0 (ReflectedUniform 32)
   , ReflectedBinding "params" 3 1 (ReflectedUniform (sizeOf params))
   , ReflectedBinding "source" 2 0 ReflectedSampledTexture
   , ReflectedBinding "noiseTex" 2 1 ReflectedSampledTexture
@@ -368,7 +368,7 @@ fn main(@location(0) uv: vec2<f32>, @location(1) color: vec4<f32>) -> @location(
 }
 |])
 
-layout <- either throwSlop pure $ shaderLayoutFromReflection "scanline" ShaderFragment
+layout <- either throwError pure $ shaderLayoutFromReflection "scanline" ShaderFragment
   [ ReflectedBinding "params" 3 0 (ReflectedUniform 32)
   , ReflectedBinding "tex0" 2 0 ReflectedSampledTexture
   ]
@@ -384,11 +384,11 @@ bind sampler slots explicitly in Slop with `ShaderSamplerWith`.
 
 ### Uniform safety
 
-Size-checked helpers return `SlopResult`, so failures use the same error vocabulary as shader creation and asset loading:
+Size-checked helpers return `Result`, so failures use the same error vocabulary as shader creation and asset loading:
 
 ```haskell
-let u = shaderUniformSized 0 16 params      -- SlopResult ShaderUniform
-let u' = shaderUniformBytesSized 0 16 bytes -- SlopResult ShaderUniform
+let u = shaderUniformSized 0 16 params      -- Result ShaderUniform
+let u' = shaderUniformBytesSized 0 16 bytes -- Result ShaderUniform
 ```
 
 ### Sampler bindings (contiguous slots)
@@ -411,13 +411,13 @@ If a shader has optional textures, you can either skip the slot (Slop fills it) 
 an explicit placeholder (e.g. a 1x1 white texture).
 These samplers correspond to `@group(2)` in your fragment shader.
 
-### SlopGlobals (auto-bound uniform)
+### Globals (auto-bound uniform)
 
 Slop auto-binds a global uniform at slot 0 for fragment shaders that declare at least one
 uniform buffer. Use it for time and render size without manual plumbing:
 
 ```wgsl
-struct SlopGlobals {
+struct Globals {
   time: f32,
   _pad0: f32,
   renderSize: vec2<f32>,
@@ -425,11 +425,11 @@ struct SlopGlobals {
   _pad1: vec2<f32>,
 };
 
-@group(3) @binding(0) var<uniform> slop: SlopGlobals;
+@group(3) @binding(0) var<uniform> globals: Globals;
 ```
 
 You can still override slot 0 explicitly via `withShaderBindings` if needed.
-If you add your own uniforms, start them at `@binding(1)` (group 3) to avoid clobbering `SlopGlobals`.
+If you add your own uniforms, start them at `@binding(1)` (group 3) to avoid clobbering `Globals`.
 
 ### Fullscreen UV helper
 
@@ -536,17 +536,17 @@ let load spec = loadAssetAsync spec >>= awaitAsset
 texture <- load (TextureAsset "assets/sprite.bmp")
 ```
 
-`loadAsset`, `awaitAsset`, and `awaitAssetUpdate` throw `SlopError`, whose constructors retain the operation and offending asset, shader, binding, or SDL call. Use the result variants when failure is expected and recoverable:
+`loadAsset`, `awaitAsset`, and `awaitAssetUpdate` throw `Error`, whose constructors retain the operation and offending asset, shader, binding, or SDL call. Use the result variants when failure is expected and recoverable:
 
 ```haskell
 texId <- loadAssetAsync (TextureAsset "assets/sprite.bmp")
 result <- awaitAssetResult texId
 case result of
-  Left err -> logDebug (renderSlopError err)
+  Left err -> logDebug (renderError err)
   Right texture -> ...
 ```
 
-Custom `AssetLoader` implementations return `SlopResult` from `loadAssetIO`, so extension loaders use the same error model without converting failures through `String`.
+Custom `AssetLoader` implementations return `Result` from `loadAssetIO`, so extension loaders use the same error model without converting failures through `String`.
 
 If you're not using `loop`, call `processMainAssets` to progress main-thread loads.
 

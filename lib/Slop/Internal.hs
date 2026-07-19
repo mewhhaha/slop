@@ -176,8 +176,8 @@ module Slop.Internal
   , defaultTextStyle
   , textWith
   , Frame(..)
-  , SlopGlobals(..)
-  , slopGlobals
+  , Globals(..)
+  , globals
   , LoopControl(..)
   , LoopExit(..)
   , InputState(..)
@@ -274,10 +274,10 @@ module Slop.Internal
   , ShaderUniform(..)
   , shaderUniformSized
   , shaderUniformBytesSized
-  , SlopError(..)
-  , SlopResult
-  , renderSlopError
-  , throwSlop
+  , Error(..)
+  , Result
+  , renderError
+  , throwError
   , Patch(..)
   , TextStylePatch(..)
   , textStylePatch
@@ -992,7 +992,7 @@ data ReflectedShaderLayout = ReflectedShaderLayout
   }
   deriving (Eq, Show)
 
-shaderLayoutFromReflection :: T.Text -> ShaderStage -> [ReflectedBinding] -> SlopResult ReflectedShaderLayout
+shaderLayoutFromReflection :: T.Text -> ShaderStage -> [ReflectedBinding] -> Result ReflectedShaderLayout
 shaderLayoutFromReflection shaderName stage bindings = do
   bindingMap <- foldM insertBinding Map.empty bindings
   validateBindingSlots shaderName stage bindings
@@ -1017,7 +1017,7 @@ shaderLayoutFromReflection shaderName stage bindings = do
 shaderCountsFromReflection :: ReflectedShaderLayout -> ShaderCounts
 shaderCountsFromReflection = (.reflectedShaderCounts)
 
-validateBindingSlots :: T.Text -> ShaderStage -> [ReflectedBinding] -> SlopResult ()
+validateBindingSlots :: T.Text -> ShaderStage -> [ReflectedBinding] -> Result ()
 validateBindingSlots shaderName stage bindings = do
   mapM_ validateGroup bindings
   validateContiguous isUniformBinding "uniform"
@@ -1073,9 +1073,9 @@ isStorageTextureBinding :: ReflectedBindingType -> Bool
 isStorageTextureBinding ReflectedStorageTexture {} = True
 isStorageTextureBinding _ = False
 
-reflectionError :: T.Text -> Maybe T.Text -> T.Text -> SlopError
+reflectionError :: T.Text -> Maybe T.Text -> T.Text -> Error
 reflectionError shaderName binding =
-  SlopShaderFailure "derive reflected layout" shaderName binding
+  ShaderFailure "derive reflected layout" shaderName binding
 
 showText :: Show a => a -> T.Text
 showText = T.pack . show
@@ -1183,7 +1183,7 @@ data NamedComputeBinding where
   ComputeStorageTextureNamed :: T.Text -> Texture -> NamedComputeBinding
   ComputeStorageTextureRWNamed :: T.Text -> Texture -> NamedComputeBinding
 
-computeBindingsFromReflection :: ReflectedShaderLayout -> [NamedComputeBinding] -> SlopResult [ComputeBinding]
+computeBindingsFromReflection :: ReflectedShaderLayout -> [NamedComputeBinding] -> Result [ComputeBinding]
 computeBindingsFromReflection layout values = do
   unless (layout.reflectedShaderStage == ShaderCompute) $
     Left (reflectionError layout.reflectedShaderName Nothing "expected a compute shader layout")
@@ -1308,7 +1308,7 @@ startTextInput = do
   ok <- liftIO (SDL.sdlStartTextInput window.appWindow)
   unless ok $ do
     detail <- liftIO sdlGetError
-    throwSlop (SlopSDLFailure "SDL_StartTextInput" (T.pack detail))
+    throwError (SDLFailure "SDL_StartTextInput" (T.pack detail))
 
 stopTextInput :: WindowM ()
 stopTextInput = do
@@ -1316,7 +1316,7 @@ stopTextInput = do
   ok <- liftIO (SDL.sdlStopTextInput window.appWindow)
   unless ok $ do
     detail <- liftIO sdlGetError
-    throwSlop (SlopSDLFailure "SDL_StopTextInput" (T.pack detail))
+    throwError (SDLFailure "SDL_StopTextInput" (T.pack detail))
 
 -- Asset manager
 
@@ -1329,70 +1329,70 @@ data AnyAssetId where
 data AssetStatus a
   = AssetLoading
   | AssetReady a
-  | AssetFailed SlopError
+  | AssetFailed Error
   deriving (Eq, Show)
 
-data SlopError
-  = SlopSDLFailure
+data Error
+  = SDLFailure
       { errorOperation :: !T.Text
       , errorDetail :: !T.Text
       }
-  | SlopAssetFailure
+  | AssetFailure
       { errorOperation :: !T.Text
       , errorResource :: !T.Text
       , errorDetail :: !T.Text
       }
-  | SlopShaderFailure
+  | ShaderFailure
       { errorOperation :: !T.Text
       , errorResource :: !T.Text
       , errorBinding :: !(Maybe T.Text)
       , errorDetail :: !T.Text
       }
-  | SlopIOFailure
+  | IOFailure
       { errorOperation :: !T.Text
       , errorResource :: !T.Text
       , errorDetail :: !T.Text
       }
-  | SlopInvariantViolation
+  | InvariantViolation
       { errorOperation :: !T.Text
       , errorDetail :: !T.Text
       }
   deriving (Eq, Show)
 
-instance Exception SlopError where
-  displayException = T.unpack . renderSlopError
+instance Exception Error where
+  displayException = T.unpack . renderError
 
-type SlopResult a = Either SlopError a
+type Result a = Either Error a
 
-renderSlopError :: SlopError -> T.Text
-renderSlopError err =
+renderError :: Error -> T.Text
+renderError err =
   case err of
-    SlopSDLFailure operation detail ->
+    SDLFailure operation detail ->
       operation <> " failed: " <> detail
-    SlopAssetFailure operation resource detail ->
+    AssetFailure operation resource detail ->
       operation <> " for asset " <> resource <> " failed: " <> detail
-    SlopShaderFailure operation shader binding detail ->
+    ShaderFailure operation shader binding detail ->
       operation <> " for shader " <> shader <> maybe "" (" binding " <>) binding <> " failed: " <> detail
-    SlopIOFailure operation resource detail ->
+    IOFailure operation resource detail ->
       operation <> (if T.null resource then "" else " for " <> resource) <> " failed: " <> detail
-    SlopInvariantViolation operation detail ->
+    InvariantViolation operation detail ->
       operation <> " violated an internal invariant: " <> detail
 
-throwSlop :: MonadIO m => SlopError -> m a
-throwSlop = liftIO . throwIO
+throwError :: MonadIO m => Error -> m a
+throwError = liftIO . throwIO
 
-assetOperationError :: T.Text -> T.Text -> SlopError -> SlopError
+assetOperationError :: T.Text -> T.Text -> Error -> Error
 assetOperationError operation resource err =
   case err of
-    SlopAssetFailure {} -> err
-    SlopShaderFailure {} -> err
-    _ -> SlopAssetFailure operation resource (renderSlopError err)
+    AssetFailure {} -> err
+    ShaderFailure {} -> err
+    _ -> AssetFailure operation resource (renderError err)
 
-exceptionAssetError :: T.Text -> T.Text -> SomeException -> SlopError
+exceptionAssetError :: T.Text -> T.Text -> SomeException -> Error
 exceptionAssetError operation resource exception =
   case fromException exception of
     Just err -> assetOperationError operation resource err
-    Nothing -> SlopAssetFailure operation resource (T.pack (displayException exception))
+    Nothing -> AssetFailure operation resource (T.pack (displayException exception))
 
 trySyncException :: IO a -> IO (Either SomeException a)
 trySyncException action = do
@@ -1404,7 +1404,7 @@ trySyncException action = do
         Nothing -> pure result
     Right _ -> pure result
 
-newtype AssetUpdate = AssetUpdate (TMVar (SlopResult ()))
+newtype AssetUpdate = AssetUpdate (TMVar (Result ()))
 
 data AssetThread
   = AssetAny
@@ -1413,7 +1413,7 @@ data AssetThread
 
 class (Typeable spec, Typeable (AssetType spec)) => AssetLoader spec where
   type AssetType spec
-  loadAssetIO :: Window -> spec -> IO (SlopResult (AssetType spec))
+  loadAssetIO :: Window -> spec -> IO (Result (AssetType spec))
   unloadAssetIO :: Window -> spec -> AssetType spec -> IO ()
   assetLabel :: spec -> T.Text
   assetFiles :: spec -> [FilePath]
@@ -1538,7 +1538,7 @@ instance AssetLoader FontAsset where
   loadAssetIO _ (FontAsset path size) = do
     result <- ttfOpenFont path size
     case result of
-      Nothing -> Left . SlopAssetFailure "open font" (T.pack path) . T.pack <$> sdlGetError
+      Nothing -> Left . AssetFailure "open font" (T.pack path) . T.pack <$> sdlGetError
       Just font -> pure (Right font)
   unloadAssetIO _ _ = ttfCloseFont
   assetLabel (FontAsset path _) = T.pack path
@@ -1549,7 +1549,7 @@ instance AssetLoader TextAsset where
   loadAssetIO app (TextAsset font str) = do
     result <- ttfCreateText (app.appTextEngine) font (T.unpack str)
     case result of
-      Nothing -> Left . SlopAssetFailure "create text" str . T.pack <$> sdlGetError
+      Nothing -> Left . AssetFailure "create text" str . T.pack <$> sdlGetError
       Just textObj -> pure (Right textObj)
   unloadAssetIO _ _ = ttfDestroyText
   assetLabel (TextAsset _ str) = str
@@ -1576,14 +1576,14 @@ instance AssetLoader SdfFontAsset where
   loadAssetIO _ (SdfFontAsset path size) = do
     result <- ttfOpenFont path size
     case result of
-      Nothing -> Left . SlopAssetFailure "open SDF font" (T.pack path) . T.pack <$> sdlGetError
+      Nothing -> Left . AssetFailure "open SDF font" (T.pack path) . T.pack <$> sdlGetError
       Just font -> do
         ok <- ttfSetFontSDF font True
         if ok
           then pure (Right font)
           else do
             ttfCloseFont font
-            Left . SlopAssetFailure "enable SDF font" (T.pack path) . T.pack <$> sdlGetError
+            Left . AssetFailure "enable SDF font" (T.pack path) . T.pack <$> sdlGetError
   unloadAssetIO _ _ = ttfCloseFont
   assetLabel (SdfFontAsset path _) = T.pack path
   assetFiles (SdfFontAsset path _) = [path]
@@ -1740,14 +1740,14 @@ data AssetSlot = AssetSlot
   }
 
 data SlotState
-  = SlotLoading !(TMVar (SlopResult ()))
+  = SlotLoading !(TMVar (Result ()))
   | SlotReady !Dynamic !(IO ())
-  | SlotFailed !SlopError
+  | SlotFailed !Error
 
 data RequestMode = RequestLoad | RequestReload
 
 data AssetCommand where
-  AssetCommand :: AssetLoader spec => Int -> spec -> RequestMode -> Maybe (TMVar (SlopResult ())) -> AssetCommand
+  AssetCommand :: AssetLoader spec => Int -> spec -> RequestMode -> Maybe (TMVar (Result ())) -> AssetCommand
   StopCommand :: AssetCommand
 
 newAssetManager :: IO AssetManager
@@ -1802,7 +1802,7 @@ removeAllAssetsIO app mgr = do
       finalizeEntry app entry `finally` finalizeEntries remaining
     finalizeEntry _ (AssetSlot _ (SlotFailed _) _) = pure ()
     finalizeEntry _ (AssetSlot _ (SlotLoading var) _) =
-      void (atomically (tryPutTMVar var (Left (SlopAssetFailure "remove" "all assets" "asset removed"))))
+      void (atomically (tryPutTMVar var (Left (AssetFailure "remove" "all assets" "asset removed"))))
     finalizeEntry app' (AssetSlot _ (SlotReady dyn finalizer) _) = do
       case fromDynamic dyn :: Maybe Font of
         Just font -> evictTextCacheForFontIO app' font
@@ -1831,7 +1831,7 @@ handleAssetCommand app stateVar cmd =
         RequestReload -> finishReload app stateVar assetId spec resolved notify
       pure True
 
-finishLoad :: forall spec. AssetLoader spec => Window -> TVar ManagerState -> Int -> spec -> SlopResult (AssetType spec) -> Maybe (TMVar (SlopResult ())) -> IO ()
+finishLoad :: forall spec. AssetLoader spec => Window -> TVar ManagerState -> Int -> spec -> Result (AssetType spec) -> Maybe (TMVar (Result ())) -> IO ()
 finishLoad app stateVar assetId spec result _ = case result of
   Left err -> do
     atomically $ do
@@ -1861,10 +1861,10 @@ finishLoad app stateVar assetId spec result _ = case result of
       case cleanupResult of
         Left exception ->
           let err = exceptionAssetError "load cancellation cleanup" (assetLabel spec) exception
-          in hPutStrLn stderr ("slop asset cleanup failed: " <> T.unpack (renderSlopError err))
+          in hPutStrLn stderr ("slop asset cleanup failed: " <> T.unpack (renderError err))
         Right () -> pure ()
 
-finishReload :: forall spec. AssetLoader spec => Window -> TVar ManagerState -> Int -> spec -> SlopResult (AssetType spec) -> Maybe (TMVar (SlopResult ())) -> IO ()
+finishReload :: forall spec. AssetLoader spec => Window -> TVar ManagerState -> Int -> spec -> Result (AssetType spec) -> Maybe (TMVar (Result ())) -> IO ()
 finishReload app stateVar assetId spec result notify = case result of
   Left err -> completeReload (Left err)
   Right asset -> do
@@ -1894,7 +1894,7 @@ finishReload app stateVar assetId spec result notify = case result of
           Left err -> completeReload (Left err)
           Right () -> case notify of
             Nothing -> pure ()
-            Just _ -> completeReload (Left (SlopAssetFailure "reload" ("#" <> T.pack (show assetId)) "asset not found"))
+            Just _ -> completeReload (Left (AssetFailure "reload" ("#" <> T.pack (show assetId)) "asset not found"))
       else do
         cleanupResult <- maybe (pure (Right ())) runFinalizer oldFinalizer
         completeReload cleanupResult
@@ -1905,10 +1905,10 @@ finishReload app stateVar assetId spec result notify = case result of
     completeReload reloadResult = case notify of
       Just var -> atomically (void (tryPutTMVar var reloadResult))
       Nothing -> case reloadResult of
-        Left err -> hPutStrLn stderr ("slop asset reload failed: " <> T.unpack (renderSlopError err))
+        Left err -> hPutStrLn stderr ("slop asset reload failed: " <> T.unpack (renderError err))
         Right () -> pure ()
 
-registerLoading :: forall a. Typeable a => AssetManager -> IO (AssetId a, TMVar (SlopResult ()))
+registerLoading :: forall a. Typeable a => AssetManager -> IO (AssetId a, TMVar (Result ()))
 registerLoading mgr = atomically $ do
   st <- readTVar (mgr.amState)
   var <- newEmptyTMVar
@@ -1918,9 +1918,9 @@ registerLoading mgr = atomically $ do
   pure (AssetId newId, var)
 
 loadAsset :: forall spec. AssetLoader spec => spec -> WindowM (AssetId (AssetType spec))
-loadAsset spec = loadAssetResult spec >>= either throwSlop pure
+loadAsset spec = loadAssetResult spec >>= either throwError pure
 
-loadAssetResult :: forall spec. AssetLoader spec => spec -> WindowM (SlopResult (AssetId (AssetType spec)))
+loadAssetResult :: forall spec. AssetLoader spec => spec -> WindowM (Result (AssetId (AssetType spec)))
 loadAssetResult spec = do
   app <- ask
   let mgr = app.appAssets
@@ -2034,17 +2034,17 @@ reloadAssetAsync assetId spec = do
       pure (AssetUpdate notify)
 
 awaitAssetUpdate :: AssetUpdate -> WindowM ()
-awaitAssetUpdate update = awaitAssetUpdateResult update >>= either throwSlop pure
+awaitAssetUpdate update = awaitAssetUpdateResult update >>= either throwError pure
 
-awaitAssetUpdateResult :: AssetUpdate -> WindowM (SlopResult ())
+awaitAssetUpdateResult :: AssetUpdate -> WindowM (Result ())
 awaitAssetUpdateResult (AssetUpdate var) = do
   app <- ask
   liftIO (awaitWithMainQueue app var)
 
 awaitAsset :: forall a. Typeable a => AssetId a -> WindowM a
-awaitAsset assetId = awaitAssetResult assetId >>= either throwSlop pure
+awaitAsset assetId = awaitAssetResult assetId >>= either throwError pure
 
-awaitAssetResult :: forall a. Typeable a => AssetId a -> WindowM (SlopResult a)
+awaitAssetResult :: forall a. Typeable a => AssetId a -> WindowM (Result a)
 awaitAssetResult assetId = do
   app <- ask
   let mgr = app.appAssets
@@ -2067,9 +2067,9 @@ awaitAssetResult assetId = do
         Just (AssetFailed err) -> pure (Left err)
         Just (AssetReady value) -> pure (Right value)
 
-assetIdError :: T.Text -> AssetId a -> T.Text -> SlopError
+assetIdError :: T.Text -> AssetId a -> T.Text -> Error
 assetIdError operation assetId =
-  SlopAssetFailure operation ("#" <> T.pack (show assetId.unAssetId))
+  AssetFailure operation ("#" <> T.pack (show assetId.unAssetId))
 
 getAsset :: forall (a :: Type). Typeable a => AssetId a -> WindowM (Maybe a)
 getAsset assetId = do
@@ -2231,14 +2231,14 @@ data Frame = Frame
   }
   deriving (Eq, Show)
 
-data SlopGlobals = SlopGlobals
+data Globals = Globals
   { globalsTime :: !Float
   , globalsRenderSize :: !(V2 Float)
   , globalsDpiScale :: !(V2 Float)
   }
   deriving (Eq, Show)
 
-instance Storable SlopGlobals where
+instance Storable Globals where
   sizeOf _ = 32
   alignment _ = 16
   peek ptr = do
@@ -2247,12 +2247,12 @@ instance Storable SlopGlobals where
     renderH <- peekByteOff ptr 12
     dpiX <- peekByteOff ptr 16
     dpiY <- peekByteOff ptr 20
-    pure SlopGlobals
+    pure Globals
       { globalsTime = time
       , globalsRenderSize = V2 renderW renderH
       , globalsDpiScale = V2 dpiX dpiY
       }
-  poke ptr SlopGlobals { globalsTime = time, globalsRenderSize = V2 renderW renderH, globalsDpiScale = V2 dpiX dpiY } = do
+  poke ptr Globals { globalsTime = time, globalsRenderSize = V2 renderW renderH, globalsDpiScale = V2 dpiX dpiY } = do
     pokeByteOff ptr 0 time
     pokeByteOff ptr 4 (0 :: Float)
     pokeByteOff ptr 8 renderW
@@ -2262,10 +2262,10 @@ instance Storable SlopGlobals where
     pokeByteOff ptr 24 (0 :: Float)
     pokeByteOff ptr 28 (0 :: Float)
 
-slopGlobals :: Frame -> SlopGlobals
-slopGlobals frame =
+globals :: Frame -> Globals
+globals frame =
   let (rw, rh) = frame.renderSize
-  in SlopGlobals
+  in Globals
       { globalsTime = frame.time
       , globalsRenderSize = V2 (fromIntegral rw) (fromIntegral rh)
       , globalsDpiScale = frame.dpiScale
@@ -2273,7 +2273,7 @@ slopGlobals frame =
 
 updateGlobalsUniform :: Window -> Frame -> IO ()
 updateGlobalsUniform window frame = do
-  bytes <- toBytes (slopGlobals frame)
+  bytes <- toBytes (globals frame)
   writeIORef window.appGlobalsUniform (Just bytes)
 
 data LoopControl a
@@ -3059,7 +3059,7 @@ spriteEffectNamed shader2d named = do
       table <- getShaderBindings shader
       liftIO (resolveNamedUniforms table named)
     Just layout ->
-      either throwSlop pure (resolveReflectedUniforms layout named)
+      either throwError pure (resolveReflectedUniforms layout named)
   pure (SpriteEffect shader2d uniforms)
 
 data TextStyle = TextStyle
@@ -3154,23 +3154,23 @@ data ShaderUniform where
   ShaderSamplerWith :: Word32 -> Texture -> Sampler -> ShaderUniform
   ShaderStorageTexture :: Word32 -> Texture -> ShaderUniform
 
-shaderUniformSized :: Storable a => Word32 -> Int -> a -> SlopResult ShaderUniform
+shaderUniformSized :: Storable a => Word32 -> Int -> a -> Result ShaderUniform
 shaderUniformSized slot expectedBytes value =
   let actual = sizeOf value
   in if actual /= expectedBytes
       then Left (uniformSizeError slot expectedBytes actual)
       else Right (ShaderUniform slot value)
 
-shaderUniformBytesSized :: Word32 -> Int -> ByteString -> SlopResult ShaderUniform
+shaderUniformBytesSized :: Word32 -> Int -> ByteString -> Result ShaderUniform
 shaderUniformBytesSized slot expectedBytes bytes =
   let actual = BS.length bytes
   in if actual /= expectedBytes
       then Left (uniformSizeError slot expectedBytes actual)
       else Right (ShaderUniformBytes slot bytes)
 
-uniformSizeError :: Word32 -> Int -> Int -> SlopError
+uniformSizeError :: Word32 -> Int -> Int -> Error
 uniformSizeError slot expectedBytes actualBytes =
-  SlopShaderFailure
+  ShaderFailure
     "bind uniform"
     "unnamed"
     (Just (T.pack (show slot)))
@@ -3522,9 +3522,9 @@ runWindowIO cfg action = do
       unless succeeded (die label)
     die label = do
       err <- sdlGetError
-      throwIO (SlopSDLFailure (T.pack label) (T.pack err))
+      throwIO (SDLFailure (T.pack label) (T.pack err))
 
-validateConfig :: Config -> SlopResult ()
+validateConfig :: Config -> Result ()
 validateConfig cfg = do
   positiveCInt "windowWidth" cfg.windowWidth
   positiveCInt "windowHeight" cfg.windowHeight
@@ -3540,7 +3540,7 @@ validateConfig cfg = do
           Left (invalid field ("maximum is " <> showText (maxBound :: CInt)) value)
       | otherwise = Right ()
     invalid field expectation value =
-      SlopIOFailure "validate config" field (expectation <> ", got " <> showText value)
+      IOFailure "validate config" field (expectation <> ", got " <> showText value)
 
 
 require :: String -> IO (Maybe a) -> IO a
@@ -3550,7 +3550,7 @@ require label action = do
     Just value -> pure value
     Nothing -> do
       err <- sdlGetError
-      throwIO (SlopSDLFailure (T.pack label) (T.pack err))
+      throwIO (SDLFailure (T.pack label) (T.pack err))
 
 data UnsubmittedGPUCommand
   = CancelUnsubmittedGPUCommand
@@ -3567,7 +3567,7 @@ runGPUCommands unsubmitted commandBuffer record = mask_ $ do
   submitted <- sdlSubmitGPUCommandBuffer commandBuffer
   unless submitted $ do
     err <- sdlGetError
-    throwIO (SlopSDLFailure "SDL_SubmitGPUCommandBuffer" (T.pack err))
+    throwIO (SDLFailure "SDL_SubmitGPUCommandBuffer" (T.pack err))
   pure result
 
 abandonGPUCommands :: UnsubmittedGPUCommand -> GPUCommandBuffer -> IO ()
@@ -3795,7 +3795,7 @@ uploadSurface window surface gpuFormat = do
       ok <- sdlLockSurface surface
       unless ok $ do
         err <- sdlGetError
-        throwIO (SlopSDLFailure "SDL_LockSurface" (T.pack err))
+        throwIO (SDLFailure "SDL_LockSurface" (T.pack err))
 
 createSolidTexture :: GPUDevice -> SDL_GPUTextureFormat -> Int -> Int -> Word8 -> Word8 -> Word8 -> Word8 -> IO Texture
 createSolidTexture device fmt width height r g b a = do
@@ -3985,7 +3985,7 @@ textureDimension operation dimension value
   | otherwise = pure (fromIntegral value)
   where
     invalid expectation =
-      SlopIOFailure operation dimension (expectation <> ", got " <> showText value)
+      IOFailure operation dimension (expectation <> ", got " <> showText value)
 
 createRenderTargetTexture :: Window -> Int -> Int -> IO Texture
 createRenderTargetTexture window width height =
@@ -4024,7 +4024,7 @@ chooseDepthFormat device = do
           Just tex -> do
             sdlReleaseGPUTexture device tex
             pure (Just fmt)
-  let go [] = throwIO (SlopSDLFailure "choose depth format" "no supported depth format found")
+  let go [] = throwIO (SDLFailure "choose depth format" "no supported depth format found")
       go (fmt:rest) = do
         ok <- tryFormat fmt
         maybe (go rest) pure ok
@@ -4056,7 +4056,7 @@ setFontSDF font enabled = do
   ok <- ttfSetFontSDF font enabled
   unless ok $ do
     err <- sdlGetError
-    throwIO (SlopSDLFailure "TTF_SetFontSDF" (T.pack err))
+    throwIO (SDLFailure "TTF_SetFontSDF" (T.pack err))
 
 loadFontSDFIO :: FilePath -> Float -> IO Font
 loadFontSDFIO path size = do
@@ -4346,9 +4346,9 @@ prepareDraw window fmt size (DrawCmd shape maybeCtx) = do
 prepareMeshDraw :: Window -> SDL_GPUTextureFormat -> Pipeline -> Mesh -> [Binding] -> IO [PreparedDraw]
 prepareMeshDraw window fmt pipeline mesh bindings = do
   when (pipeline.pipelineTargetFormat /= fmt) $
-    throwIO (SlopInvariantViolation "draw mesh" "pipeline target format does not match render target format")
+    throwIO (InvariantViolation "draw mesh" "pipeline target format does not match render target format")
   when (pipeline.pipelineLayout /= mesh.meshLayout) $
-    throwIO (SlopInvariantViolation "draw mesh" "mesh layout does not match pipeline layout")
+    throwIO (InvariantViolation "draw mesh" "mesh layout does not match pipeline layout")
   resolved <- collectBindings bindings
   samplers <- buildSamplerBindingsExplicit window resolved.dbSamplers
   storage <- buildStorageBindingsExplicit resolved.dbStorageTextures
@@ -4519,15 +4519,15 @@ textVertices size textObj x y color ctx = do
       let uvVec = V2 (realToFrac u) (realToFrac v)
       pure (mkVertex size ctx.ctxCamera (FPoint px py) uvVec color)
 
-atlasDrawError :: T.Text -> SlopError
-atlasDrawError = SlopSDLFailure "TTF_GetGPUTextDrawData"
+atlasDrawError :: T.Text -> Error
+atlasDrawError = SDLFailure "TTF_GetGPUTextDrawData"
 
 setTextPositionChecked :: Text -> Int -> Int -> IO ()
 setTextPositionChecked textObj x y = do
   positioned <- ttfSetTextPosition textObj x y
   unless positioned $ do
     detail <- sdlGetError
-    throwIO (SlopSDLFailure "TTF_SetTextPosition" (T.pack detail))
+    throwIO (SDLFailure "TTF_SetTextPosition" (T.pack detail))
 
 mkVertex :: (Int, Int) -> Maybe Camera2D -> FPoint -> V2 Float -> Color -> Vertex
 mkVertex (w, h) camera (FPoint x y) (V2 u v) (Color r g b a) =
@@ -4665,12 +4665,12 @@ buildSamplerBindings window ctx baseTexture = do
   if samplerCount <= 0
     then do
       unless (null ctx.ctxSamplers) $
-        throwIO (SlopShaderFailure "bind sampler" "unnamed" Nothing "shader declares no samplers")
+        throwIO (ShaderFailure "bind sampler" "unnamed" Nothing "shader declares no samplers")
       pure []
     else do
       extras <- normalizeBindingsSparseIO "sampler" (map (\(SamplerBindingSpec slot tex sampler) -> (slot, (tex, sampler))) ctx.ctxSamplers)
       when (any (\(slot, _) -> slot >= samplerCount) extras) $
-        throwIO (SlopShaderFailure "bind sampler" "unnamed" Nothing "binding slot exceeds shader sampler count")
+        throwIO (ShaderFailure "bind sampler" "unnamed" Nothing "binding slot exceeds shader sampler count")
       let baseSampler = window.appDefaultSampler
       let baseBinding = GPUTextureSamplerBinding baseTexture (unwrapSampler baseSampler)
       let extraMap = Map.fromList extras
@@ -5470,7 +5470,7 @@ requireAudioSuccess operation succeeded =
   unless succeeded $ do
     detail <- liftIO sdlGetError
     let evidence = if null detail then "operation returned false" else T.pack detail
-    throwSlop (SlopSDLFailure operation evidence)
+    throwError (SDLFailure operation evidence)
 
 requireAudioPlaybackIO :: T.Text -> Audio -> Bool -> IO ()
 requireAudioPlaybackIO operation audio succeeded =
@@ -5478,8 +5478,8 @@ requireAudioPlaybackIO operation audio succeeded =
     detail <- sdlGetError
     let evidence = if null detail then "operation returned false" else T.pack detail
     case audio of
-      AudioStream path -> throwIO (SlopAssetFailure operation (T.pack path) evidence)
-      AudioLoaded _ -> throwIO (SlopSDLFailure operation evidence)
+      AudioStream path -> throwIO (AssetFailure operation (T.pack path) evidence)
+      AudioLoaded _ -> throwIO (SDLFailure operation evidence)
 
 startTrackPlaybackIO :: T.Text -> Track -> Audio -> Int -> IO ()
 startTrackPlaybackIO operation track audio loops = do
@@ -5597,7 +5597,7 @@ createTrackPool policy count = do
           Nothing -> do
             detail <- sdlGetError
             let evidence = if null detail then "operation returned no track" else T.pack detail
-            throwIO (SlopSDLFailure "MIX_CreateTrack" evidence)
+            throwIO (SDLFailure "MIX_CreateTrack" evidence)
       rest <- createTracks window (remaining - 1) `onException` mixDestroyTrack track
       pure (track : rest)
 
@@ -5830,7 +5830,7 @@ createTrack = do
         Nothing -> do
           detail <- sdlGetError
           let evidence = if null detail then "operation returned no track" else T.pack detail
-          throwIO (SlopSDLFailure "MIX_CreateTrack" evidence))
+          throwIO (SDLFailure "MIX_CreateTrack" evidence))
     trackResourceKey
     mixDestroyTrack
 
@@ -5970,7 +5970,7 @@ createShaderFromSpirvWithIO window spirv numSamplers numStorageTextures numStora
 createShaderFromSpirvWithDevice :: GPUDevice -> ByteString -> Word32 -> Word32 -> Word32 -> Word32 -> IO Shader
 createShaderFromSpirvWithDevice device spirv numSamplers numStorageTextures numStorageBuffers numUniformBuffers = do
   when (numUniformBuffers > 4) $
-    throwIO (SlopShaderFailure "create" "unnamed" Nothing "SDL_gpu supports at most 4 uniform buffers per fragment shader")
+    throwIO (ShaderFailure "create" "unnamed" Nothing "SDL_gpu supports at most 4 uniform buffers per fragment shader")
   shader <- require "SDL_CreateGPUShader" (createRawShader device spirv sdlGPUShaderStageFragment numSamplers numStorageTextures numStorageBuffers numUniformBuffers)
   bindingsRef <- newIORef emptyShaderBindings
   pure Shader
@@ -5987,13 +5987,13 @@ createShaderFromSpirvWithDevice device spirv numSamplers numStorageTextures numS
 validateShader2DCounts :: ShaderCounts -> IO ()
 validateShader2DCounts counts = do
   when (counts.shaderStorageTextures /= 0) $
-    throwIO (SlopShaderFailure "create 2D shader" "unnamed" Nothing "storage textures are not supported")
+    throwIO (ShaderFailure "create 2D shader" "unnamed" Nothing "storage textures are not supported")
   when (counts.shaderStorageBuffers /= 0) $
-    throwIO (SlopShaderFailure "create 2D shader" "unnamed" Nothing "storage buffers are not supported")
+    throwIO (ShaderFailure "create 2D shader" "unnamed" Nothing "storage buffers are not supported")
   when (counts.shaderUniformBuffers > 4) $
-    throwIO (SlopShaderFailure "create 2D shader" "unnamed" Nothing "SDL_gpu supports at most 4 uniform buffers")
+    throwIO (ShaderFailure "create 2D shader" "unnamed" Nothing "SDL_gpu supports at most 4 uniform buffers")
 
-validateShader2DLayout :: Shader2DLayout -> SlopResult ShaderCounts
+validateShader2DLayout :: Shader2DLayout -> Result ShaderCounts
 validateShader2DLayout layout = do
   if null layout.layoutStorageTextures
     then pure ()
@@ -6013,7 +6013,7 @@ validateShader2DLayout layout = do
     , shaderUniformBuffers = uniformCount
     }
   where
-    validateSlots :: String -> Word32 -> [BindingSlot] -> SlopResult Word32
+    validateSlots :: String -> Word32 -> [BindingSlot] -> Result Word32
     validateSlots label expectedGroup slots =
       case slots of
         [] -> Right 0
@@ -6034,7 +6034,7 @@ validateShader2DLayout layout = do
               then Left (layoutError (label <> " bindings must be contiguous 0.." <> show maxIx))
               else Right (fromIntegral (maxIx + 1))
     layoutError detail =
-      SlopShaderFailure "validate 2D layout" "unnamed" Nothing (T.pack detail)
+      ShaderFailure "validate 2D layout" "unnamed" Nothing (T.pack detail)
 
 createRawShader :: GPUDevice -> ByteString -> SDL_GPUShaderStage -> Word32 -> Word32 -> Word32 -> Word32 -> IO (Maybe GPUShader)
 createRawShader device spirv stage numSamplers numStorageTextures numStorageBuffers numUniformBuffers =
@@ -6092,7 +6092,7 @@ createFragmentShader spirv counts = do
 createFragmentShaderReflected :: ByteString -> ReflectedShaderLayout -> WindowM FragmentShader
 createFragmentShaderReflected spirv layout = do
   unless (layout.reflectedShaderStage == ShaderFragment) $
-    throwSlop (reflectionError layout.reflectedShaderName Nothing "expected a fragment shader layout")
+    throwError (reflectionError layout.reflectedShaderName Nothing "expected a fragment shader layout")
   shader <- createFragmentShader spirv layout.reflectedShaderCounts
   let bindings = reflectedBindingsTable layout
   liftIO (writeIORef shader.shaderBindingTable bindings)
@@ -6167,7 +6167,7 @@ defaultCompute =
     , computeThreads = threads3D 1 1 1
     }
 
-computeDescFromReflection :: ByteString -> Threads3D -> ReflectedShaderLayout -> SlopResult ComputeDesc
+computeDescFromReflection :: ByteString -> Threads3D -> ReflectedShaderLayout -> Result ComputeDesc
 computeDescFromReflection spirv threads layout = do
   unless (layout.reflectedShaderStage == ShaderCompute) $
     Left (reflectionError layout.reflectedShaderName Nothing "expected a compute shader layout")
@@ -6186,7 +6186,7 @@ computeDescFromReflection spirv threads layout = do
     , computeThreads = threads
     }
 
-reflectedSlotCount :: ReflectedShaderLayout -> ReflectedStorageAccess -> SlopResult Word32
+reflectedSlotCount :: ReflectedShaderLayout -> ReflectedStorageAccess -> Result Word32
 reflectedSlotCount layout access =
   let slots =
         [ binding.reflectedSlot
@@ -6362,14 +6362,14 @@ collectComputeBindings bindings = do
 
 mergeUniformBindings :: Window -> Shader -> [UniformBinding] -> IO [UniformBinding]
 mergeUniformBindings window shader explicit = do
-  globals <- readIORef window.appGlobalsUniform
+  globalsUniform <- readIORef window.appGlobalsUniform
   let implicit =
-        case globals of
+        case globalsUniform of
           Just bytes | shader.shaderUniformBufferCount > 0 -> Map.singleton 0 bytes
           _ -> Map.empty
   let explicitMap = Map.fromList [ (slot, bytes) | UniformBinding slot bytes <- explicit ]
   when (shader.shaderUniformBufferCount == 0 && not (Map.null explicitMap)) $
-    throwIO (SlopShaderFailure "bind uniform" "unnamed" Nothing "shader declares no uniform buffers")
+    throwIO (ShaderFailure "bind uniform" "unnamed" Nothing "shader declares no uniform buffers")
   let merged = Map.union explicitMap implicit
   case Map.keys merged of
     [] -> pure ()
@@ -6377,10 +6377,10 @@ mergeUniformBindings window shader explicit = do
       let maxSlot = last keys
           count = shader.shaderUniformBufferCount
       in when (fromIntegral maxSlot >= count) $
-        throwIO (SlopShaderFailure "bind uniform" "unnamed" (Just (showText maxSlot)) "binding slot exceeds shader uniform buffer count")
+        throwIO (ShaderFailure "bind uniform" "unnamed" (Just (showText maxSlot)) "binding slot exceeds shader uniform buffer count")
   pure (map (uncurry UniformBinding) (Map.toAscList merged))
 
-normalizeBindings :: String -> [(Word32, a)] -> SlopResult [a]
+normalizeBindings :: String -> [(Word32, a)] -> Result [a]
 normalizeBindings label bindings =
   case bindings of
     [] -> Right []
@@ -6396,7 +6396,7 @@ normalizeBindings label bindings =
         Left (bindingSlotsError label ("binding slots are not contiguous; expected 0.." <> show maxSlot))
       pure (map snd (Map.toAscList mapSlots))
 
-normalizeBindingsSparse :: String -> [(Word32, a)] -> SlopResult [(Int, a)]
+normalizeBindingsSparse :: String -> [(Word32, a)] -> Result [(Int, a)]
 normalizeBindingsSparse label bindings =
   case bindings of
     [] -> Right []
@@ -6416,7 +6416,7 @@ normalizeBindingsSparseIO :: String -> [(Word32, a)] -> IO [(Int, a)]
 normalizeBindingsSparseIO label bindings =
   either throwIO pure (normalizeBindingsSparse label bindings)
 
-normalizeUniforms :: String -> [UniformBinding] -> SlopResult [UniformBinding]
+normalizeUniforms :: String -> [UniformBinding] -> Result [UniformBinding]
 normalizeUniforms label bindings =
   case bindings of
     [] -> Right []
@@ -6431,9 +6431,9 @@ normalizeUniformsIO :: String -> [UniformBinding] -> IO [UniformBinding]
 normalizeUniformsIO label bindings =
   either throwIO pure (normalizeUniforms label bindings)
 
-bindingSlotsError :: String -> String -> SlopError
+bindingSlotsError :: String -> String -> Error
 bindingSlotsError label detail =
-  SlopShaderFailure "normalize bindings" "unnamed" (Just (T.pack label)) (T.pack detail)
+  ShaderFailure "normalize bindings" "unnamed" (Just (T.pack label)) (T.pack detail)
 
 resolveNamedUniforms :: ShaderBindings -> [NamedUniform] -> IO [ShaderUniform]
 resolveNamedUniforms bindings =
@@ -6457,7 +6457,7 @@ resolveNamedUniforms bindings =
           slot <- lookupStorageTextureSlot table name
           pure (ShaderStorageTexture slot tex : acc)
 
-resolveReflectedUniforms :: ReflectedShaderLayout -> [NamedUniform] -> SlopResult [ShaderUniform]
+resolveReflectedUniforms :: ReflectedShaderLayout -> [NamedUniform] -> Result [ShaderUniform]
 resolveReflectedUniforms layout values = do
   (resolved, supplied) <- foldM resolveOne ([], Map.empty) values
   let missing =
@@ -6528,19 +6528,19 @@ lookupUniformSlot :: ShaderBindings -> String -> IO Word32
 lookupUniformSlot table name =
   case Map.lookup name table.shaderUniformSlots of
     Just slot -> pure slot
-    Nothing -> throwIO (SlopShaderFailure "bind uniform" "unnamed" (Just (T.pack name)) "binding name is not present in the shader layout")
+    Nothing -> throwIO (ShaderFailure "bind uniform" "unnamed" (Just (T.pack name)) "binding name is not present in the shader layout")
 
 lookupSamplerSlot :: ShaderBindings -> String -> IO Word32
 lookupSamplerSlot table name =
   case Map.lookup name table.shaderSamplerSlots of
     Just slot -> pure slot
-    Nothing -> throwIO (SlopShaderFailure "bind sampler" "unnamed" (Just (T.pack name)) "binding name is not present in the shader layout")
+    Nothing -> throwIO (ShaderFailure "bind sampler" "unnamed" (Just (T.pack name)) "binding name is not present in the shader layout")
 
 lookupStorageTextureSlot :: ShaderBindings -> String -> IO Word32
 lookupStorageTextureSlot table name =
   case Map.lookup name table.shaderStorageTextureSlots of
     Just slot -> pure slot
-    Nothing -> throwIO (SlopShaderFailure "bind storage texture" "unnamed" (Just (T.pack name)) "binding name is not present in the shader layout")
+    Nothing -> throwIO (ShaderFailure "bind storage texture" "unnamed" (Just (T.pack name)) "binding name is not present in the shader layout")
 evictTextCacheForFontIO :: Window -> Font -> IO ()
 evictTextCacheForFontIO window font = do
   let Font fontPtr = font

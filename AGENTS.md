@@ -29,6 +29,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 
 ## Core Concepts
 
+- Public identifiers do not repeat the `Slop` package prefix; callers can qualify the module when names would otherwise collide.
 - `WindowM` is the application and frame monad. `runWindow` sets up SDL, GPU device + swapchain, mixer, and the asset manager.
 - SDL, mixer, and TTF initialization is staged so a later startup failure unwinds only the subsystems that initialized successfully.
 - `loop :: a -> (Frame -> a -> WindowM (LoopControl a)) -> WindowM (LoopExit a)` is the main driver.
@@ -48,7 +49,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 - Depth/stencil is enabled for `basic3D` (depth test + write). The renderer allocates a depth target per swapchain/render target as needed.
 - 2D camera helpers are CPU-side transforms via `camera2DMatrix`.
 - `SpriteEffect` wraps a `Shader2D` for per-sprite shader overrides (2D ABI).
-- `SlopGlobals` uniform (slot 0) is auto-bound for fragment shaders with uniform buffers (time, renderSize, dpiScale). Fragment uniforms live in SPIR-V `@group(3)`, samplers/textures in `@group(2)`.
+- `Globals` uniform (slot 0) is auto-bound for fragment shaders with uniform buffers (time, renderSize, dpiScale). Fragment uniforms live in SPIR-V `@group(3)`, samplers/textures in `@group(2)`.
 - Declarative pipeline builders: `defaultGraphics`/`graphicsPipeline` and `defaultCompute`/`computePipeline`.
 - Compute pipelines use `computePipeline` + `dispatchCompute`, or `compute` steps inside the graph DSL.
 - Directly created textures, fonts, shaders, pipelines, meshes, samplers, text, and audio tracks are released by `runWindow` in reverse acquisition order. Explicit destroy functions remain available for shorter lifetimes.
@@ -79,7 +80,7 @@ Slop is a small SDL3.4 + SDL_gpu rendering + audio toolkit for Haskell. It focus
 - Asset manager runs on background threads. Use `loadAssetAsync` + `awaitAsset`.
 - Worker completion is tracked independently from stop commands, so shutdown cannot hang if a worker exits unexpectedly.
 - Reload cleanup failures complete explicit update waits and are reported for background hot reloads.
-- `loadAsset`, `awaitAsset`, and `awaitAssetUpdate` throw `SlopError`; their `*Result` variants expose recoverable failures without exceptions.
+- `loadAsset`, `awaitAsset`, and `awaitAssetUpdate` throw `Error`; their `*Result` variants expose recoverable failures without exceptions.
 - GPU-backed assets (textures, GPU text, shaders, pipelines, samplers) are loaded on the main thread even when using `loadAssetAsync`.
 - `loadAssetAsync` for main-thread assets queues work; `loop` calls `processMainAssets` each frame to service it.
 - Shader/pipeline asset specs: `ShaderAsset`, `VertexShaderAsset`, `ComputePipelineAsset`, `PipelineAsset`, `SamplerAsset`.

@@ -9,17 +9,17 @@ module Slop.Window
   , runWindow
   , loop
   , Frame(..)
-  , SlopGlobals(..)
-  , slopGlobals
+  , Globals(..)
+  , globals
   , LoopControl(..)
   , LoopExit(..)
   , logDebug
   , startTextInput
   , stopTextInput
-  , SlopError(..)
-  , SlopResult
-  , renderSlopError
-  , throwSlop
+  , Error(..)
+  , Result
+  , renderError
+  , throwError
   ) where
 
 import Slop.Internal

@@ -74,11 +74,11 @@ drawContextRetainsCameraWhenEffectIsAdded = do
 
 invalidConfigFailsBeforeSDLInitialization :: IO ()
 invalidConfigFailsBeforeSDLInitialization = do
-  result <- try (runWindow defaultConfig { windowWidth = 0 } (pure ())) :: IO (Either SlopError ())
+  result <- try (runWindow defaultConfig { windowWidth = 0 } (pure ())) :: IO (Either Error ())
   case result of
-    Left SlopIOFailure { errorResource = "windowWidth", errorDetail = detail }
+    Left IOFailure { errorResource = "windowWidth", errorDetail = detail }
       | "got 0" `T.isInfixOf` detail -> pure ()
-    Left err -> fail ("expected invalid windowWidth evidence, got " <> T.unpack (renderSlopError err))
+    Left err -> fail ("expected invalid windowWidth evidence, got " <> T.unpack (renderError err))
     Right _ -> fail "invalid window width reached SDL initialization"
 
 advancedCameraIsAvailableFromGPU :: IO ()
@@ -128,18 +128,18 @@ duplicateReflectedNamesCarryBindingEvidence =
     [ ReflectedBinding "source" 2 0 ReflectedSampledTexture
     , ReflectedBinding "source" 2 1 ReflectedSampledTexture
     ] of
-    Left SlopShaderFailure { errorResource = shaderName, errorBinding = Just bindingName } -> do
+    Left ShaderFailure { errorResource = shaderName, errorBinding = Just bindingName } -> do
       assertEqual "shader name" "duplicate-test" shaderName
       assertEqual "binding name" "source" bindingName
-    Left err -> fail ("expected shader and binding evidence, got " <> T.unpack (renderSlopError err))
+    Left err -> fail ("expected shader and binding evidence, got " <> T.unpack (renderError err))
     Right _ -> fail "duplicate reflected binding name was accepted"
 
 invalidDescriptorGroupCarriesBindingEvidence :: IO ()
 invalidDescriptorGroupCarriesBindingEvidence =
   case shaderLayoutFromReflection "wrong-group" ShaderFragment
     [ReflectedBinding "params" 2 0 (ReflectedUniform 4)] of
-    Left SlopShaderFailure { errorBinding = Just "params" } -> pure ()
-    Left err -> fail ("expected descriptor group evidence, got " <> T.unpack (renderSlopError err))
+    Left ShaderFailure { errorBinding = Just "params" } -> pure ()
+    Left err -> fail ("expected descriptor group evidence, got " <> T.unpack (renderError err))
     Right _ -> fail "fragment uniform in the wrong descriptor group was accepted"
 
 namedUniformsFollowReflectedSlots :: IO ()
@@ -165,8 +165,8 @@ missingNamedUniformFailsBeforeDrawing = do
     , ReflectedBinding "params" 3 1 (ReflectedUniform 4)
     ]
   case resolveReflectedUniforms layout [] of
-    Left SlopShaderFailure { errorBinding = Just "params" } -> pure ()
-    Left err -> fail ("expected missing params evidence, got " <> T.unpack (renderSlopError err))
+    Left ShaderFailure { errorBinding = Just "params" } -> pure ()
+    Left err -> fail ("expected missing params evidence, got " <> T.unpack (renderError err))
     Right _ -> fail "missing reflected uniform was accepted"
 
 duplicateNamedUniformFailsBeforeDrawing :: IO ()
@@ -179,8 +179,8 @@ duplicateNamedUniformFailsBeforeDrawing = do
     [ NamedUniform "params" (1 :: Int32)
     , NamedUniform "params" (2 :: Int32)
     ] of
-    Left SlopShaderFailure { errorBinding = Just "params" } -> pure ()
-    Left err -> fail ("expected duplicate params evidence, got " <> T.unpack (renderSlopError err))
+    Left ShaderFailure { errorBinding = Just "params" } -> pure ()
+    Left err -> fail ("expected duplicate params evidence, got " <> T.unpack (renderError err))
     Right _ -> fail "duplicate reflected uniform was accepted"
 
 wrongNamedBindingTypeFailsBeforeDrawing :: IO ()
@@ -188,15 +188,15 @@ wrongNamedBindingTypeFailsBeforeDrawing = do
   layout <- expectRight $ shaderLayoutFromReflection "wrong-binding-type" ShaderFragment
     [ReflectedBinding "source" 2 0 ReflectedSampledTexture]
   case resolveReflectedUniforms layout [NamedUniform "source" (1 :: Int32)] of
-    Left SlopShaderFailure { errorBinding = Just "source" } -> pure ()
-    Left err -> fail ("expected binding type evidence, got " <> T.unpack (renderSlopError err))
+    Left ShaderFailure { errorBinding = Just "source" } -> pure ()
+    Left err -> fail ("expected binding type evidence, got " <> T.unpack (renderError err))
     Right _ -> fail "uniform value was accepted for a sampled texture"
 
 uniformSizeMismatchIsTyped :: IO ()
 uniformSizeMismatchIsTyped =
   case shaderUniformSized 3 16 (1 :: Int32) of
-    Left SlopShaderFailure { errorBinding = Just "3" } -> pure ()
-    Left err -> fail ("expected uniform slot evidence, got " <> T.unpack (renderSlopError err))
+    Left ShaderFailure { errorBinding = Just "3" } -> pure ()
+    Left err -> fail ("expected uniform slot evidence, got " <> T.unpack (renderError err))
     Right _ -> fail "uniform size mismatch was accepted"
 
 failedWindowSizeQueriesDoNotExposeUninitializedOutputs :: IO ()
@@ -271,10 +271,10 @@ foreign import ccall unsafe "slop_abi_size"
 foreign import ccall unsafe "slop_abi_alignment"
   c_slop_abi_alignment :: CInt -> IO CSize
 
-expectRight :: SlopResult a -> IO a
+expectRight :: Result a -> IO a
 expectRight result =
   case result of
-    Left err -> fail (T.unpack (renderSlopError err))
+    Left err -> fail (T.unpack (renderError err))
     Right value -> pure value
 
 assertEqual :: (Eq a, Show a) => String -> a -> a -> IO ()

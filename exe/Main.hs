@@ -64,7 +64,7 @@ instance ToUniform SliceParams
 demoShader =
   $(spirv defaultCompileOptions imports [wesl|
 // spirdo:sampler=combined
-struct SlopGlobals {
+struct Globals {
   time: f32,
   _pad0: f32,
   renderSize: vec2<f32>,
@@ -72,7 +72,7 @@ struct SlopGlobals {
   _pad1: vec2<f32>,
 };
 
-@group(3) @binding(0) var<uniform> slop: SlopGlobals;
+@group(3) @binding(0) var<uniform> globals: Globals;
 
 @fragment
 fn main(@location(0) uv: vec2<f32>, @location(1) inColor: vec4<f32>) -> @location(0) vec4<f32> {
@@ -80,10 +80,10 @@ fn main(@location(0) uv: vec2<f32>, @location(1) inColor: vec4<f32>) -> @locatio
   let offset = uv - center;
   let r = length(offset);
   let vignette = 1.0 - smoothstep(0.35, 0.95, r);
-  let scan = 0.85 + 0.15 * sin(uv.y * slop.renderSize.y * 0.25 + slop.time * 18.0);
-  let noise = fract(sin(dot(uv * vec2(12.9898, 78.233), vec2(39.3468, 11.135)) + slop.time * 9.0) * 43758.5453);
+  let scan = 0.85 + 0.15 * sin(uv.y * globals.renderSize.y * 0.25 + globals.time * 18.0);
+  let noise = fract(sin(dot(uv * vec2(12.9898, 78.233), vec2(39.3468, 11.135)) + globals.time * 9.0) * 43758.5453);
   let hue = vec3(0.2, 0.7, 0.95);
-  var color = hue * (0.6 + 0.4 * sin(slop.time + uv.x * 6.0));
+  var color = hue * (0.6 + 0.4 * sin(globals.time + uv.x * 6.0));
   color = color * vignette * scan;
   color = color + (noise - 0.5) * 0.04;
 
@@ -188,12 +188,12 @@ main = do
     let load spec = loadAssetAsync spec >>= awaitAsset
     let inputs label shader builder = either (throwInputsError label) pure (inputsFor shader builder)
 
-    computeLayout <- either throwSlop pure (reflectionFromShader "computeShader" computeShader)
-    sliceLayout <- either throwSlop pure (reflectionFromShader "slice3dShader" slice3dShader)
-    demoLayout <- either throwSlop pure (reflectionFromShader "demoShader" demoShader)
-    comboLayout <- either throwSlop pure (reflectionFromShader "comboShader" comboShader)
-    computeDesc <- either throwSlop pure (computeDescFromReflection (shaderSpirv computeShader) (threads3D 8 8 1) computeLayout)
-    sliceDesc <- either throwSlop pure (computeDescFromReflection (shaderSpirv slice3dShader) (threads3D 8 8 1) sliceLayout)
+    computeLayout <- either throwError pure (reflectionFromShader "computeShader" computeShader)
+    sliceLayout <- either throwError pure (reflectionFromShader "slice3dShader" slice3dShader)
+    demoLayout <- either throwError pure (reflectionFromShader "demoShader" demoShader)
+    comboLayout <- either throwError pure (reflectionFromShader "comboShader" comboShader)
+    computeDesc <- either throwError pure (computeDescFromReflection (shaderSpirv computeShader) (threads3D 8 8 1) computeLayout)
+    sliceDesc <- either throwError pure (computeDescFromReflection (shaderSpirv slice3dShader) (threads3D 8 8 1) sliceLayout)
 
     computePipe <-
       load (ComputePipelineAsset computeDesc)
@@ -281,8 +281,8 @@ main = do
               <> storageTexture @"out_tex" (toStorageHandle noiseSliceTex)
               <> uniform @"params" sliceParams
           )
-      computeBindings <- either throwSlop pure (computeBindingsFromInputs computeLayout computeInputs)
-      sliceBindings <- either throwSlop pure (computeBindingsFromInputs sliceLayout sliceInputs)
+      computeBindings <- either throwError pure (computeBindingsFromInputs computeLayout computeInputs)
+      sliceBindings <- either throwError pure (computeBindingsFromInputs sliceLayout sliceInputs)
 
       let scene =
             pass $ mconcat
@@ -347,15 +347,15 @@ storageTextureFromHandle (StorageTextureHandle value) =
 
 throwInputsError :: T.Text -> InputsError -> WindowM a
 throwInputsError shaderName inputError =
-  throwSlop
-    ( SlopShaderFailure
+  throwError
+    ( ShaderFailure
         "build shader inputs"
         shaderName
         (T.pack <$> inputError.ieBinding)
         (T.pack inputError.ieMessage)
     )
 
-reflectionFromShader :: T.Text -> W.Shader mode iface -> SlopResult ReflectedShaderLayout
+reflectionFromShader :: T.Text -> W.Shader mode iface -> Result ReflectedShaderLayout
 reflectionFromShader shaderName shader = do
   bindings <- mapM (reflectedBinding shaderName) (W.shaderPlan shader).bpBindings
   shaderLayoutFromReflection shaderName (reflectedStage (W.shaderStageCached shader)) bindings
@@ -367,7 +367,7 @@ reflectedStage stage =
     W.ShaderStageVertex -> ShaderVertex
     W.ShaderStageCompute -> ShaderCompute
 
-reflectedBinding :: T.Text -> W.BindingInfo -> SlopResult ReflectedBinding
+reflectedBinding :: T.Text -> W.BindingInfo -> Result ReflectedBinding
 reflectedBinding shaderName binding = do
   bindingType <- reflectedBindingType shaderName binding
   pure ReflectedBinding
@@ -377,7 +377,7 @@ reflectedBinding shaderName binding = do
     , reflectedType = bindingType
     }
 
-reflectedBindingType :: T.Text -> W.BindingInfo -> SlopResult ReflectedBindingType
+reflectedBindingType :: T.Text -> W.BindingInfo -> Result ReflectedBindingType
 reflectedBindingType shaderName binding =
   case binding.biKind of
     W.BUniform ->
@@ -408,16 +408,16 @@ reflectedBindingType shaderName binding =
   where
     storageTextureType = ReflectedStorageTexture <$> reflectedStorageAccess binding.biType
     unsupported detail =
-      SlopShaderFailure "reflect shader" shaderName (Just (T.pack binding.biName)) detail
+      ShaderFailure "reflect shader" shaderName (Just (T.pack binding.biName)) detail
 
-reflectedStorageAccess :: W.TypeLayout -> SlopResult ReflectedStorageAccess
+reflectedStorageAccess :: W.TypeLayout -> Result ReflectedStorageAccess
 reflectedStorageAccess bindingType =
   case bindingType of
     W.TLStorageTexture1D _ access -> fromSpirdoAccess access
     W.TLStorageTexture2D _ access -> fromSpirdoAccess access
     W.TLStorageTexture2DArray _ access -> fromSpirdoAccess access
     W.TLStorageTexture3D _ access -> fromSpirdoAccess access
-    _ -> Left (SlopShaderFailure "reflect shader" "unknown" Nothing "storage texture binding has a non-storage type")
+    _ -> Left (ShaderFailure "reflect shader" "unknown" Nothing "storage texture binding has a non-storage type")
   where
     fromSpirdoAccess W.StorageRead = Right ReflectedReadOnly
     fromSpirdoAccess W.StorageWrite = Right ReflectedReadWrite
@@ -433,7 +433,7 @@ uniformLayoutSize bindingType =
     W.TLStruct _ _ _ byteSize -> Just (fromIntegral byteSize)
     _ -> Nothing
 
-computeBindingsFromInputs :: ReflectedShaderLayout -> ShaderInputs iface -> SlopResult [ComputeBinding]
+computeBindingsFromInputs :: ReflectedShaderLayout -> ShaderInputs iface -> Result [ComputeBinding]
 computeBindingsFromInputs layout inputs =
   computeBindingsFromReflection layout (uniforms <> storageTextures)
   where
