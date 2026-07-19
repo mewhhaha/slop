@@ -36,7 +36,7 @@ import Spirdo.Wesl.Inputs
   , UniformInput(..)
   , inputsFor
   , inputsStorageTextures
-  , orderedUniforms
+  , inputsUniforms
   , storageTexture
   , uniform
   )
@@ -439,7 +439,7 @@ computeBindingsFromInputs layout inputs =
   where
     uniforms =
       [ ComputeUniformBytesNamed (T.pack entry.uiName) entry.uiBytes
-      | entry <- orderedUniforms inputs
+      | entry <- inputsUniforms inputs
       ]
     storageTextures =
       [ ComputeStorageTextureRWNamed
