@@ -24,6 +24,7 @@ module Slop.Internal
   , startTextInput
   , stopTextInput
   , screenshot
+  , clip
   , loop
   , clear
   , setDrawColor
@@ -417,6 +418,7 @@ import Slop.SDL.Raw
   ( FPoint (..)
   , FRect (..)
   , FColor (..)
+  , IRect (..)
   , Font (..)
   , Mixer (..)
   , Track (..)
@@ -500,6 +502,7 @@ import Slop.SDL.Raw
   , sdlEndGPURenderPass
   , sdlBindGPUGraphicsPipeline
   , sdlSetGPUViewport
+  , sdlSetGPUScissor
   , sdlBindGPUVertexBuffers
   , sdlBindGPUFragmentSamplers
   , sdlBindGPUFragmentStorageTextures
@@ -886,6 +889,7 @@ data CachedText = CachedText
 data RecordingContext = RecordingContext
   { rcCommands :: IORef [RecordedOp]
   , rcShaderStack :: IORef [ShaderContext]
+  , rcClipStack :: IORef [FRect]
   }
 
 newtype Recording = Recording RecordingContext
@@ -906,12 +910,12 @@ data DrawShape
   | ShapeSprite Texture (Maybe FRect) FRect
   | ShapeText Text Float Float Color
 
-data DrawCmd = DrawCmd DrawShape (Maybe ShaderContext)
+data DrawCmd = DrawCmd DrawShape (Maybe ShaderContext) (Maybe FRect)
 
 data RecordedOp
   = RecordedClear Color
   | RecordedDraw DrawCmd
-  | RecordedMesh Pipeline Mesh [Binding]
+  | RecordedMesh Pipeline Mesh [Binding] (Maybe FRect)
 
 data VertexAttrFormat
   = VertexFloat2
@@ -1332,6 +1336,22 @@ screenshot path
   | otherwise = do
       window <- ask
       liftIO (modifyIORef' window.appScreenshotPaths (path :))
+
+-- | Restrict drawing in an action to target-pixel bounds. Nested clips intersect.
+clip :: FRect -> WindowM a -> WindowM a
+clip bounds@(FRect x y width height) action
+  | any nonFinite [x, y, width, height] =
+      throwError (IOFailure "clip" (showText bounds) "expected finite target-pixel bounds")
+  | otherwise = do
+      window <- ask
+      context <- liftIO (currentRecordingContext window)
+      liftIO $
+        bracket_
+          (pushClip context bounds)
+          (popClip context)
+          (runWindowM window action)
+  where
+    nonFinite value = isNaN value || isInfinite value
 
 -- Asset manager
 
@@ -3484,7 +3504,8 @@ runWindowIO cfg action = do
                           assetsWithoutWorkers <- newAssetManager
                           pipelines <- newIORef Map.empty
                           drawColor <- newIORef (rgba 1 1 1 1)
-                          let frameContext = RecordingContext frameCommands frameShaders
+                          frameClips <- newIORef []
+                          let frameContext = RecordingContext frameCommands frameShaders frameClips
                           let windowBase = Window
                                 { appWindow = win
                                 , appGPUDevice = dev
@@ -4110,6 +4131,38 @@ currentRecordingContext window = do
   active <- readIORef window.appRecording
   pure (maybe window.appFrameContext (\(Recording ctx) -> ctx) active)
 
+pushClip :: RecordingContext -> FRect -> IO ()
+pushClip context requested =
+  modifyIORef' context.rcClipStack $ \stack ->
+    let active =
+          case stack of
+            [] -> normalizeClip requested
+            outer : _ -> intersectClip outer requested
+    in active : stack
+
+popClip :: RecordingContext -> IO ()
+popClip context =
+  modifyIORef' context.rcClipStack $ \stack ->
+    case stack of
+      [] -> []
+      _ : rest -> rest
+
+normalizeClip :: FRect -> FRect
+normalizeClip bounds@(FRect x y width height)
+  | width <= 0 || height <= 0 = FRect x y 0 0
+  | otherwise = bounds
+
+intersectClip :: FRect -> FRect -> FRect
+intersectClip outer requested =
+  FRect left top (max 0 (right - left)) (max 0 (bottom - top))
+  where
+    FRect outerX outerY outerWidth outerHeight = normalizeClip outer
+    FRect requestedX requestedY requestedWidth requestedHeight = normalizeClip requested
+    left = max outerX requestedX
+    top = max outerY requestedY
+    right = min (outerX + outerWidth) (requestedX + requestedWidth)
+    bottom = min (outerY + outerHeight) (requestedY + requestedHeight)
+
 withShaderContext :: Window -> ShaderContext -> IO a -> IO a
 withShaderContext window ctx action = do
   recCtx <- currentRecordingContext window
@@ -4129,15 +4182,23 @@ recordDraw :: Window -> DrawShape -> IO ()
 recordDraw window shape = do
   recCtx <- currentRecordingContext window
   shaderStack <- readIORef recCtx.rcShaderStack
+  clipStack <- readIORef recCtx.rcClipStack
   let ctx = case shaderStack of
         [] -> Nothing
         (top:_) -> Just top
-  modifyIORef' recCtx.rcCommands (RecordedDraw (DrawCmd shape ctx) :)
+      activeClip = case clipStack of
+        [] -> Nothing
+        top : _ -> Just top
+  modifyIORef' recCtx.rcCommands (RecordedDraw (DrawCmd shape ctx activeClip) :)
 
 recordMesh :: Window -> Pipeline -> Mesh -> [Binding] -> IO ()
 recordMesh window pipeline mesh bindings = do
   recCtx <- currentRecordingContext window
-  modifyIORef' recCtx.rcCommands (RecordedMesh pipeline mesh bindings :)
+  clipStack <- readIORef recCtx.rcClipStack
+  let activeClip = case clipStack of
+        [] -> Nothing
+        top : _ -> Just top
+  modifyIORef' recCtx.rcCommands (RecordedMesh pipeline mesh bindings activeClip :)
 
 drainRecording :: RecordingContext -> IO [RecordedOp]
 drainRecording recCtx =
@@ -4155,7 +4216,7 @@ withRecording window _target action = do
   prev <- atomicModifyIORef' window.appRecording (\old -> (Just recording, old))
   action recCtx `finally` writeIORef window.appRecording prev
   where
-    newRecordingContext = RecordingContext <$> newIORef [] <*> newIORef []
+    newRecordingContext = RecordingContext <$> newIORef [] <*> newIORef [] <*> newIORef []
 
 data PreparedDraw = PreparedDraw
   { pdPipeline :: GPUGraphicsPipeline
@@ -4170,6 +4231,7 @@ data PreparedDraw = PreparedDraw
   , pdVertexUniforms :: [UniformBinding]
   , pdFragmentUniforms :: [UniformBinding]
   , pdDepthMode :: DepthMode
+  , pdScissor :: IRect
   }
 
 flushFrame :: Window -> IO ()
@@ -4314,6 +4376,7 @@ uploadPrepared _ copyPass prepared =
 
 executePrepared :: GPUCommandBuffer -> GPURenderPass -> PreparedDraw -> IO ()
 executePrepared cmd renderPass prepared = do
+  sdlSetGPUScissor renderPass prepared.pdScissor
   sdlBindGPUGraphicsPipeline renderPass prepared.pdPipeline
   sdlBindGPUVertexBuffers renderPass 0 [GPUBufferBinding prepared.pdVertexBuffer 0]
   sdlBindGPUFragmentSamplers renderPass 0 prepared.pdSamplers
@@ -4362,14 +4425,15 @@ prepareDraws window fmt size = collect []
       result <- try @SomeException $
         case op of
           RecordedDraw cmd -> prepareDraw window fmt size cmd
-          RecordedMesh pipeline mesh bindings -> prepareMeshDraw window fmt pipeline mesh bindings
+          RecordedMesh pipeline mesh bindings activeClip ->
+            prepareMeshDraw window fmt size pipeline mesh bindings activeClip
           RecordedClear {} -> pure []
       case result of
         Left exception -> mapM_ (releasePrepared window) prepared >> throwIO exception
         Right next -> collect (reverse next <> prepared) remaining
 
 prepareDraw :: Window -> SDL_GPUTextureFormat -> (Int, Int) -> DrawCmd -> IO [PreparedDraw]
-prepareDraw window fmt size (DrawCmd shape maybeCtx) = do
+prepareDraw window fmt size (DrawCmd shape maybeCtx activeClip) = do
   ctx <- resolveShaderContext window maybeCtx
   resolved <- buildShapeDraws window size shape ctx
   reverse <$> foldM prepareOne [] resolved
@@ -4409,14 +4473,23 @@ prepareDraw window fmt size (DrawCmd shape maybeCtx) = do
                 , pdVertexUniforms = []
                 , pdFragmentUniforms = resolvedDraw.rdShaderCtx.ctxUniforms
                 , pdDepthMode = DepthNone
+                , pdScissor = scissorFor size activeClip
                 })
       case result of
         Left exception -> mapM_ (releasePrepared window) prepared >> throwIO exception
         Right Nothing -> pure prepared
         Right (Just next) -> pure (next : prepared)
 
-prepareMeshDraw :: Window -> SDL_GPUTextureFormat -> Pipeline -> Mesh -> [Binding] -> IO [PreparedDraw]
-prepareMeshDraw window fmt pipeline mesh bindings = do
+prepareMeshDraw
+  :: Window
+  -> SDL_GPUTextureFormat
+  -> (Int, Int)
+  -> Pipeline
+  -> Mesh
+  -> [Binding]
+  -> Maybe FRect
+  -> IO [PreparedDraw]
+prepareMeshDraw window fmt size pipeline mesh bindings activeClip = do
   when (pipeline.pipelineTargetFormat /= fmt) $
     throwIO (InvariantViolation "draw mesh" "pipeline target format does not match render target format")
   when (pipeline.pipelineLayout /= mesh.meshLayout) $
@@ -4440,8 +4513,25 @@ prepareMeshDraw window fmt pipeline mesh bindings = do
         , pdVertexUniforms = resolved.dbVertexUniforms
         , pdFragmentUniforms = resolved.dbFragmentUniforms
         , pdDepthMode = pipeline.pipelineDepthMode
+        , pdScissor = scissorFor size activeClip
         }
     ]
+
+scissorFor :: (Int, Int) -> Maybe FRect -> IRect
+scissorFor (targetWidth, targetHeight) maybeBounds =
+  IRect
+    (fromIntegral left)
+    (fromIntegral top)
+    (fromIntegral (max 0 (right - left)))
+    (fromIntegral (max 0 (bottom - top)))
+  where
+    FRect x y width height =
+      maybe (FRect 0 0 (fromIntegral targetWidth) (fromIntegral targetHeight)) normalizeClip maybeBounds
+    left = clamp 0 targetWidth (floor x)
+    top = clamp 0 targetHeight (floor y)
+    right = clamp 0 targetWidth (ceiling (x + width))
+    bottom = clamp 0 targetHeight (ceiling (y + height))
+    clamp lower upper = max lower . min upper
 
 data ResolvedDraw = ResolvedDraw
   { rdPrimitive :: SDL_GPUPrimitiveType

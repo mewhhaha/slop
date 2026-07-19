@@ -15,6 +15,7 @@ static const SlopABILayout slop_abi_layouts[] = {
     SLOP_ABI_LAYOUT(SDL_TextInputEvent),
     SLOP_ABI_LAYOUT(SDL_MouseWheelEvent),
     SLOP_ABI_LAYOUT(SDL_FPoint),
+    SLOP_ABI_LAYOUT(SDL_Rect),
     SLOP_ABI_LAYOUT(SDL_FRect),
     SLOP_ABI_LAYOUT(SDL_FColor),
     SLOP_ABI_LAYOUT(SDL_GPUTextureSamplerBinding),

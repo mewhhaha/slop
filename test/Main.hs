@@ -226,6 +226,7 @@ haskellLayouts =
   [ layoutOf @SDL.SDL_TextInputEvent "SDL_TextInputEvent"
   , layoutOf @SDL.SDL_MouseWheelEvent "SDL_MouseWheelEvent"
   , layoutOf @SDL.FPoint "SDL_FPoint"
+  , layoutOf @SDL.IRect "SDL_Rect"
   , layoutOf @SDL.FRect "SDL_FRect"
   , layoutOf @SDL.FColor "SDL_FColor"
   , layoutOf @SDL.GPUTextureSamplerBinding "SDL_GPUTextureSamplerBinding"

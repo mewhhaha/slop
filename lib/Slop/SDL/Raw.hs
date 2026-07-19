@@ -73,6 +73,7 @@ module Slop.SDL.Raw
   , SDL_TextInputEvent(..)
   , SDL_MouseWheelEvent(..)
   , FColor(..)
+  , IRect(..)
   , FRect(..)
   , FPoint(..)
   , GPUTextureSamplerBinding(..)
@@ -185,6 +186,7 @@ module Slop.SDL.Raw
   , sdlEndGPURenderPass
   , sdlBindGPUGraphicsPipeline
   , sdlSetGPUViewport
+  , sdlSetGPUScissor
   , sdlBindGPUVertexBuffers
   , sdlBindGPUFragmentSamplers
   , sdlBindGPUFragmentStorageTextures
@@ -899,6 +901,31 @@ instance Storable FColor where
     pokeByteOff ptr step g
     pokeByteOff ptr (2 * step) b
     pokeByteOff ptr (3 * step) a
+
+data IRect = IRect
+  { iRectX :: CInt
+  , iRectY :: CInt
+  , iRectW :: CInt
+  , iRectH :: CInt
+  }
+  deriving (Eq, Show)
+
+instance Storable IRect where
+  sizeOf _ = 4 * sizeOf (undefined :: CInt)
+  alignment _ = alignment (undefined :: CInt)
+  peek ptr = do
+    let step = sizeOf (undefined :: CInt)
+    x <- peekByteOff ptr 0
+    y <- peekByteOff ptr step
+    w <- peekByteOff ptr (2 * step)
+    h <- peekByteOff ptr (3 * step)
+    pure (IRect x y w h)
+  poke ptr (IRect x y w h) = do
+    let step = sizeOf (undefined :: CInt)
+    pokeByteOff ptr 0 x
+    pokeByteOff ptr step y
+    pokeByteOff ptr (2 * step) w
+    pokeByteOff ptr (3 * step) h
 
 
 data FRect = FRect
@@ -3067,6 +3094,9 @@ foreign import ccall unsafe "SDL_BindGPUGraphicsPipeline" c_SDL_BindGPUGraphicsP
 foreign import ccall unsafe "SDL_SetGPUViewport" c_SDL_SetGPUViewport
   :: Ptr SDL_GPURenderPass -> Ptr GPUViewport -> IO ()
 
+foreign import ccall unsafe "SDL_SetGPUScissor" c_SDL_SetGPUScissor
+  :: Ptr SDL_GPURenderPass -> Ptr IRect -> IO ()
+
 foreign import ccall unsafe "SDL_BindGPUVertexBuffers" c_SDL_BindGPUVertexBuffers
   :: Ptr SDL_GPURenderPass -> Word32 -> Ptr GPUBufferBinding -> Word32 -> IO ()
 
@@ -3267,6 +3297,10 @@ sdlBindGPUGraphicsPipeline (GPURenderPass pass) (GPUGraphicsPipeline pipeline) =
 sdlSetGPUViewport :: GPURenderPass -> GPUViewport -> IO ()
 sdlSetGPUViewport (GPURenderPass pass) viewport =
   with viewport $ \viewportPtr -> c_SDL_SetGPUViewport pass viewportPtr
+
+sdlSetGPUScissor :: GPURenderPass -> IRect -> IO ()
+sdlSetGPUScissor (GPURenderPass pass) scissor =
+  with scissor $ \scissorPtr -> c_SDL_SetGPUScissor pass scissorPtr
 
 sdlBindGPUVertexBuffers :: GPURenderPass -> Word32 -> [GPUBufferBinding] -> IO ()
 sdlBindGPUVertexBuffers (GPURenderPass pass) firstSlot bindings =

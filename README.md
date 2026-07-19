@@ -62,7 +62,8 @@ main = runWindow defaultConfig $ do
 
     clear (rgb 0.06 0.07 0.1)
     draw (basic2D cam) (Sprite texture Nothing (rect 80 120 160 160) Nothing)
-    draw basicUI (text font "Slop" 40 40)
+    clip (rect 32 32 240 80) $
+      draw basicUI (text font "Slop" 40 40)
 
     pure (Continue ())
 ```
@@ -77,6 +78,9 @@ main = runWindow defaultConfig $ do
 
 Call `screenshot "frame.png"` during a frame to save that frame after its
 recorded drawing commands have completed.
+
+Use `clip bounds action` to keep drawing inside target-pixel bounds. Nested
+clips intersect, so reusable components cannot escape a parent's viewport.
 
 `Slop` is the common window/input/2D/resource/audio façade. Advanced code opts into focused modules:
 

@@ -41,6 +41,7 @@ module Slop.Draw2D
   , patchTextBlend
   , applyTextStylePatch
   , Patch(..)
+  , clip
   , clear
   , setDrawColor
   , drawLine
