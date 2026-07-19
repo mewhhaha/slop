@@ -23,6 +23,7 @@ module Slop.Internal
   , logDebug
   , startTextInput
   , stopTextInput
+  , screenshot
   , loop
   , clear
   , setDrawColor
@@ -494,6 +495,7 @@ import Slop.SDL.Raw
   , sdlAcquireGPUCommandBuffer
   , sdlCancelGPUCommandBuffer
   , sdlSubmitGPUCommandBuffer
+  , sdlWaitForGPUIdle
   , sdlBeginGPURenderPass
   , sdlEndGPURenderPass
   , sdlBindGPUGraphicsPipeline
@@ -527,6 +529,8 @@ import Slop.SDL.Raw
   , sdlEndGPUCopyPass
   , sdlUploadToGPUTexture
   , sdlUploadToGPUBuffer
+  , sdlDownloadFromGPUTexture
+  , sdlGetPixelFormatFromGPUTextureFormat
   , sdlGetGPUTextureFormatFromPixelFormat
   , sdlCreateGPUShader
   , sdlCreateGPUSampler
@@ -582,6 +586,7 @@ import Slop.SDL.Raw
   , sdlGPUTextureUsageComputeStorageSimultaneousReadWrite
   , sdlGPUBufferUsageVertex
   , sdlGPUTransferBufferUsageUpload
+  , sdlGPUTransferBufferUsageDownload
   , sdlGPUPrimitiveTypeTriangleList
   , sdlGPUPrimitiveTypeLineList
   , sdlGPULoadOpLoad
@@ -602,6 +607,8 @@ import Slop.SDL.Raw
   , sdlGPUFrontFaceCounterClockwise
   , sdlGPUStencilOpKeep
   , imgLoadSurface
+  , imgSavePNG
+  , sdlCreateSurfaceFrom
   , sdlDestroySurface
   , sdlLockSurface
   , sdlUnlockSurface
@@ -713,6 +720,7 @@ data Window = Window
   , appDrawColor :: IORef Color
   , appDebugLog :: Bool
   , appGlobalsUniform :: IORef (Maybe ByteString)
+  , appScreenshotPaths :: IORef [FilePath]
   , appOwnedResources :: IORef OwnedResources
   }
 
@@ -1317,6 +1325,13 @@ stopTextInput = do
   unless ok $ do
     detail <- liftIO sdlGetError
     throwError (SDLFailure "SDL_StopTextInput" (T.pack detail))
+
+screenshot :: FilePath -> WindowM ()
+screenshot path
+  | null path = throwError (IOFailure "screenshot" "path" "expected a non-empty file path")
+  | otherwise = do
+      window <- ask
+      liftIO (modifyIORef' window.appScreenshotPaths (path :))
 
 -- Asset manager
 
@@ -3464,6 +3479,7 @@ runWindowIO cfg action = do
                           windowSize <- newIORef winSize
                           drawableSizeRef <- newIORef drawableSize
                           globalsUniform <- newIORef Nothing
+                          screenshotPaths <- newIORef []
                           ownedResources <- newIORef emptyOwnedResources
                           assetsWithoutWorkers <- newAssetManager
                           pipelines <- newIORef Map.empty
@@ -3499,6 +3515,7 @@ runWindowIO cfg action = do
                                 , appDrawColor = drawColor
                                 , appDebugLog = cfg.debugLog
                                 , appGlobalsUniform = globalsUniform
+                                , appScreenshotPaths = screenshotPaths
                                 , appOwnedResources = ownedResources
                                 }
                           workerCount <-
@@ -4158,71 +4175,126 @@ data PreparedDraw = PreparedDraw
 flushFrame :: Window -> IO ()
 flushFrame window = do
   ops <- drainRecording window.appFrameContext
-  unless (null ops) $ mask_ $ do
+  screenshotPaths <- atomicModifyIORef' window.appScreenshotPaths (\paths -> ([], reverse paths))
+  unless (null ops && null screenshotPaths) $ mask_ $ do
     cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
     (swapTex, w, h) <-
       require "SDL_WaitAndAcquireGPUSwapchainTexture" (sdlWaitAndAcquireGPUSwapchainTexture cmd window.appWindow)
         `onException` abandonGPUCommands CancelUnsubmittedGPUCommand cmd
     let size = (fromIntegral w, fromIntegral h)
-    flushOps window SubmitUnsubmittedGPUCommand cmd window.appSwapchainFormat swapTex size (ensureSwapchainDepthTarget window size) ops
+    flushOps window SubmitUnsubmittedGPUCommand cmd window.appSwapchainFormat swapTex size (ensureSwapchainDepthTarget window size) screenshotPaths ops
 
 flushTarget :: Window -> RenderTarget -> [RecordedOp] -> IO ()
 flushTarget window (RenderTarget tex) ops =
   unless (null ops) $ mask_ $ do
     cmd <- require "SDL_AcquireGPUCommandBuffer" (sdlAcquireGPUCommandBuffer window.appGPUDevice)
     let size = (tex.textureWidth, tex.textureHeight)
-    flushOps window CancelUnsubmittedGPUCommand cmd window.appSwapchainFormat tex.textureHandle size (ensureRenderTargetDepth window tex size) ops
+    flushOps window CancelUnsubmittedGPUCommand cmd window.appSwapchainFormat tex.textureHandle size (ensureRenderTargetDepth window tex size) [] ops
 
-flushOps :: Window -> UnsubmittedGPUCommand -> GPUCommandBuffer -> SDL_GPUTextureFormat -> GPUTexture -> (Int, Int) -> IO DepthTarget -> [RecordedOp] -> IO ()
-flushOps window unsubmitted cmd fmt targetTex (w, h) getDepth ops = mask_ $ do
+flushOps :: Window -> UnsubmittedGPUCommand -> GPUCommandBuffer -> SDL_GPUTextureFormat -> GPUTexture -> (Int, Int) -> IO DepthTarget -> [FilePath] -> [RecordedOp] -> IO ()
+flushOps window unsubmitted cmd fmt targetTex (w, h) getDepth screenshotPaths ops = mask_ $ do
   let (clearColor, drawOps) = extractClear ops
   prepared <- prepareDraws window fmt (w, h) drawOps
     `onException` abandonGPUCommands unsubmitted cmd
-  flip finally (mapM_ (releasePrepared window) prepared) $
-    runGPUCommands unsubmitted cmd $ do
-      unless (null prepared) $ do
-        copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
-        flip finally (sdlEndGPUCopyPass copyPass) $
-          mapM_ (uploadPrepared cmd copyPass) prepared
-      let needsDepth = any (\pd -> pd.pdDepthMode /= DepthNone) prepared
-      depthInfo <- if needsDepth
-        then do
-          depthTarget <- getDepth
-          let GPUTexture depthPtr = depthTarget.depthTexture.textureHandle
-          pure (Just GPUDepthStencilTargetInfo
-            { gpuDepthStencilTexture = depthPtr
-            , gpuDepthStencilClearDepth = 1
-            , gpuDepthStencilLoadOp = sdlGPULoadOpClear
-            , gpuDepthStencilStoreOp = sdlGPUStoreOpStore
-            , gpuDepthStencilStencilLoadOp = sdlGPULoadOpClear
-            , gpuDepthStencilStencilStoreOp = sdlGPUStoreOpStore
-            , gpuDepthStencilCycle = 0
-            , gpuDepthStencilClearStencil = 0
-            , gpuDepthStencilMipLevel = 0
-            , gpuDepthStencilLayer = 0
-            })
-        else pure Nothing
-      let clearF = maybe (FColor 0 0 0 0) toFColor clearColor
-      let loadOp = if clearColor == Nothing then sdlGPULoadOpLoad else sdlGPULoadOpClear
-      let targetInfo = GPUColorTargetInfo
-            { gpuColorTargetTexture = let GPUTexture ptr = targetTex in ptr
-            , gpuColorTargetMipLevel = 0
-            , gpuColorTargetLayer = 0
-            , gpuColorTargetClearColor = clearF
-            , gpuColorTargetLoadOp = loadOp
-            , gpuColorTargetStoreOp = sdlGPUStoreOpStore
-            , gpuColorTargetResolveTexture = nullPtr
-            , gpuColorTargetResolveMipLevel = 0
-            , gpuColorTargetResolveLayer = 0
-            , gpuColorTargetCycle = 0
-            , gpuColorTargetCycleResolve = 0
-            , gpuColorTargetPadding1 = 0
-            , gpuColorTargetPadding2 = 0
-            }
-      renderPass <- require "SDL_BeginGPURenderPass" (sdlBeginGPURenderPass cmd targetInfo depthInfo)
-      flip finally (sdlEndGPURenderPass renderPass) $ do
-        sdlSetGPUViewport renderPass (GPUViewport 0 0 (fromIntegral w) (fromIntegral h) 0 1)
-        mapM_ (executePrepared cmd renderPass) prepared
+  screenshotTransfer <- (if null screenshotPaths
+    then pure Nothing
+    else do
+      let byteCount = toInteger w * toInteger h * 4
+      when (byteCount > toInteger (maxBound :: Word32)) $
+        throwIO (IOFailure "screenshot" "frame size" ("requires " <> showText byteCount <> " bytes, maximum is " <> showText (maxBound :: Word32)))
+      Just <$> require "SDL_CreateGPUTransferBuffer"
+        (sdlCreateGPUTransferBuffer window.appGPUDevice GPUTransferBufferCreateInfo
+          { gpuTransferUsage = sdlGPUTransferBufferUsageDownload
+          , gpuTransferSize = fromIntegral byteCount
+          , gpuTransferProps = 0
+          })) `onException` do
+            mapM_ (releasePrepared window) prepared
+            abandonGPUCommands unsubmitted cmd
+  let releaseScreenshotTransfer = mapM_ (sdlReleaseGPUTransferBuffer window.appGPUDevice) screenshotTransfer
+  flip finally releaseScreenshotTransfer $
+    flip finally (mapM_ (releasePrepared window) prepared) $ do
+      runGPUCommands unsubmitted cmd $ do
+        unless (null prepared) $ do
+          copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
+          flip finally (sdlEndGPUCopyPass copyPass) $
+            mapM_ (uploadPrepared cmd copyPass) prepared
+        let needsDepth = any (\pd -> pd.pdDepthMode /= DepthNone) prepared
+        depthInfo <- if needsDepth
+          then do
+            depthTarget <- getDepth
+            let GPUTexture depthPtr = depthTarget.depthTexture.textureHandle
+            pure (Just GPUDepthStencilTargetInfo
+              { gpuDepthStencilTexture = depthPtr
+              , gpuDepthStencilClearDepth = 1
+              , gpuDepthStencilLoadOp = sdlGPULoadOpClear
+              , gpuDepthStencilStoreOp = sdlGPUStoreOpStore
+              , gpuDepthStencilStencilLoadOp = sdlGPULoadOpClear
+              , gpuDepthStencilStencilStoreOp = sdlGPUStoreOpStore
+              , gpuDepthStencilCycle = 0
+              , gpuDepthStencilClearStencil = 0
+              , gpuDepthStencilMipLevel = 0
+              , gpuDepthStencilLayer = 0
+              })
+          else pure Nothing
+        let clearF = maybe (FColor 0 0 0 0) toFColor clearColor
+        let loadOp = if clearColor == Nothing then sdlGPULoadOpLoad else sdlGPULoadOpClear
+        let targetInfo = GPUColorTargetInfo
+              { gpuColorTargetTexture = let GPUTexture ptr = targetTex in ptr
+              , gpuColorTargetMipLevel = 0
+              , gpuColorTargetLayer = 0
+              , gpuColorTargetClearColor = clearF
+              , gpuColorTargetLoadOp = loadOp
+              , gpuColorTargetStoreOp = sdlGPUStoreOpStore
+              , gpuColorTargetResolveTexture = nullPtr
+              , gpuColorTargetResolveMipLevel = 0
+              , gpuColorTargetResolveLayer = 0
+              , gpuColorTargetCycle = 0
+              , gpuColorTargetCycleResolve = 0
+              , gpuColorTargetPadding1 = 0
+              , gpuColorTargetPadding2 = 0
+              }
+        renderPass <- require "SDL_BeginGPURenderPass" (sdlBeginGPURenderPass cmd targetInfo depthInfo)
+        flip finally (sdlEndGPURenderPass renderPass) $ do
+          sdlSetGPUViewport renderPass (GPUViewport 0 0 (fromIntegral w) (fromIntegral h) 0 1)
+          mapM_ (executePrepared cmd renderPass) prepared
+        forM_ screenshotTransfer $ \transfer -> do
+          copyPass <- require "SDL_BeginGPUCopyPass" (sdlBeginGPUCopyPass cmd)
+          flip finally (sdlEndGPUCopyPass copyPass) $
+            sdlDownloadFromGPUTexture
+              copyPass
+              GPUTextureRegion
+                { gpuTextureRegionTexture = targetTex
+                , gpuTextureRegionMipLevel = 0
+                , gpuTextureRegionLayer = 0
+                , gpuTextureRegionX = 0
+                , gpuTextureRegionY = 0
+                , gpuTextureRegionZ = 0
+                , gpuTextureRegionW = fromIntegral w
+                , gpuTextureRegionH = fromIntegral h
+                , gpuTextureRegionD = 1
+                }
+              GPUTextureTransferInfo
+                { gpuTransferBuffer = transfer
+                , gpuTransferOffset = 0
+                , gpuTransferPixelsPerRow = fromIntegral w
+                , gpuTransferRowsPerLayer = fromIntegral h
+                }
+      forM_ screenshotTransfer $ \transfer -> do
+        waited <- sdlWaitForGPUIdle window.appGPUDevice
+        unless waited $ do
+          detail <- sdlGetError
+          throwIO (SDLFailure "SDL_WaitForGPUIdle" (T.pack detail))
+        pixels <- require "SDL_MapGPUTransferBuffer" (sdlMapGPUTransferBuffer window.appGPUDevice transfer False)
+        flip finally (sdlUnmapGPUTransferBuffer window.appGPUDevice transfer) $ do
+          pixelFormat <- sdlGetPixelFormatFromGPUTextureFormat fmt
+          bracket
+            (require "SDL_CreateSurfaceFrom" (sdlCreateSurfaceFrom w h pixelFormat pixels (w * 4)))
+            sdlDestroySurface
+            (\surface -> forM_ screenshotPaths $ \path -> do
+              saved <- imgSavePNG surface path
+              unless saved $ do
+                detail <- sdlGetError
+                throwIO (IOFailure "IMG_SavePNG" (T.pack path) (T.pack detail)))
 
 uploadPrepared :: GPUCommandBuffer -> GPUCopyPass -> PreparedDraw -> IO ()
 uploadPrepared _ copyPass prepared =

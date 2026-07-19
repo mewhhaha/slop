@@ -16,6 +16,7 @@ module Slop.Window
   , logDebug
   , startTextInput
   , stopTextInput
+  , screenshot
   , Error(..)
   , Result
   , renderError

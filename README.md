@@ -12,6 +12,7 @@ and SDL3_mixer audio pools + crossfades.
 - Custom graphics + compute pipelines when you need them.
 - SDL_ttf TextEngine support + automatic per-frame text caching.
 - Keycode-based input with just-pressed/just-released.
+- PNG screenshots of the next presented frame.
 - Async asset manager with hot reload on by default.
 - SDL3_mixer pools (round-robin, oldest, priority, blend/crossfade).
 - Spirdo demo integration (WESL -> SPIR-V). The library itself does not depend on Spirdo.
@@ -73,6 +74,9 @@ main = runWindow defaultConfig $ do
   - `frame.size` = logical window size.
   - `frame.renderSize` = swapchain/drawable pixel size (use this for rendering).
   - `frame.dpiScale` = `renderSize / size` as a `V2 Float`.
+
+Call `screenshot "frame.png"` during a frame to save that frame after its
+recorded drawing commands have completed.
 
 `Slop` is the common window/input/2D/resource/audio façade. Advanced code opts into focused modules:
 

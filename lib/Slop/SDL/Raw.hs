@@ -143,6 +143,7 @@ module Slop.SDL.Raw
   , sdlGPUBufferUsageComputeStorageRead
   , sdlGPUBufferUsageComputeStorageWrite
   , sdlGPUTransferBufferUsageUpload
+  , sdlGPUTransferBufferUsageDownload
   , sdlGPUPrimitiveTypeTriangleList
   , sdlGPUPrimitiveTypeLineList
   , sdlGPULoadOpLoad
@@ -179,6 +180,7 @@ module Slop.SDL.Raw
   , sdlAcquireGPUCommandBuffer
   , sdlCancelGPUCommandBuffer
   , sdlSubmitGPUCommandBuffer
+  , sdlWaitForGPUIdle
   , sdlBeginGPURenderPass
   , sdlEndGPURenderPass
   , sdlBindGPUGraphicsPipeline
@@ -213,6 +215,8 @@ module Slop.SDL.Raw
   , sdlEndGPUCopyPass
   , sdlUploadToGPUTexture
   , sdlUploadToGPUBuffer
+  , sdlDownloadFromGPUTexture
+  , sdlGetPixelFormatFromGPUTextureFormat
   , sdlGetGPUTextureFormatFromPixelFormat
   , sdlCreateGPURenderer
   , sdlDestroyRenderer
@@ -252,6 +256,8 @@ module Slop.SDL.Raw
   , sdlGetTicks
   , imgLoadTexture
   , imgLoadSurface
+  , imgSavePNG
+  , sdlCreateSurfaceFrom
   , sdlDestroyTexture
   , sdlDestroySurface
   , sdlLockSurface
@@ -529,6 +535,9 @@ sdlGPUBufferUsageComputeStorageWrite = 1 `shiftL` 5
 
 sdlGPUTransferBufferUsageUpload :: SDL_GPUTransferBufferUsage
 sdlGPUTransferBufferUsageUpload = 0
+
+sdlGPUTransferBufferUsageDownload :: SDL_GPUTransferBufferUsage
+sdlGPUTransferBufferUsageDownload = 1
 
 sdlGPUPrimitiveTypeTriangleList :: SDL_GPUPrimitiveType
 sdlGPUPrimitiveTypeTriangleList = 0
@@ -3014,6 +3023,9 @@ foreign import ccall unsafe "SDL_CancelGPUCommandBuffer" c_SDL_CancelGPUCommandB
 foreign import ccall unsafe "SDL_SubmitGPUCommandBuffer" c_SDL_SubmitGPUCommandBuffer
   :: Ptr SDL_GPUCommandBuffer -> IO CBool
 
+foreign import ccall safe "SDL_WaitForGPUIdle" c_SDL_WaitForGPUIdle
+  :: Ptr SDL_GPUDevice -> IO CBool
+
 foreign import ccall unsafe "SDL_WaitAndAcquireGPUSwapchainTexture" c_SDL_WaitAndAcquireGPUSwapchainTexture
   :: Ptr SDL_GPUCommandBuffer -> Ptr SDL_Window -> Ptr (Ptr SDL_GPUTexture) -> Ptr Word32 -> Ptr Word32 -> IO CBool
 
@@ -3124,8 +3136,14 @@ foreign import ccall unsafe "SDL_UploadToGPUTexture" c_SDL_UploadToGPUTexture
 foreign import ccall unsafe "SDL_UploadToGPUBuffer" c_SDL_UploadToGPUBuffer
   :: Ptr SDL_GPUCopyPass -> Ptr GPUTransferBufferLocation -> Ptr GPUBufferRegion -> CBool -> IO ()
 
+foreign import ccall unsafe "SDL_DownloadFromGPUTexture" c_SDL_DownloadFromGPUTexture
+  :: Ptr SDL_GPUCopyPass -> Ptr GPUTextureRegion -> Ptr GPUTextureTransferInfo -> IO ()
+
 foreign import ccall unsafe "SDL_GetGPUTextureFormatFromPixelFormat" c_SDL_GetGPUTextureFormatFromPixelFormat
   :: SDL_PixelFormat -> IO SDL_GPUTextureFormat
+
+foreign import ccall unsafe "SDL_GetPixelFormatFromGPUTextureFormat" c_SDL_GetPixelFormatFromGPUTextureFormat
+  :: SDL_GPUTextureFormat -> IO SDL_PixelFormat
 
 sdlCreateGPUDevice :: SDL_GPUShaderFormat -> Bool -> IO (Maybe GPUDevice)
 sdlCreateGPUDevice formats debugMode = do
@@ -3159,6 +3177,10 @@ sdlCancelGPUCommandBuffer (GPUCommandBuffer cmd) =
 sdlSubmitGPUCommandBuffer :: GPUCommandBuffer -> IO Bool
 sdlSubmitGPUCommandBuffer (GPUCommandBuffer cmd) =
   fromCBool <$> c_SDL_SubmitGPUCommandBuffer cmd
+
+sdlWaitForGPUIdle :: GPUDevice -> IO Bool
+sdlWaitForGPUIdle (GPUDevice device) =
+  fromCBool <$> c_SDL_WaitForGPUIdle device
 
 sdlWaitAndAcquireGPUSwapchainTexture :: GPUCommandBuffer -> Window -> IO (Maybe (GPUTexture, Word32, Word32))
 sdlWaitAndAcquireGPUSwapchainTexture (GPUCommandBuffer cmd) (Window win) =
@@ -3365,6 +3387,15 @@ sdlUploadToGPUBuffer (GPUCopyPass pass) source dest cycleBuf =
   with source $ \srcPtr ->
     with dest $ \dstPtr ->
       c_SDL_UploadToGPUBuffer pass srcPtr dstPtr (if cycleBuf then 1 else 0)
+
+sdlDownloadFromGPUTexture :: GPUCopyPass -> GPUTextureRegion -> GPUTextureTransferInfo -> IO ()
+sdlDownloadFromGPUTexture (GPUCopyPass pass) source destination =
+  with source $ \sourcePointer ->
+    with destination $ \destinationPointer ->
+      c_SDL_DownloadFromGPUTexture pass sourcePointer destinationPointer
+
+sdlGetPixelFormatFromGPUTextureFormat :: SDL_GPUTextureFormat -> IO SDL_PixelFormat
+sdlGetPixelFormatFromGPUTextureFormat = c_SDL_GetPixelFormatFromGPUTextureFormat
 
 sdlGetGPUTextureFormatFromPixelFormat :: SDL_PixelFormat -> IO SDL_GPUTextureFormat
 sdlGetGPUTextureFormatFromPixelFormat fmt =
@@ -3618,6 +3649,26 @@ imgLoadSurface path =
   withCString path $ \cPath -> do
     ptr <- c_IMG_Load cPath
     pure $ if ptr == nullPtr then Nothing else Just (Surface ptr)
+
+foreign import ccall unsafe "IMG_SavePNG" c_IMG_SavePNG
+  :: Ptr SDL_Surface -> CString -> IO CBool
+
+imgSavePNG :: Surface -> FilePath -> IO Bool
+imgSavePNG (Surface surface) path =
+  withCString path $ \cPath -> fromCBool <$> c_IMG_SavePNG surface cPath
+
+foreign import ccall unsafe "SDL_CreateSurfaceFrom" c_SDL_CreateSurfaceFrom
+  :: CInt -> CInt -> SDL_PixelFormat -> Ptr () -> CInt -> IO (Ptr SDL_Surface)
+
+sdlCreateSurfaceFrom :: Int -> Int -> SDL_PixelFormat -> Ptr () -> Int -> IO (Maybe Surface)
+sdlCreateSurfaceFrom width height format pixels pitch = do
+  surface <- c_SDL_CreateSurfaceFrom
+    (fromIntegral width)
+    (fromIntegral height)
+    format
+    pixels
+    (fromIntegral pitch)
+  pure $ if surface == nullPtr then Nothing else Just (Surface surface)
 
 foreign import ccall unsafe "SDL_DestroySurface" c_SDL_DestroySurface
   :: Ptr SDL_Surface -> IO ()
