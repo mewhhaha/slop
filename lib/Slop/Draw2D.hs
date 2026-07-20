@@ -8,6 +8,11 @@ module Slop.Draw2D
   , camera2DWindow
   , camera2DScreen
   , camera2DMatrix
+  , followCamera2D
+  , clampCamera2D
+  , shakeCamera2D
+  , worldToScreen
+  , screenToWorld
   , Draw(..)
   , As2D(..)
   , basic2D

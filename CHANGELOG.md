@@ -40,3 +40,5 @@
 * Verify every hand-written SDL struct binding against native header sizes and alignments in the test suite.
 * Include the demo's font, texture, audio, and asset-license files in source distributions.
 * Document the purpose of each public module and the layout contracts of the foundational math and generic `Storable` APIs.
+* Add pure 2D camera following, clamping, authored shake, and reversible
+  world/screen coordinate conversion.

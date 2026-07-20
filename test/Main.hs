@@ -1,6 +1,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE TypeApplications #-}
 
 module Main (main) where
@@ -23,6 +24,7 @@ main = do
   drawContextRetainsCameraWhenEffectIsAdded
   invalidConfigFailsBeforeSDLInitialization
   advancedCameraIsAvailableFromGPU
+  camera2DBehaviorIsPureAndReversible
   cameraViewMovesTheEyeToTheOrigin
   cameraViewPlacesTheTargetAtPositiveDepth
   perspectiveMapsTheDepthRangeToSDLClipSpace
@@ -85,6 +87,29 @@ advancedCameraIsAvailableFromGPU :: IO ()
 advancedCameraIsAvailableFromGPU = do
   let camera = camera3D (V3 0 0 5) (V3 0 0 0) (V3 0 1 0) (pi / 3) (16 / 9) 0.1 100
   camera `seq` pure ()
+
+camera2DBehaviorIsPureAndReversible :: IO ()
+camera2DBehaviorIsPureAndReversible = do
+  let camera = camera2D (V2 320 180) 1 (640, 360)
+      followed = followCamera2D 8 0.1 (V2 420 180) camera
+      clamped = clampCamera2D (640, 360) (rect 0 0 800 600) (camera { camera2DPosition = V2 900 (-20) })
+      shaken = shakeCamera2D (V2 4 (-3)) camera
+      worldPoint = V2 400 210
+      screenPoint = worldToScreen (640, 360) camera worldPoint
+  case screenToWorld (640, 360) camera screenPoint of
+    Nothing -> fail "invertible 2D camera rejected screen-to-world conversion"
+    Just restored -> assertV2Near "2D camera coordinate round trip" worldPoint restored
+  assertEqual "camera following advances toward its target" True (followed.camera2DPosition /= camera.camera2DPosition)
+  assertEqual
+    "invalid camera response leaves the camera unchanged"
+    camera
+    (followCamera2D (0 / 0) 0.1 (V2 420 180) camera)
+  assertEqual "camera bounds retain the visible viewport" (V2 480 180) clamped.camera2DPosition
+  assertEqual "camera shake adds an authored offset" (V2 324 177) shaken.camera2DPosition
+  assertEqual
+    "empty render sizes cannot be converted to world coordinates"
+    Nothing
+    (screenToWorld (0, 360) camera screenPoint)
 
 cameraViewMovesTheEyeToTheOrigin :: IO ()
 cameraViewMovesTheEyeToTheOrigin = do
@@ -289,6 +314,11 @@ assertV3Near label (V3 expectedX expectedY expectedZ) (V3 actualX actualY actual
   assertNear (label <> " x") expectedX actualX
   assertNear (label <> " y") expectedY actualY
   assertNear (label <> " z") expectedZ actualZ
+
+assertV2Near :: String -> V2 Float -> V2 Float -> IO ()
+assertV2Near label (V2 expectedX expectedY) (V2 actualX actualY) = do
+  assertNear (label <> " x") expectedX actualX
+  assertNear (label <> " y") expectedY actualY
 
 assertNear :: String -> Float -> Float -> IO ()
 assertNear label expected actual =

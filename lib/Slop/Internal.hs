@@ -213,6 +213,11 @@ module Slop.Internal
   , camera2DScreen
   , Camera2D(..)
   , camera2DMatrix
+  , followCamera2D
+  , clampCamera2D
+  , shakeCamera2D
+  , worldToScreen
+  , screenToWorld
   , camera3D
   , Camera3D(..)
   , camera3DView
@@ -2906,6 +2911,88 @@ camera2DMatrix size cam =
              0 0 1 0
              0 0 0 1
   in proj * (rotZ * (scaleMat * view))
+
+-- | Move toward a target with frame-rate-independent exponential smoothing.
+-- A non-positive response snaps immediately, while invalid input leaves the
+-- camera unchanged.
+followCamera2D :: Float -> Float -> V2 Float -> Camera2D -> Camera2D
+followCamera2D response elapsed target@(V2 targetX targetY) camera
+  | any invalid [response, elapsed, targetX, targetY] = camera
+  | elapsed <= 0 = camera
+  | response <= 0 =
+      camera { camera2DPosition = target }
+  | otherwise =
+      camera
+        { camera2DPosition = current + V2 progress progress * (target - current)
+        }
+  where
+    current = camera.camera2DPosition
+    progress = 1 - exp (-(response * elapsed))
+    invalid value = isNaN value || isInfinite value
+
+-- | Keep the camera center inside world bounds. Bounds narrower than the
+-- visible viewport center the camera on that axis.
+clampCamera2D :: (Int, Int) -> FRect -> Camera2D -> Camera2D
+clampCamera2D windowSize (FRect x y width height) camera =
+  camera { camera2DPosition = V2 clampedX clampedY }
+  where
+    V2 currentX currentY = camera.camera2DPosition
+    (viewportWidth, viewportHeight) = cameraViewport windowSize camera
+    zoom = max 0.000001 (abs camera.camera2DZoom)
+    halfWidth = viewportWidth / (2 * zoom)
+    halfHeight = viewportHeight / (2 * zoom)
+    clampedX = clampCenter (realToFrac x) (realToFrac width) halfWidth currentX
+    clampedY = clampCenter (realToFrac y) (realToFrac height) halfHeight currentY
+
+-- | Apply an application-authored shake sample without retaining randomness
+-- or time inside the renderer.
+shakeCamera2D :: V2 Float -> Camera2D -> Camera2D
+shakeCamera2D offset camera =
+  camera { camera2DPosition = camera.camera2DPosition + offset }
+
+-- | Transform a world point into drawable-pixel coordinates.
+worldToScreen :: (Int, Int) -> Camera2D -> V2 Float -> V2 Float
+worldToScreen size camera (V2 worldX worldY) =
+  V2
+    ((normalizedX + 1) * fromIntegral width / 2)
+    ((1 - normalizedY) * fromIntegral height / 2)
+  where
+    (width, height) = size
+    V3 normalizedX normalizedY _ =
+      transformPoint (camera2DMatrix size camera) (V3 worldX worldY 0)
+
+-- | Transform drawable-pixel coordinates back into world coordinates.
+screenToWorld :: (Int, Int) -> Camera2D -> V2 Float -> Maybe (V2 Float)
+screenToWorld size camera (V2 screenX screenY)
+  | width <= 0 || height <= 0 = Nothing
+  | any invalid [determinant, normalizedX, normalizedY] = Nothing
+  | determinant == 0 = Nothing
+  | otherwise = Just (V2 worldX worldY)
+  where
+    (width, height) = size
+    normalizedX = 2 * screenX / fromIntegral width - 1
+    normalizedY = 1 - 2 * screenY / fromIntegral height
+    M44 m00 m01 _ m03
+        m10 m11 _ m13
+        _ _ _ _
+        _ _ _ _ = camera2DMatrix size camera
+    determinant = m00 * m11 - m01 * m10
+    translatedX = normalizedX - m03
+    translatedY = normalizedY - m13
+    worldX = (translatedX * m11 - m01 * translatedY) / determinant
+    worldY = (m00 * translatedY - translatedX * m10) / determinant
+    invalid value = isNaN value || isInfinite value
+
+cameraViewport :: (Int, Int) -> Camera2D -> (Float, Float)
+cameraViewport (windowWidth, windowHeight) camera =
+  case camera.camera2DViewport of
+    Just viewport -> viewport
+    Nothing -> (fromIntegral windowWidth, fromIntegral windowHeight)
+
+clampCenter :: Float -> Float -> Float -> Float -> Float
+clampCenter start extent halfVisible current
+  | extent <= 2 * halfVisible = start + extent / 2
+  | otherwise = max (start + halfVisible) (min (start + extent - halfVisible) current)
 
 data Camera3D = Camera3D
   { camera3DEye :: V3 Float

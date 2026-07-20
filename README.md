@@ -211,6 +211,12 @@ let cam = camera2D (V2 320 180) 1 (640, 360)
 draw (basic2D cam) (RectOutline (rgb 0.2 0.8 0.9) (rect 100 100 120 80))
 ```
 
+Camera behavior remains ordinary immutable state. `followCamera2D` applies
+frame-rate-independent smoothing, `clampCamera2D` keeps the visible area inside
+world bounds, and `shakeCamera2D` applies an authored offset. `worldToScreen`
+and `screenToWorld` share the renderer's camera transform for picking and
+world-space UI.
+
 ### 3D camera helpers
 
 ```haskell
